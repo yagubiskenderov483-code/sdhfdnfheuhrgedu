@@ -23,7 +23,7 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart, Filter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from telethon import TelegramClient, errors
 
 from config import DATA_DIR, RUNTIME_KEYS, reload_settings, set_runtime_value, settings
@@ -145,13 +145,39 @@ def build_routers(app: "App") -> list[Router]:
     @public.message(CommandStart())
     async def cmd_start(m: Message) -> None:
         if m.from_user and is_allowed(m.from_user.id):
-            await m.answer(HELP if m.from_user.id in all_admins() else USER_HELP)
+            await m.answer((HELP if m.from_user.id in all_admins() else USER_HELP)
+                           + f"\n\nВаш Telegram ID: <code>{m.from_user.id}</code>")
             if not app.sessions.usable():
                 await m.answer("⚠️ Нет ни одного авторизованного аккаунта — трекер не работает.\n"
                                "Нажмите /add_session: нужен только номер телефона и код.")
         else:
             await m.answer(f"Ваш Telegram ID: <code>{m.from_user.id if m.from_user else '?'}</code>\n"
                            "Доступ только для администраторов.")
+
+    @public.callback_query(F.data.startswith("take:"))
+    async def cb_take(q: CallbackQuery) -> None:
+        """Кнопка «✓ Занять» под постом: первый нажавший забирает лот."""
+        msg = q.message
+        kb = getattr(msg, "reply_markup", None)
+        if not kb or not kb.inline_keyboard:
+            await q.answer()
+            return
+        first = kb.inline_keyboard[0][0]
+        if not first.text.startswith("✓"):
+            await q.answer(f"Лот уже {first.text.lstrip('✅ ').lower()}", show_alert=True)
+            return
+        u = q.from_user
+        who = f"@{u.username}" if u.username else (u.full_name or str(u.id))
+        rows = [[InlineKeyboardButton(text=f"✅ Занял {who}", callback_data="taken")]] + kb.inline_keyboard[1:]
+        try:
+            await msg.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        except Exception:
+            pass
+        await q.answer("Лот ваш ✅")
+
+    @public.callback_query(F.data == "taken")
+    async def cb_taken(q: CallbackQuery) -> None:
+        await q.answer("Лот уже занят", show_alert=True)
 
     @public.message(Command("claim"))
     async def cmd_claim(m: Message, command: CommandObject) -> None:
@@ -233,6 +259,8 @@ def build_routers(app: "App") -> list[Router]:
             await m.answer("Использование: /remove_session session_023")
             return
         ok = await app.sessions.remove(name)
+        if ok:
+            await app.backup.save()
         await m.answer(f"{'✅ Удалена' if ok else '❌ Не найдена'}: {html.escape(name)}"
                        + ("\n(файл перенесён в telegram_sessions/removed/)" if ok else ""))
 
@@ -261,7 +289,8 @@ def build_routers(app: "App") -> list[Router]:
                  "<b>С запуска:</b>",
                  f"Новых: {p['new']} | отправлено: {p['sent']}",
                  f"Отсеяно по цене: {p['filtered_price']} | по продавцу: {p['filtered_seller']}",
-                 f"Дубликатов: {p['duplicates']} | ошибок отправки: {p['failed']}", "",
+                 f"Повтор NFT/продавца: {p['filtered_repeat']} | дубликатов: {p['duplicates']}",
+                 f"Ошибок отправки: {p['failed']}", "",
                  "<b>Всего в БД:</b>"]
         lines += [f"{k}: {v}" for k, v in sorted(counts.items())] or ["—"]
         lines += ["", "<b>За 24 часа:</b>"]
@@ -414,9 +443,12 @@ def build_routers(app: "App") -> list[Router]:
         rec = SessionRecord(p["name"], app.storage.session_path(p["name"]), p["api_id"], p["api_hash"])
         w = await app.sessions.add_record(rec)
         log.info("Session %s added via bot (user id %s)", p["name"], getattr(me, "id", "?"))
+        saved = await app.backup.save()
         await m.answer(f"✅ Session <b>{p['name']}</b> добавлена\n"
                        f"Аккаунт ID: <code>{getattr(me, 'id', '?')}</code>\n"
-                       f"Статус: {w.status.value}")
+                       f"Статус: {w.status.value}\n"
+                       + ("💾 Сохранено в резервную копию — аккаунт не пропадёт после деплоя"
+                          if saved else "⚠️ Резервная копия не сохранена (нужны SESSION_BACKUP_KEY и админ)"))
 
     @users.message(AddSession.code, F.text)
     async def add_code(m: Message, state: FSMContext) -> None:

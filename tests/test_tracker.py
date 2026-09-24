@@ -69,7 +69,7 @@ class FakeSender:
     def __init__(self):
         self.sent: list[str] = []
 
-    async def send_listing(self, text, preview_url):
+    async def send_listing(self, text, preview_url, markup=None, fallback_markup=None):
         from bot.sender import SendResult
         self.sent.append(text)
         return SendResult(True, len(self.sent))
@@ -81,6 +81,8 @@ async def run() -> None:
         settings.min_stars = 5000
         settings.russian_only = True
         settings.unknown_seller_policy = "allow"
+        settings.unique_gifts = False
+        settings.unique_sellers = False
         settings.fetch_full_seller = False
         settings.test_mode = False
         settings.page_limit = 3            # маленькая страница, чтобы проверить пагинацию всплеска
@@ -173,6 +175,23 @@ async def run() -> None:
         assert pipe.stats["new"] == 3, pipe.stats
         assert len(sender2.sent) == 2
         print("✔ восстановление после рестарта: 3 пропущенных лота найдены, 2 отправлено, старые не повторены")
+
+        # повторы: тот же продавец / тот же NFT больше не отправляются
+        settings.unique_gifts = True
+        settings.unique_sellers = True
+        before = len(sender2.sent)
+        g1 = market.item(9000, seller=424242)
+        g2 = market.item(9000, seller=424242)       # тот же продавец → повтор
+        market.list_new(g1); market.list_new(g2)
+        await poll(coord, pipe)
+        assert len(sender2.sent) == before + 1, (before, len(sender2.sent))
+        market.sell(g1.unique_id)
+        g1b = ResaleItem(**{**g1.__dict__, "seller_key": "u777", "owner_id": 777})  # тот же NFT, другой продавец
+        market.list_new(g1b)
+        await poll(coord, pipe)
+        assert len(sender2.sent) == before + 1
+        assert pipe.stats["filtered_repeat"] == 2, pipe.stats
+        print("✔ повторы: тот же продавец и тот же NFT второй раз не отправляются")
 
         print("\n--- пример сообщения ---\n" + sender.sent[0])
         await coord.stop()

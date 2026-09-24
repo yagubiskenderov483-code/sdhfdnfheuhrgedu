@@ -74,7 +74,10 @@ class Settings:
 
     # --- фильтр продавца ---
     russian_only: bool = True
-    unknown_seller_policy: str = "allow"      # allow | block
+    unknown_seller_policy: str = "block"      # allow | block
+    unique_gifts: bool = True                 # один и тот же NFT не отправлять повторно
+    unique_sellers: bool = True               # одного и того же продавца не отправлять повторно
+    seller_repeat_hours: float = 0.0          # 0 = никогда не повторять продавца
     seller_phone_prefixes: list[str] = field(default_factory=lambda: ["7"])
 
     # --- трекер ---
@@ -106,6 +109,9 @@ class Settings:
 
     # --- прочее ---
     ton_label: str = "TON"
+    timezone: str = "Europe/Moscow"
+    session_backup_key: str = ""
+    sessions_backup_chat_id: int = 0
     database_path: str = "data/tracker.db"
     sessions_dir: str = "telegram_sessions"
     template_path: str = "templates/listing.html"
@@ -122,7 +128,7 @@ class Settings:
 
     def public_view(self) -> dict[str, Any]:
         """Настройки без секретов — для /settings."""
-        hidden = {"api_hash", "bot_token"}
+        hidden = {"api_hash", "bot_token", "session_backup_key"}
         out = {}
         for f in fields(self):
             if f.name in hidden:
@@ -133,7 +139,7 @@ class Settings:
         return out
 
     def secrets(self) -> list[str]:
-        return [s for s in (self.api_hash, self.bot_token) if s]
+        return [s for s in (self.api_hash, self.bot_token, self.session_backup_key) if s]
 
 
 # Ключи, которые можно менять из бота командой /set KEY VALUE
@@ -150,6 +156,9 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "GLOBAL_RPS": ("global_rps", lambda v: max(0.0, float(v))),
     "MAX_CONCURRENT_SESSIONS": ("max_concurrent_sessions", lambda v: max(1, int(v))),
     "TEST_MODE": ("test_mode", lambda v: _bool(v, False)),
+    "UNIQUE_GIFTS": ("unique_gifts", lambda v: _bool(v, True)),
+    "UNIQUE_SELLERS": ("unique_sellers", lambda v: _bool(v, True)),
+    "SELLER_REPEAT_HOURS": ("seller_repeat_hours", lambda v: max(0.0, float(v))),
     "ALLOW_ALL_USERS": ("allow_all_users", lambda v: _bool(v, True)),
     "FETCH_FULL_SELLER": ("fetch_full_seller", lambda v: _bool(v, True)),
 }
@@ -169,7 +178,10 @@ def _from_env() -> Settings:
         min_ton=_float(e("MIN_TON"), 0.0),
         allow_ton_only=_bool(e("ALLOW_TON_ONLY"), False),
         russian_only=_bool(e("RUSSIAN_ONLY"), True),
-        unknown_seller_policy=(e("UNKNOWN_SELLER_POLICY") or "allow").strip().lower(),
+        unknown_seller_policy=(e("UNKNOWN_SELLER_POLICY") or "block").strip().lower(),
+        unique_gifts=_bool(e("UNIQUE_GIFTS"), True),
+        unique_sellers=_bool(e("UNIQUE_SELLERS"), True),
+        seller_repeat_hours=max(0.0, _float(e("SELLER_REPEAT_HOURS"), 0.0)),
         seller_phone_prefixes=_str_list(e("SELLER_PHONE_PREFIXES") or "7"),
         initial_sync=_bool(e("INITIAL_SYNC"), True),
         initial_sync_pages=max(1, _int(e("INITIAL_SYNC_PAGES"), 1)),
@@ -191,6 +203,9 @@ def _from_env() -> Settings:
         test_max_messages=max(0, _int(e("TEST_MAX_MESSAGES"), 5)),
         test_chat_id=_int(e("TEST_CHAT_ID"), 0),
         ton_label=(e("TON_LABEL") or "TON").strip(),
+        timezone=(e("TIMEZONE") or "Europe/Moscow").strip(),
+        session_backup_key=(e("SESSION_BACKUP_KEY") or "").strip(),
+        sessions_backup_chat_id=_int(e("SESSIONS_BACKUP_CHAT_ID"), 0),
         database_path=(e("DATABASE_PATH") or "data/tracker.db").strip(),
         sessions_dir=(e("SESSIONS_DIR") or "telegram_sessions").strip(),
         template_path=(e("TEMPLATE_PATH") or "templates/listing.html").strip(),

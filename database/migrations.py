@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -86,5 +86,9 @@ MIGRATIONS: dict[int, list[str]] = {
             value TEXT
         )
         """,
+    ],
+    2: [
+        "CREATE INDEX IF NOT EXISTS ix_listings_gift_sent ON listings(gift_unique_id, sent)",
+        "CREATE INDEX IF NOT EXISTS ix_listings_seller_sent ON listings(seller_key, sent, sent_at)",
     ],
 }

@@ -13,12 +13,13 @@ class ListingStatus:
     NEW = "NEW"                        # вставлен, в обработке
     FILTERED_PRICE = "FILTERED_PRICE"  # не прошёл фильтр цены
     FILTERED_SELLER = "FILTERED_SELLER"
+    FILTERED_DUPLICATE = "FILTERED_DUPLICATE"   # этот NFT / продавец уже отправлялся
     SENT = "SENT"
     TEST_ONLY = "TEST_ONLY"            # TEST_MODE: только лог / тестовый чат
     SEND_FAILED = "SEND_FAILED"
     ERROR = "ERROR"
 
-    FINAL = {FILTERED_PRICE, FILTERED_SELLER, SENT, TEST_ONLY, SEND_FAILED, ERROR}
+    FINAL = {FILTERED_PRICE, FILTERED_SELLER, FILTERED_DUPLICATE, SENT, TEST_ONLY, SEND_FAILED, ERROR}
 
 
 @dataclass
@@ -41,6 +42,7 @@ class Listing:
     seller_name: str | None = None
     seller_profile_link: str | None = None
     seller_phone: str | None = None    # НЕ сохраняется в БД, только для фильтра
+    seller_about: str | None = None    # bio продавца — НЕ сохраняется в БД, только для фильтра
 
     stars_price: int | None = None
     ton_nano: int | None = None

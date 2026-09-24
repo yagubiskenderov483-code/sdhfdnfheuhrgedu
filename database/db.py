@@ -199,6 +199,25 @@ class Database:
         r = await cur.fetchone()
         return dict(r) if r else None
 
+    async def gift_already_sent(self, gift_unique_id: int) -> bool:
+        """Этот NFT уже отправлялся в канал (любым продавцом, по любой цене)."""
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT 1 FROM listings WHERE gift_unique_id=? AND sent=1 LIMIT 1", (gift_unique_id,))
+        return (await cur.fetchone()) is not None
+
+    async def seller_already_sent(self, seller_key: str, since_iso: str | None = None) -> bool:
+        """Лот этого продавца уже отправлялся (с момента since_iso или вообще)."""
+        assert self.conn
+        if since_iso:
+            cur = await self.conn.execute(
+                "SELECT 1 FROM listings WHERE seller_key=? AND sent=1 AND sent_at >= ? LIMIT 1",
+                (seller_key, since_iso))
+        else:
+            cur = await self.conn.execute(
+                "SELECT 1 FROM listings WHERE seller_key=? AND sent=1 LIMIT 1", (seller_key,))
+        return (await cur.fetchone()) is not None
+
     async def status_counts(self) -> dict[str, int]:
         assert self.conn
         cur = await self.conn.execute("SELECT status, COUNT(*) FROM listings GROUP BY status")

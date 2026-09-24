@@ -185,6 +185,7 @@ class SellerFull:
     paid_message_stars: int | None
     contact_require_premium: bool | None
     phone: str | None
+    about: str | None = None
 
 
 async def fetch_full_user(client: TelegramClient, user_id: int) -> SellerFull:
@@ -204,4 +205,5 @@ async def fetch_full_user(client: TelegramClient, user_id: int) -> SellerFull:
         contact_require_premium=(getattr(full, "contact_require_premium", None)
                                  or (getattr(user, "contact_require_premium", None) if user else None)),
         phone=getattr(user, "phone", None) if user else None,
+        about=getattr(full, "about", None),
     )

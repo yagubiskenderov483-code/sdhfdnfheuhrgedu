@@ -23,7 +23,9 @@ from dataclasses import dataclass
 from typing import Any
 
 
-from bot.formatter import MessageFormatter
+from datetime import datetime, timedelta, timezone
+
+from bot.formatter import MessageFormatter, listing_keyboard
 from bot.sender import TelegramSender
 from config import settings
 from database.db import Database
@@ -137,7 +139,11 @@ class ListingPipeline:
         self._workers: list[asyncio.Task] = []
         self._seller_cache: dict[int, tuple[float, SellerFull]] = {}
         self.stats = {"new": 0, "sent": 0, "filtered_price": 0, "filtered_seller": 0,
-                      "duplicates": 0, "failed": 0}
+                      "filtered_repeat": 0, "duplicates": 0, "failed": 0}
+        # защита от повторов NFT / продавца между параллельными обработчиками
+        self._repeat_lock = asyncio.Lock()
+        self._reserved_gifts: set[int] = set()
+        self._reserved_sellers: set[str] = set()
         self.last_new_at: float | None = None      # time.time()
         self.last_sent_at: float | None = None
 
@@ -222,7 +228,23 @@ class ListingPipeline:
             l.seller_profile_link = username_link(full.username)
         if full.phone and not l.seller_phone:
             l.seller_phone = full.phone
+        l.seller_about = full.about
         l.messages = _messages_status(full.paid_message_stars, full.contact_require_premium)
+
+    async def _repeat_reason(self, l: Listing) -> str | None:
+        if settings.unique_gifts and (l.gift_unique_id in self._reserved_gifts
+                                      or await self.db.gift_already_sent(l.gift_unique_id)):
+            return "this gift was already sent"
+        if settings.unique_sellers and l.seller_key not in ("n", ""):
+            if l.seller_key in self._reserved_sellers:
+                return "this seller is being sent right now"
+            since = None
+            if settings.seller_repeat_hours > 0:
+                since = (datetime.now(timezone.utc) - timedelta(hours=settings.seller_repeat_hours)
+                         ).isoformat(timespec="seconds")
+            if await self.db.seller_already_sent(l.seller_key, since):
+                return "this seller was already sent"
+        return None
 
     async def process(self, ev: ListingEvent) -> None:
         l = ev.listing
@@ -252,8 +274,26 @@ class ListingPipeline:
             return
         llog("FILTER", f"#{l.listing_id} seller passed ({sr.code})")
 
+        # повторы: тот же NFT или тот же продавец уже отправлялись → не отправляем
+        async with self._repeat_lock:
+            repeat = await self._repeat_reason(l)
+            if repeat is None:
+                self._reserved_gifts.add(l.gift_unique_id)
+                self._reserved_sellers.add(l.seller_key)
+        if repeat:
+            l.status, l.reason = ListingStatus.FILTERED_DUPLICATE, repeat
+            self.stats["filtered_repeat"] += 1
+            llog("FILTER", f"#{l.listing_id} repeat skipped: {repeat}")
+            await self.db.update_listing(l)
+            return
+
         text = self.formatter.render(l)
-        res = await self.sender.send_listing(text, l.gift_link)
+        try:
+            res = await self.sender.send_listing(text, l.gift_link, listing_keyboard(l),
+                                                 listing_keyboard(l, with_seller=False))
+        finally:
+            self._reserved_gifts.discard(l.gift_unique_id)
+            self._reserved_sellers.discard(l.seller_key)
         if res.ok:
             l.sent = not res.test_only
             l.message_id = res.message_id

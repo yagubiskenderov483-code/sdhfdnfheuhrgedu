@@ -14,7 +14,7 @@ import time
 from aiogram import Bot
 from aiogram.exceptions import (TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError,
                                 TelegramRetryAfter)
-from aiogram.types import LinkPreviewOptions
+from aiogram.types import InlineKeyboardMarkup, LinkPreviewOptions
 
 from config import settings
 from utils.logger import get_logger
@@ -39,19 +39,23 @@ class TelegramSender:
             return settings.test_chat_id
         return next(iter(sorted(settings.admin_ids)), None)
 
-    async def send_listing(self, text: str, preview_url: str | None) -> SendResult:
+    async def send_listing(self, text: str, preview_url: str | None,
+                           markup: InlineKeyboardMarkup | None = None,
+                           fallback_markup: InlineKeyboardMarkup | None = None) -> SendResult:
         if settings.test_mode:
             chat = self._test_chat()
             if chat is None or self.test_sent >= settings.test_max_messages:
                 log.info("[TEST_MODE] message not sent (log only)")
                 return SendResult(True, None, test_only=True)
             self.test_sent += 1
-            res = await self.send(chat, "🧪 <b>TEST MODE</b>\n" + text, preview_url)
+            res = await self.send(chat, "🧪 <b>TEST MODE</b>\n" + text, preview_url, markup, fallback_markup)
             res.test_only = True
             return res
-        return await self.send(settings.target_chat_id, text, preview_url)
+        return await self.send(settings.target_chat_id, text, preview_url, markup, fallback_markup)
 
-    async def send(self, chat_id: int, text: str, preview_url: str | None = None, attempts: int = 5) -> SendResult:
+    async def send(self, chat_id: int, text: str, preview_url: str | None = None,
+                   markup: InlineKeyboardMarkup | None = None,
+                   fallback_markup: InlineKeyboardMarkup | None = None, attempts: int = 5) -> SendResult:
         preview = (LinkPreviewOptions(url=preview_url, prefer_small_media=True, show_above_text=False)
                    if preview_url else LinkPreviewOptions(is_disabled=True))
         async with self._lock:
@@ -61,7 +65,7 @@ class TelegramSender:
                     await asyncio.sleep(wait)
                 try:
                     msg = await self.bot.send_message(chat_id, text, parse_mode="HTML",
-                                                      link_preview_options=preview)
+                                                      link_preview_options=preview, reply_markup=markup)
                     self._last = time.monotonic()
                     return SendResult(True, msg.message_id)
                 except TelegramRetryAfter as e:
@@ -72,6 +76,11 @@ class TelegramSender:
                     log.warning("Bot API network error: %s (retry in %ss)", e, delay)
                     await asyncio.sleep(delay)
                 except TelegramBadRequest as e:
+                    # кнопка «Продавец» по ID запрещена приватностью продавца → без этой кнопки
+                    if "BUTTON_USER_PRIVACY_RESTRICTED" in str(e) or "BUTTON_URL_INVALID" in str(e):
+                        if fallback_markup is not None and markup is not fallback_markup:
+                            markup = fallback_markup
+                            continue
                     # например, битая ссылка превью — повторяем без превью
                     if not preview.is_disabled:
                         preview = LinkPreviewOptions(is_disabled=True)

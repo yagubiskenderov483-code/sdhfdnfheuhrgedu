@@ -2,7 +2,8 @@
 Форматирование сообщения по шаблону templates/listing.html (Telegram HTML parse mode).
 
 Шаблон можно полностью менять. Доступные переменные ({имя}):
-  gift_name, gift_title_link, gift_link, gift_num, gift_slug, model, backdrop, symbol,
+  gift_name, gift_title_link, gift_link, gift_num, gift_slug, gift_slug_link, detected_at,
+  model, backdrop, symbol,
   price_line, stars_price, ton_price, currency,
   seller_line, seller_username, seller_id, seller_name, seller_profile, seller_check,
   level, messages, premium_status, listing_id, first_seen, session_source
@@ -11,7 +12,11 @@
 from __future__ import annotations
 
 import html
+from datetime import datetime, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import settings
 from database.models import Listing
@@ -28,6 +33,40 @@ def fmt_ton(ton: float | None) -> str | None:
         return None
     s = f"{ton:.2f}".rstrip("0").rstrip(".")
     return s or "0"
+
+
+def detected_at(l: Listing) -> str:
+    try:
+        dt = datetime.fromisoformat(l.first_seen)
+    except (TypeError, ValueError):
+        dt = datetime.now(timezone.utc)
+    try:
+        dt = dt.astimezone(ZoneInfo(settings.timezone))
+    except Exception:
+        pass
+    return dt.strftime("%d.%m.%Y %H:%M:%S")
+
+
+def seller_url(l: Listing) -> str | None:
+    if l.seller_profile_link:
+        return l.seller_profile_link
+    if l.seller_type == "user" and l.seller_id:
+        return f"tg://user?id={l.seller_id}"
+    return None
+
+
+def listing_keyboard(l: Listing, with_seller: bool = True) -> InlineKeyboardMarkup:
+    """Кнопки: [✓ Занять] / [🎁 Открыть лот] [👤 Продавец]"""
+    rows = [[InlineKeyboardButton(text="✓ Занять", callback_data=f"take:{l.gift_unique_id}"[:64])]]
+    second = []
+    if l.gift_link:
+        second.append(InlineKeyboardButton(text="🎁 Открыть лот", url=l.gift_link))
+    url = seller_url(l) if with_seller else None
+    if url:
+        second.append(InlineKeyboardButton(text="👤 Продавец", url=url))
+    if second:
+        rows.append(second)
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def price_line(l: Listing) -> str:
@@ -54,7 +93,7 @@ class MessageFormatter:
         self.template = self.template_path.read_text(encoding="utf-8").strip()
 
     def variables(self, l: Listing) -> dict[str, str]:
-        gift_name = l.gift_name + (f" #{l.gift_num}" if l.gift_num else "")
+        gift_name = l.gift_name
         if l.gift_link:
             gift_title_link = f'<a href="{html.escape(l.gift_link)}">{html.escape(gift_name)}</a>'
         else:
@@ -79,7 +118,11 @@ class MessageFormatter:
         else:
             seller_profile = DASH
 
-        premium_status = DASH if l.premium is None else ("Premium" if l.premium else "Обычный")
+        premium_status = DASH if l.premium is None else ("Premium" if l.premium else "без Premium")
+        if l.gift_link and l.gift_slug:
+            gift_slug_link = f'<a href="{html.escape(l.gift_link)}">{html.escape(l.gift_slug)}</a>'
+        else:
+            gift_slug_link = _e(l.gift_slug)
 
         return _Safe(
             gift_name=_e(gift_name),
@@ -87,6 +130,8 @@ class MessageFormatter:
             gift_link=_e(l.gift_link),
             gift_num=_e(l.gift_num),
             gift_slug=_e(l.gift_slug),
+            gift_slug_link=gift_slug_link,
+            detected_at=html.escape(detected_at(l)),
             model=_e(l.model),
             backdrop=_e(l.backdrop),
             symbol=_e(l.symbol),

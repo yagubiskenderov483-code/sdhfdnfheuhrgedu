@@ -1,34 +1,55 @@
 """
 SellerFilter — отдельный модуль, алгоритм можно менять независимо от остального кода.
 
-ВАЖНО: Telegram API НЕ отдаёт национальность, страну или язык чужого пользователя.
-  • User.lang_code заполняется только для ботов (и только в контексте бота) — для продавцов недоступен;
-  • UserFull не содержит страны/локали.
-Определять «русского продавца» по имени, фамилии, фото или username запрещено (и ненадёжно).
+Telegram API НЕ отдаёт национальность или страну чужого пользователя (User.lang_code —
+только для ботов). Имя, фамилия, фото и username НЕ используются.
 
-Поэтому RUSSIAN_ONLY использует ТОЛЬКО объективные данные, по порядку:
-  1. data/seller_blacklist.txt  (user id или @username)          → BLOCK
-  2. data/seller_whitelist.txt  (user id или @username)          → PASS
-  3. номер телефона продавца, ЕСЛИ Telegram его отдал (User.phone виден только когда
-     продавец открыл номер в приватности / он у вас в контактах) и он начинается с
-     SELLER_PHONE_PREFIXES (по умолчанию 7 — Россия; учтите, +7 это также Казахстан) → PASS
-  4. иначе — критерий неизвестен → UNKNOWN_SELLER_POLICY: allow (пропустить) | block (отсеять)
+RUSSIAN_ONLY=true пропускает продавца, только если есть объективный признак, по порядку:
+  1. data/seller_blacklist.txt (ID или @username)                       → отсеять
+  2. data/seller_whitelist.txt                                          → пропустить
+  3. телефон виден (Telegram отдал User.phone) и начинается с
+     SELLER_PHONE_PREFIXES (по умолчанию 7)                             → пропустить, иначе отсеять
+  4. описание профиля (bio, UserFull.about) написано по-русски:
+     есть русские буквы (ы э ъ ё) / кириллица и нет украинских/белорусских/
+     казахских букв (і ї є ґ ў ә ғ қ ң ө ұ ү һ)                         → пропустить
+  5. ничего из этого нет → UNKNOWN_SELLER_POLICY: block (отсеять, по умолчанию) | allow
 
-RUSSIAN_ONLY=false → фильтр пропускает всех (кроме blacklist).
+RUSSIAN_ONLY=false → пропускаются все (кроме blacklist).
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from config import settings
 from database.models import Listing
 
+_CYR = re.compile(r"[а-яё]", re.IGNORECASE)
+_RU_ONLY = re.compile(r"[ыэъё]", re.IGNORECASE)
+_NOT_RU = re.compile(r"[іїєґўәғқңөұүһ]", re.IGNORECASE)
+_LAT_WORD = re.compile(r"[a-z]{3,}", re.IGNORECASE)
+
+
+def is_russian_text(text: str | None) -> bool:
+    """Текст написан по-русски (а не на другом кириллическом языке / латиницей)."""
+    if not text:
+        return False
+    t = text.strip()
+    cyr = len(_CYR.findall(t))
+    if cyr < 4 or _NOT_RU.search(t):
+        return False
+    # кириллица должна преобладать над латиницей
+    lat = sum(len(w) for w in _LAT_WORD.findall(t))
+    if cyr < lat:
+        return False
+    return bool(_RU_ONLY.search(t)) or cyr >= 6
+
 
 @dataclass
 class SellerResult:
     passed: bool
-    code: str       # BLACKLIST | WHITELIST | PHONE_MATCH | UNKNOWN_ALLOWED | UNKNOWN_BLOCKED | DISABLED
+    code: str       # BLACKLIST | WHITELIST | PHONE_MATCH | PHONE_MISMATCH | BIO_RU | UNKNOWN_ALLOWED | UNKNOWN_BLOCKED | DISABLED
     reason: str
 
 
@@ -82,6 +103,9 @@ class SellerFilter:
                 return SellerResult(True, "PHONE_MATCH", "visible phone prefix matches")
             return SellerResult(False, "PHONE_MISMATCH", "visible phone prefix does not match")
 
-        if settings.unknown_seller_policy == "block":
-            return SellerResult(False, "UNKNOWN_BLOCKED", "no objective data (policy=block)")
-        return SellerResult(True, "UNKNOWN_ALLOWED", "no objective data (policy=allow)")
+        if is_russian_text(l.seller_about):
+            return SellerResult(True, "BIO_RU", "profile bio is written in Russian")
+
+        if settings.unknown_seller_policy == "allow":
+            return SellerResult(True, "UNKNOWN_ALLOWED", "no objective data (policy=allow)")
+        return SellerResult(False, "UNKNOWN_BLOCKED", "no Russian bio / phone / whitelist (policy=block)")

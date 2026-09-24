@@ -18,13 +18,14 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
 
-from bot.admin import build_routers, init_claim_code
+from bot.admin import all_admins, build_routers, init_claim_code
 from bot.formatter import MessageFormatter
 from bot.sender import TelegramSender
 from config import settings
 from database.db import Database
 from filters.price_filter import PriceFilter
 from filters.seller_filter import SellerFilter
+from sessions.backup import SessionBackup
 from sessions.manager import SessionManager
 from sessions.storage import SessionStorage
 from tracker.coordinator import MarketplaceCoordinator
@@ -42,6 +43,7 @@ class App:
         self.sessions = SessionManager(self.storage)
         self.bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode="HTML"))
         self.sender = TelegramSender(self.bot)
+        self.backup = SessionBackup(self.bot, self.storage, all_admins)
         self.formatter = MessageFormatter(settings.path(settings.template_path))
         self.price_filter = PriceFilter()
         self.seller_filter = SellerFilter(settings.path("data"))
@@ -109,7 +111,10 @@ class App:
     # ------------------------------------------------------------------ lifecycle
     async def start(self, run_bot: bool = True) -> None:
         await self.db.connect()
+        # после деплоя папка telegram_sessions/ может быть пустой → восстановить из Telegram
+        await self.backup.restore()
         await self.sessions.start_all()
+        await self.backup.sync_if_needed()   # например, sessions положены в папку вручную
         if run_bot:
             init_claim_code()
             self._tasks.append(asyncio.create_task(
