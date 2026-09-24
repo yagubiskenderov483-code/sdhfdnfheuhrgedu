@@ -1,0 +1,13 @@
+.env
+telegram_sessions/*
+!telegram_sessions/.gitkeep
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+__pycache__/
+*.pyc
+*.session
+*.session-journal
+.env.*
+!.env.example

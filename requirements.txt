@@ -1,0 +1,6 @@
+telethon==1.45.0
+aiogram>=3.13,<4
+aiosqlite>=0.20
+python-dotenv>=1.0
+# ускоряет шифрование MTProto (опционально, но рекомендуется при большом числе sessions)
+cryptg>=0.4; platform_python_implementation == "CPython"

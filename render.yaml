@@ -1,0 +1,44 @@
+services:
+  - type: worker
+    name: wawe-tracker
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter
+    autoDeploy: true
+    disk:
+      name: tracker-state
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      # Secrets: set the values in the Render dashboard, not in the repo.
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKEN
+        sync: false
+      - key: TARGET_CHAT_ID
+        sync: false
+      - key: ADMIN_IDS
+        sync: false
+
+      - key: MIN_STARS
+        value: "5000"
+      - key: MIN_TON
+        value: "0"
+      - key: ALLOW_TON_ONLY
+        value: "false"
+      - key: RUSSIAN_ONLY
+        value: "true"
+      - key: UNKNOWN_SELLER_POLICY
+        value: "allow"
+      - key: INITIAL_SYNC
+        value: "true"
+      - key: TRACKER_INTERVAL
+        value: "1"
+      - key: MAX_CONCURRENT_SESSIONS
+        value: "20"
+      - key: SESSION_RPS
+        value: "1"
+      - key: TEST_MODE
+        value: "false"

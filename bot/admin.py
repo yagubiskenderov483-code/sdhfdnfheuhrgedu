@@ -1,0 +1,439 @@
+"""
+Админ-бот (Bot API, aiogram 3).
+
+Команды: /start /status /sessions /add_session /remove_session /reload /stats /test /settings /set /cancel
+Доступ — только для ADMIN_IDS (из .env) и тех, кто подтвердил владение через /claim <код>
+(одноразовый код печатается в консоль при запуске, если ADMIN_IDS пуст).
+
+Безопасность /add_session:
+  • сообщения с API HASH, кодом и 2FA-паролем удаляются из чата сразу после чтения;
+  • секреты не пишутся в лог и не хранятся в FSM дольше, чем нужно;
+  • session-файлы никогда не отправляются ботом.
+"""
+from __future__ import annotations
+
+import html
+import json
+import re
+import secrets
+import time
+from typing import TYPE_CHECKING, Any
+
+from aiogram import F, Router
+from aiogram.filters import Command, CommandObject, CommandStart, Filter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import Message
+from telethon import TelegramClient, errors
+
+from config import DATA_DIR, RUNTIME_KEYS, reload_settings, set_runtime_value, settings
+from sessions.storage import SessionRecord
+from utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from main import App
+
+log = get_logger("admin")
+ADMINS_FILE = DATA_DIR / "admins.json"
+
+
+# ---------------------------------------------------------------------------- admins
+def _load_claimed() -> set[int]:
+    try:
+        return {int(x) for x in json.loads(ADMINS_FILE.read_text(encoding="utf-8"))}
+    except (FileNotFoundError, ValueError, json.JSONDecodeError):
+        return set()
+
+
+def all_admins() -> set[int]:
+    return set(settings.admin_ids) | _load_claimed()
+
+
+class IsAdmin(Filter):
+    async def __call__(self, message: Message) -> bool:
+        return bool(message.from_user and message.from_user.id in all_admins())
+
+
+CLAIM_CODE: str | None = None
+
+
+def init_claim_code() -> None:
+    """Если админов нет — генерируем одноразовый код и печатаем в консоль (не в файлы логов)."""
+    global CLAIM_CODE
+    if not all_admins():
+        CLAIM_CODE = secrets.token_hex(4)
+        print("\n" + "=" * 60)
+        print(f"  ADMIN_IDS не задан. Отправьте боту:  /claim {CLAIM_CODE}")
+        print("=" * 60 + "\n", flush=True)
+
+
+# ---------------------------------------------------------------------------- helpers
+class AddSession(StatesGroup):
+    api_id = State()
+    api_hash = State()
+    phone = State()
+    code = State()
+    password = State()
+
+
+def _ago(ts: float | None) -> str:
+    if not ts:
+        return "—"
+    d = int(time.time() - ts)
+    if d < 60:
+        return f"{d} sec ago"
+    if d < 3600:
+        return f"{d // 60} min ago"
+    return f"{d // 3600} h ago"
+
+
+async def _delete(m: Message) -> None:
+    try:
+        await m.delete()
+    except Exception:
+        pass
+
+
+HELP = (
+    "<b>Gift Marketplace Live Tracker</b>\n\n"
+    "/status — состояние трекера\n"
+    "/sessions — состояние sessions\n"
+    "/add_session — добавить Telegram-аккаунт\n"
+    "/remove_session &lt;name&gt; — удалить session\n"
+    "/stats — статистика листингов\n"
+    "/settings — текущие настройки\n"
+    "/set &lt;KEY&gt; &lt;VALUE&gt; — изменить настройку на лету\n"
+    "/reload — перечитать .env, шаблон, списки продавцов, новые *.session\n"
+    "/test — проверка API/фильтров/БД/формата (без рассылки); /test channel — тестовый пост в канал\n"
+    "/cancel — отменить текущий диалог"
+)
+
+
+# ---------------------------------------------------------------------------- routers
+def build_routers(app: "App") -> list[Router]:
+    public = Router(name="public")
+    admin = Router(name="admin")
+    admin.message.filter(IsAdmin())
+
+    pending: dict[int, dict[str, Any]] = {}   # user_id → {client, name, phone, hash, api_id, api_hash}
+
+    # ------------------------------------------------------------ public
+    @public.message(CommandStart())
+    async def cmd_start(m: Message) -> None:
+        if m.from_user and m.from_user.id in all_admins():
+            await m.answer(HELP)
+        else:
+            await m.answer(f"Ваш Telegram ID: <code>{m.from_user.id if m.from_user else '?'}</code>\n"
+                           "Доступ только для администраторов.")
+
+    @public.message(Command("claim"))
+    async def cmd_claim(m: Message, command: CommandObject) -> None:
+        global CLAIM_CODE
+        await _delete(m)
+        if not CLAIM_CODE or not command.args or command.args.strip() != CLAIM_CODE or not m.from_user:
+            return
+        claimed = _load_claimed() | {m.from_user.id}
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        ADMINS_FILE.write_text(json.dumps(sorted(claimed)), encoding="utf-8")
+        CLAIM_CODE = None
+        log.info("Admin claimed: %s", m.from_user.id)
+        await m.answer("✅ Вы администратор.\n\n" + HELP)
+
+    # ------------------------------------------------------------ admin: general
+    @admin.message(Command("cancel"))
+    async def cmd_cancel(m: Message, state: FSMContext) -> None:
+        await _cleanup_pending(m.from_user.id)
+        await state.clear()
+        await m.answer("Отменено.")
+
+    async def _cleanup_pending(uid: int) -> None:
+        p = pending.pop(uid, None)
+        if p:
+            try:
+                await p["client"].disconnect()
+            except Exception:
+                pass
+            app.storage.discard(p["name"])
+
+    @admin.message(Command("status"))
+    async def cmd_status(m: Message) -> None:
+        c = app.sessions.counts()
+        coord, pipe = app.coordinator, app.pipeline
+        running = coord.mode == "LIVE"
+        icon = "🟢" if running else ("🟡" if coord.mode in ("INITIALIZING", "INITIAL_SYNC", "RECOVERY") else "🔴")
+        cycle = coord.avg_cycle_seconds()
+        text = (
+            f"{icon} TRACKER: {'RUNNING' if running else coord.mode}\n"
+            f"👥 Sessions: {len(app.sessions.workers)}\n"
+            f"🟢 Active: {c.get('ACTIVE', 0)}\n"
+            f"🔴 Errors: {c.get('ERROR', 0) + c.get('AUTH_ERROR', 0)}\n"
+            f"⏳ FloodWait: {c.get('FLOOD_WAIT', 0)}\n"
+            f"🟡 Connecting: {c.get('CONNECTING', 0)}\n"
+            f"📚 Collections: {len(coord.states)}\n"
+            f"🔁 Poll cycle: {f'{cycle:.1f}s' if cycle else '—'} (target {settings.tracker_interval}s)\n"
+            f"📦 Scanned: {coord.stats['scanned']}\n"
+            f"🎁 New listings: {pipe.stats['new']}\n"
+            f"📨 Sent: {pipe.stats['sent']}\n"
+            f"📥 Queue: {pipe.queue.qsize()}\n"
+            f"⏱ Last listing: {_ago(pipe.last_new_at)}\n"
+            f"⏱ Last sent: {_ago(pipe.last_sent_at)}\n"
+            f"🧪 TEST_MODE: {'ON' if settings.test_mode else 'OFF'}"
+        )
+        await m.answer(text)
+
+    @admin.message(Command("sessions"))
+    async def cmd_sessions(m: Message) -> None:
+        c = app.sessions.counts()
+        lines = [
+            f"Total sessions: {len(app.sessions.workers)}",
+            f"🟢 Active: {c.get('ACTIVE', 0)}",
+            f"🔴 Error: {c.get('ERROR', 0) + c.get('AUTH_ERROR', 0)}",
+            f"⏳ FloodWait: {c.get('FLOOD_WAIT', 0)}",
+            f"🟡 Connecting: {c.get('CONNECTING', 0)}",
+        ]
+        problems = app.sessions.problem_workers()
+        for w in problems[:40]:
+            lines.append(f"\n<b>{html.escape(w.name)}</b>\nStatus: {w.status.value}\n"
+                         f"Reason: {html.escape(w.reason or '—')}")
+        if len(problems) > 40:
+            lines.append(f"\n… и ещё {len(problems) - 40}")
+        await m.answer("\n".join(lines))
+
+    @admin.message(Command("remove_session"))
+    async def cmd_remove(m: Message, command: CommandObject) -> None:
+        name = (command.args or "").strip()
+        if not re.fullmatch(r"[\w\-]+", name or ""):
+            await m.answer("Использование: /remove_session session_023")
+            return
+        ok = await app.sessions.remove(name)
+        await m.answer(f"{'✅ Удалена' if ok else '❌ Не найдена'}: {html.escape(name)}"
+                       + ("\n(файл перенесён в telegram_sessions/removed/)" if ok else ""))
+
+    @admin.message(Command("reload"))
+    async def cmd_reload(m: Message) -> None:
+        reload_settings()
+        app.sessions.limiter.set_rate(settings.global_rps)
+        app.formatter.template_path = settings.path(settings.template_path)
+        app.formatter.reload()
+        app.seller_filter.reload()
+        added = await app.sessions.rescan()
+        await m.answer(f"🔄 Настройки, шаблон и списки продавцов перечитаны.\n"
+                       f"Новых sessions: {len(added)}" + (f" ({', '.join(added)})" if added else ""))
+
+    @admin.message(Command("stats"))
+    async def cmd_stats(m: Message) -> None:
+        counts = await app.db.status_counts()
+        since = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 86400))
+        day = await app.db.counts_since(since)
+        known = await app.db.count_market_items()
+        p, c = app.pipeline.stats, app.coordinator.stats
+        lines = ["<b>📊 Статистика</b>", "",
+                 f"Известных лотов на рынке: {known}",
+                 f"Опросов: {c['polls']} | ошибок: {c['poll_errors']}",
+                 f"Старых лотов (тихо): {c['silent']} | смен цены: {c['price_moves']}", "",
+                 "<b>С запуска:</b>",
+                 f"Новых: {p['new']} | отправлено: {p['sent']}",
+                 f"Отсеяно по цене: {p['filtered_price']} | по продавцу: {p['filtered_seller']}",
+                 f"Дубликатов: {p['duplicates']} | ошибок отправки: {p['failed']}", "",
+                 "<b>Всего в БД:</b>"]
+        lines += [f"{k}: {v}" for k, v in sorted(counts.items())] or ["—"]
+        lines += ["", "<b>За 24 часа:</b>"]
+        lines += [f"{k}: {v}" for k, v in sorted(day.items())] or ["—"]
+        await m.answer("\n".join(lines))
+
+    @admin.message(Command("settings"))
+    async def cmd_settings(m: Message) -> None:
+        v = settings.public_view()
+        keys = ["min_stars", "min_ton", "allow_ton_only", "russian_only", "unknown_seller_policy",
+                "seller_phone_prefixes", "initial_sync", "tracker_interval", "page_limit",
+                "max_concurrent_sessions", "session_rps", "global_rps", "catalog_interval",
+                "collections", "fetch_full_seller", "test_mode", "target_chat_id", "api_hash", "bot_token"]
+        body = "\n".join(f"{k.upper()} = {html.escape(str(v[k]))}" for k in keys)
+        await m.answer(f"<b>⚙️ Настройки</b>\n<pre>{body}</pre>\n"
+                       f"Изменить: /set KEY VALUE\nДоступно: {', '.join(RUNTIME_KEYS)}")
+
+    @admin.message(Command("set"))
+    async def cmd_set(m: Message, command: CommandObject) -> None:
+        parts = (command.args or "").split(maxsplit=1)
+        if len(parts) != 2:
+            await m.answer("Использование: /set MIN_STARS 5000")
+            return
+        try:
+            value = set_runtime_value(parts[0], parts[1])
+        except KeyError:
+            await m.answer(f"Неизвестный ключ. Доступно: {', '.join(RUNTIME_KEYS)}")
+            return
+        except (ValueError, TypeError):
+            await m.answer("Некорректное значение.")
+            return
+        if parts[0].upper() == "GLOBAL_RPS":
+            app.sessions.limiter.set_rate(settings.global_rps)
+        await m.answer(f"✅ {parts[0].upper()} = {html.escape(str(value))} (сохранено)")
+
+    @admin.message(Command("test"))
+    async def cmd_test(m: Message, command: CommandObject) -> None:
+        await m.answer("🧪 Запускаю проверку…")
+        report, sample = await app.run_check()
+        await m.answer(report)
+        if sample:
+            await m.answer("Пример сообщения (в канал НЕ отправлено):")
+            await app.sender.send(m.chat.id, sample)
+        if (command.args or "").strip() == "channel":
+            res = await app.sender.send(settings.target_chat_id, "🧪 Тестовое сообщение трекера — бот может постить.")
+            await m.answer("✅ В канал отправлено" if res.ok else f"❌ Канал: {html.escape(res.error or '')}")
+
+    # ------------------------------------------------------------ admin: /add_session
+    @admin.message(Command("add_session"), F.chat.type == "private")
+    async def add_start(m: Message, state: FSMContext) -> None:
+        await _cleanup_pending(m.from_user.id)
+        await state.clear()
+        await state.set_state(AddSession.api_id)
+        await m.answer("➕ <b>Новая session</b>\n\nШаг 1/5. Отправьте <b>API ID</b> (my.telegram.org)\n"
+                       "или <code>-</code>, чтобы использовать API_ID из .env.\n/cancel — отмена")
+
+    @admin.message(AddSession.api_id, F.text)
+    async def add_api_id(m: Message, state: FSMContext) -> None:
+        t = m.text.strip()
+        if t == "-":
+            if not settings.api_id:
+                await m.answer("В .env нет API_ID. Отправьте число.")
+                return
+            api_id = settings.api_id
+        elif t.isdigit():
+            api_id = int(t)
+        else:
+            await m.answer("API ID — это число. Попробуйте ещё раз.")
+            return
+        await state.update_data(api_id=api_id)
+        await state.set_state(AddSession.api_hash)
+        await m.answer("Шаг 2/5. Отправьте <b>API HASH</b> или <code>-</code> (из .env).\n"
+                       "Сообщение будет сразу удалено.")
+
+    @admin.message(AddSession.api_hash, F.text)
+    async def add_api_hash(m: Message, state: FSMContext) -> None:
+        t = m.text.strip()
+        await _delete(m)
+        if t == "-":
+            if not settings.api_hash:
+                await m.answer("В .env нет API_HASH. Отправьте его.")
+                return
+            api_hash = settings.api_hash
+        elif re.fullmatch(r"[0-9a-fA-F]{32}", t):
+            api_hash = t
+        else:
+            await m.answer("API HASH — 32 hex-символа. Попробуйте ещё раз.")
+            return
+        await state.update_data(api_hash=api_hash)
+        await state.set_state(AddSession.phone)
+        await m.answer("Шаг 3/5. Отправьте <b>номер телефона</b> аккаунта в формате +79991234567")
+
+    @admin.message(AddSession.phone, F.text)
+    async def add_phone(m: Message, state: FSMContext) -> None:
+        phone = re.sub(r"[^\d+]", "", m.text)
+        await _delete(m)
+        if not re.fullmatch(r"\+?\d{8,15}", phone):
+            await m.answer("Некорректный номер. Пример: +79991234567")
+            return
+        data = await state.get_data()
+        name = app.storage.next_name()
+        client = TelegramClient(str(app.storage.session_path(name).with_suffix("")),
+                                data["api_id"], data["api_hash"],
+                                device_model="GiftTracker", system_version="1.0", app_version="1.0")
+        try:
+            await client.connect()
+            sent = await client.send_code_request(phone)
+        except errors.ApiIdInvalidError:
+            await client.disconnect(); app.storage.discard(name)
+            await state.clear()
+            await m.answer("❌ Неверные API ID / API HASH. Начните заново: /add_session")
+            return
+        except (errors.PhoneNumberInvalidError, errors.PhoneNumberBannedError) as e:
+            await client.disconnect(); app.storage.discard(name)
+            await m.answer(f"❌ {type(e).__name__}. Отправьте другой номер или /cancel")
+            return
+        except errors.FloodWaitError as e:
+            await client.disconnect(); app.storage.discard(name)
+            await state.clear()
+            await m.answer(f"❌ Telegram просит подождать {e.seconds} сек. Попробуйте позже.")
+            return
+        except Exception as e:
+            await client.disconnect(); app.storage.discard(name)
+            await state.clear()
+            await m.answer(f"❌ Ошибка: {html.escape(type(e).__name__)}")
+            return
+        pending[m.from_user.id] = {"client": client, "name": name, "phone": phone,
+                                   "hash": sent.phone_code_hash, "api_id": data["api_id"],
+                                   "api_hash": data["api_hash"]}
+        await state.set_state(AddSession.code)
+        await m.answer("Шаг 4/5. Отправьте <b>код входа</b> из Telegram.\n\n"
+                       "⚠️ Вводите код <b>с пробелами или дефисами</b>, например <code>1 2 3 4 5</code> — "
+                       "иначе Telegram сочтёт, что код переслали, и заблокирует вход.")
+
+    async def _finish(m: Message, state: FSMContext) -> None:
+        p = pending.pop(m.from_user.id)
+        client: TelegramClient = p["client"]
+        me = await client.get_me()
+        await client.disconnect()
+        app.storage.save_meta(p["name"], p["api_id"], p["api_hash"], p["phone"])
+        await state.clear()
+        rec = SessionRecord(p["name"], app.storage.session_path(p["name"]), p["api_id"], p["api_hash"])
+        w = await app.sessions.add_record(rec)
+        log.info("Session %s added via bot (user id %s)", p["name"], getattr(me, "id", "?"))
+        await m.answer(f"✅ Session <b>{p['name']}</b> добавлена\n"
+                       f"Аккаунт ID: <code>{getattr(me, 'id', '?')}</code>\n"
+                       f"Статус: {w.status.value}")
+
+    @admin.message(AddSession.code, F.text)
+    async def add_code(m: Message, state: FSMContext) -> None:
+        code = re.sub(r"\D", "", m.text)
+        await _delete(m)
+        p = pending.get(m.from_user.id)
+        if not p:
+            await state.clear()
+            await m.answer("Сессия входа потеряна. /add_session")
+            return
+        try:
+            await p["client"].sign_in(phone=p["phone"], code=code, phone_code_hash=p["hash"])
+        except errors.SessionPasswordNeededError:
+            await state.set_state(AddSession.password)
+            await m.answer("Шаг 5/5. Включена 2FA. Отправьте <b>пароль</b> (сообщение будет удалено).")
+            return
+        except errors.PhoneCodeInvalidError:
+            await m.answer("❌ Неверный код. Отправьте ещё раз (с пробелами) или /cancel")
+            return
+        except errors.PhoneCodeExpiredError:
+            await _cleanup_pending(m.from_user.id)
+            await state.clear()
+            await m.answer("❌ Код истёк (возможно, Telegram заметил пересылку кода). Начните заново: /add_session")
+            return
+        except Exception as e:
+            await _cleanup_pending(m.from_user.id)
+            await state.clear()
+            await m.answer(f"❌ Ошибка входа: {html.escape(type(e).__name__)}")
+            return
+        await _finish(m, state)
+
+    @admin.message(AddSession.password, F.text)
+    async def add_password(m: Message, state: FSMContext) -> None:
+        pw = m.text
+        await _delete(m)
+        p = pending.get(m.from_user.id)
+        if not p:
+            await state.clear()
+            await m.answer("Сессия входа потеряна. /add_session")
+            return
+        try:
+            await p["client"].sign_in(password=pw)
+        except errors.PasswordHashInvalidError:
+            await m.answer("❌ Неверный пароль. Попробуйте ещё раз или /cancel")
+            return
+        except Exception as e:
+            await _cleanup_pending(m.from_user.id)
+            await state.clear()
+            await m.answer(f"❌ Ошибка входа: {html.escape(type(e).__name__)}")
+            return
+        finally:
+            pw = None  # noqa: F841
+        await _finish(m, state)
+
+    return [public, admin]
