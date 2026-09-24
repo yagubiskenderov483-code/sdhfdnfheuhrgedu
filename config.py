@@ -65,6 +65,7 @@ class Settings:
     bot_token: str = ""
     target_chat_id: int = 0
     admin_ids: set[int] = field(default_factory=set)
+    allow_all_users: bool = True
 
     # --- фильтр цены ---
     min_stars: int = 5000
@@ -149,6 +150,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "GLOBAL_RPS": ("global_rps", lambda v: max(0.0, float(v))),
     "MAX_CONCURRENT_SESSIONS": ("max_concurrent_sessions", lambda v: max(1, int(v))),
     "TEST_MODE": ("test_mode", lambda v: _bool(v, False)),
+    "ALLOW_ALL_USERS": ("allow_all_users", lambda v: _bool(v, True)),
     "FETCH_FULL_SELLER": ("fetch_full_seller", lambda v: _bool(v, True)),
 }
 
@@ -162,6 +164,7 @@ def _from_env() -> Settings:
         bot_token=(e("BOT_TOKEN") or "").strip().strip('"'),
         target_chat_id=_int(e("TARGET_CHAT_ID"), 0),
         admin_ids=_int_set(e("ADMIN_IDS")),
+        allow_all_users=_bool(e("ALLOW_ALL_USERS"), True),
         min_stars=_int(e("MIN_STARS"), 5000),
         min_ton=_float(e("MIN_TON"), 0.0),
         allow_ton_only=_bool(e("ALLOW_TON_ONLY"), False),

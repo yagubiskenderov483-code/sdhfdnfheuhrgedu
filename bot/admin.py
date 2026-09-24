@@ -54,6 +54,16 @@ class IsAdmin(Filter):
         return bool(message.from_user and message.from_user.id in all_admins())
 
 
+def is_allowed(user_id: int | None) -> bool:
+    return bool(user_id) and (settings.allow_all_users or user_id in all_admins())
+
+
+class IsAllowed(Filter):
+    """ALLOW_ALL_USERS=true — бот доступен всем, иначе только админам."""
+    async def __call__(self, message: Message) -> bool:
+        return is_allowed(message.from_user.id if message.from_user else None)
+
+
 CLAIM_CODE: str | None = None
 
 
@@ -109,19 +119,33 @@ HELP = (
 )
 
 
+USER_HELP = (
+    "<b>Gift Marketplace Live Tracker</b>\n\n"
+    "/status — состояние трекера\n"
+    "/sessions — состояние sessions\n"
+    "/add_session — добавить свой Telegram-аккаунт в трекер\n"
+    "/stats — статистика листингов\n"
+    "/settings — текущие настройки\n"
+    "/test — проверка работы (пример сообщения придёт вам)\n"
+    "/cancel — отменить текущий диалог"
+)
+
+
 # ---------------------------------------------------------------------------- routers
 def build_routers(app: "App") -> list[Router]:
     public = Router(name="public")
-    admin = Router(name="admin")
+    admin = Router(name="admin")        # только админы: /remove_session /reload /set
     admin.message.filter(IsAdmin())
+    users = Router(name="users")        # все пользователи, если ALLOW_ALL_USERS=true
+    users.message.filter(IsAllowed())
 
     pending: dict[int, dict[str, Any]] = {}   # user_id → {client, name, phone, hash, api_id, api_hash}
 
     # ------------------------------------------------------------ public
     @public.message(CommandStart())
     async def cmd_start(m: Message) -> None:
-        if m.from_user and m.from_user.id in all_admins():
-            await m.answer(HELP)
+        if m.from_user and is_allowed(m.from_user.id):
+            await m.answer(HELP if m.from_user.id in all_admins() else USER_HELP)
         else:
             await m.answer(f"Ваш Telegram ID: <code>{m.from_user.id if m.from_user else '?'}</code>\n"
                            "Доступ только для администраторов.")
@@ -140,7 +164,7 @@ def build_routers(app: "App") -> list[Router]:
         await m.answer("✅ Вы администратор.\n\n" + HELP)
 
     # ------------------------------------------------------------ admin: general
-    @admin.message(Command("cancel"))
+    @users.message(Command("cancel"))
     async def cmd_cancel(m: Message, state: FSMContext) -> None:
         await _cleanup_pending(m.from_user.id)
         await state.clear()
@@ -155,7 +179,7 @@ def build_routers(app: "App") -> list[Router]:
                 pass
             app.storage.discard(p["name"])
 
-    @admin.message(Command("status"))
+    @users.message(Command("status"))
     async def cmd_status(m: Message) -> None:
         c = app.sessions.counts()
         coord, pipe = app.coordinator, app.pipeline
@@ -181,7 +205,7 @@ def build_routers(app: "App") -> list[Router]:
         )
         await m.answer(text)
 
-    @admin.message(Command("sessions"))
+    @users.message(Command("sessions"))
     async def cmd_sessions(m: Message) -> None:
         c = app.sessions.counts()
         lines = [
@@ -220,7 +244,7 @@ def build_routers(app: "App") -> list[Router]:
         await m.answer(f"🔄 Настройки, шаблон и списки продавцов перечитаны.\n"
                        f"Новых sessions: {len(added)}" + (f" ({', '.join(added)})" if added else ""))
 
-    @admin.message(Command("stats"))
+    @users.message(Command("stats"))
     async def cmd_stats(m: Message) -> None:
         counts = await app.db.status_counts()
         since = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 86400))
@@ -241,7 +265,7 @@ def build_routers(app: "App") -> list[Router]:
         lines += [f"{k}: {v}" for k, v in sorted(day.items())] or ["—"]
         await m.answer("\n".join(lines))
 
-    @admin.message(Command("settings"))
+    @users.message(Command("settings"))
     async def cmd_settings(m: Message) -> None:
         v = settings.public_view()
         keys = ["min_stars", "min_ton", "allow_ton_only", "russian_only", "unknown_seller_policy",
@@ -270,7 +294,7 @@ def build_routers(app: "App") -> list[Router]:
             app.sessions.limiter.set_rate(settings.global_rps)
         await m.answer(f"✅ {parts[0].upper()} = {html.escape(str(value))} (сохранено)")
 
-    @admin.message(Command("test"))
+    @users.message(Command("test"))
     async def cmd_test(m: Message, command: CommandObject) -> None:
         await m.answer("🧪 Запускаю проверку…")
         report, sample = await app.run_check()
@@ -278,12 +302,12 @@ def build_routers(app: "App") -> list[Router]:
         if sample:
             await m.answer("Пример сообщения (в канал НЕ отправлено):")
             await app.sender.send(m.chat.id, sample)
-        if (command.args or "").strip() == "channel":
+        if (command.args or "").strip() == "channel" and m.from_user.id in all_admins():
             res = await app.sender.send(settings.target_chat_id, "🧪 Тестовое сообщение трекера — бот может постить.")
             await m.answer("✅ В канал отправлено" if res.ok else f"❌ Канал: {html.escape(res.error or '')}")
 
     # ------------------------------------------------------------ admin: /add_session
-    @admin.message(Command("add_session"), F.chat.type == "private")
+    @users.message(Command("add_session"), F.chat.type == "private")
     async def add_start(m: Message, state: FSMContext) -> None:
         await _cleanup_pending(m.from_user.id)
         await state.clear()
@@ -291,7 +315,7 @@ def build_routers(app: "App") -> list[Router]:
         await m.answer("➕ <b>Новая session</b>\n\nШаг 1/5. Отправьте <b>API ID</b> (my.telegram.org)\n"
                        "или <code>-</code>, чтобы использовать API_ID из .env.\n/cancel — отмена")
 
-    @admin.message(AddSession.api_id, F.text)
+    @users.message(AddSession.api_id, F.text)
     async def add_api_id(m: Message, state: FSMContext) -> None:
         t = m.text.strip()
         if t == "-":
@@ -309,7 +333,7 @@ def build_routers(app: "App") -> list[Router]:
         await m.answer("Шаг 2/5. Отправьте <b>API HASH</b> или <code>-</code> (из .env).\n"
                        "Сообщение будет сразу удалено.")
 
-    @admin.message(AddSession.api_hash, F.text)
+    @users.message(AddSession.api_hash, F.text)
     async def add_api_hash(m: Message, state: FSMContext) -> None:
         t = m.text.strip()
         await _delete(m)
@@ -327,7 +351,7 @@ def build_routers(app: "App") -> list[Router]:
         await state.set_state(AddSession.phone)
         await m.answer("Шаг 3/5. Отправьте <b>номер телефона</b> аккаунта в формате +79991234567")
 
-    @admin.message(AddSession.phone, F.text)
+    @users.message(AddSession.phone, F.text)
     async def add_phone(m: Message, state: FSMContext) -> None:
         phone = re.sub(r"[^\d+]", "", m.text)
         await _delete(m)
@@ -383,7 +407,7 @@ def build_routers(app: "App") -> list[Router]:
                        f"Аккаунт ID: <code>{getattr(me, 'id', '?')}</code>\n"
                        f"Статус: {w.status.value}")
 
-    @admin.message(AddSession.code, F.text)
+    @users.message(AddSession.code, F.text)
     async def add_code(m: Message, state: FSMContext) -> None:
         code = re.sub(r"\D", "", m.text)
         await _delete(m)
@@ -413,7 +437,7 @@ def build_routers(app: "App") -> list[Router]:
             return
         await _finish(m, state)
 
-    @admin.message(AddSession.password, F.text)
+    @users.message(AddSession.password, F.text)
     async def add_password(m: Message, state: FSMContext) -> None:
         pw = m.text
         await _delete(m)
@@ -436,4 +460,4 @@ def build_routers(app: "App") -> list[Router]:
             pw = None  # noqa: F841
         await _finish(m, state)
 
-    return [public, admin]
+    return [public, admin, users]
