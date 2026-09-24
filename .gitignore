@@ -1,4 +1,3 @@
-.env
 telegram_sessions/*
 !telegram_sessions/.gitkeep
 data/*
@@ -9,5 +8,3 @@ __pycache__/
 *.pyc
 *.session
 *.session-journal
-.env.*
-!.env.example
