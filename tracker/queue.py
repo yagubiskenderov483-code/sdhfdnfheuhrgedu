@@ -144,6 +144,10 @@ class ListingPipeline:
         self._repeat_lock = asyncio.Lock()
         self._reserved_gifts: set[int] = set()
         self._reserved_sellers: set[str] = set()
+        # «подряд из одной коллекции»
+        self._last_sent_gift_id: int | None = None
+        self._streak = 0
+        self._sending_gift_ids: set[int] = set()
         self.last_new_at: float | None = None      # time.time()
         self.last_sent_at: float | None = None
 
@@ -153,19 +157,28 @@ class ListingPipeline:
         admitted = 0
         for it in reversed(items):
             listing = build_listing(it, session)
+            # Глобальная дедупликация: право на обработку получает только тот, чей INSERT прошёл.
             if not await self.db.insert_listing_if_new(listing):
                 self.stats["duplicates"] += 1
-                llog("DUP", f"Listing #{listing.listing_id} already processed — ignored")
+                llog("DUPLICATE", f"listing={listing.listing_id} already_known=true")
                 continue
             admitted += 1
             self.stats["new"] += 1
             self.last_new_at = time.time()
-            llog("NEW", f"Listing #{listing.listing_id} | {listing.gift_name} #{listing.gift_num} "
-                        f"| seller {listing.seller_key} | via {session} ({mode})")
+            price = " / ".join(x for x in (
+                f"{listing.stars_price}⭐" if listing.stars_price is not None else "",
+                f"{listing.ton_price:g}TON" if listing.ton_price is not None else "") if x) or "none"
+            # detected = время ПЕРВОГО ОБНАРУЖЕНИЯ трекером, не дата выставления (API её не отдаёт)
+            llog("NEW", f'listing={listing.listing_id} gift="{listing.gift_name} #{listing.gift_num}" '
+                        f"price={price} seller={listing.seller_key} detected={listing.first_seen} "
+                        f"via={session} mode={mode}")
             await self.queue.put(ListingEvent(listing, time.monotonic(), mode))
         return admitted
 
     async def resume_unfinished(self) -> int:
+        last = await self.db.last_sent_listing()
+        if last:
+            self._last_sent_gift_id, self._streak = last["gift_id"], 1
         rows = await self.db.unfinished_listings()
         for r in rows:
             await self.queue.put(ListingEvent(listing_from_row(r), time.monotonic(), "resume"))
@@ -231,6 +244,17 @@ class ListingPipeline:
         l.seller_about = full.about
         l.messages = _messages_status(full.paid_message_stars, full.contact_require_premium)
 
+    def _streak_reason(self, l: Listing) -> str | None:
+        """Не отправлять одну и ту же коллекцию подряд больше MAX_SAME_COLLECTION_STREAK раз."""
+        n = settings.max_same_collection_streak
+        if n <= 0:
+            return None
+        if l.gift_id in self._sending_gift_ids:
+            return "same collection is being sent right now"
+        if self._last_sent_gift_id == l.gift_id and self._streak >= n:
+            return f"same collection {n}x in a row"
+        return None
+
     async def _repeat_reason(self, l: Listing) -> str | None:
         if settings.unique_gifts and (l.gift_unique_id in self._reserved_gifts
                                       or await self.db.gift_already_sent(l.gift_unique_id)):
@@ -278,8 +302,11 @@ class ListingPipeline:
         async with self._repeat_lock:
             repeat = await self._repeat_reason(l)
             if repeat is None:
+                repeat = self._streak_reason(l)
+            if repeat is None:
                 self._reserved_gifts.add(l.gift_unique_id)
                 self._reserved_sellers.add(l.seller_key)
+                self._sending_gift_ids.add(l.gift_id)
         if repeat:
             l.status, l.reason = ListingStatus.FILTERED_DUPLICATE, repeat
             self.stats["filtered_repeat"] += 1
@@ -288,24 +315,32 @@ class ListingPipeline:
             return
 
         text = self.formatter.render(l)
+        res = None
         try:
             res = await self.sender.send_listing(text, l.gift_link, listing_keyboard(l),
                                                  listing_keyboard(l, with_seller=False))
+            if res.ok:
+                l.sent = not res.test_only
+                l.message_id = res.message_id
+                l.status = ListingStatus.TEST_ONLY if res.test_only else ListingStatus.SENT
+                if not res.test_only:
+                    self.stats["sent"] += 1
+                    self.last_sent_at = time.time()
+                latency = time.monotonic() - ev.detected_mono
+                llog("SEND", f"listing={l.listing_id} target={'test' if res.test_only else 'channel'} "
+                             f"latency={latency:.2f}s")
+            else:
+                l.status, l.reason = ListingStatus.SEND_FAILED, res.error
+                self.stats["failed"] += 1
+                llog("SEND", f"listing={l.listing_id} FAILED: {res.error}", level=40)
+            await self.db.update_listing(l)   # sent=1 записан ДО снятия резерва → нет гонки повторов
         finally:
-            self._reserved_gifts.discard(l.gift_unique_id)
-            self._reserved_sellers.discard(l.seller_key)
-        if res.ok:
-            l.sent = not res.test_only
-            l.message_id = res.message_id
-            l.status = ListingStatus.TEST_ONLY if res.test_only else ListingStatus.SENT
-            if not res.test_only:
-                self.stats["sent"] += 1
-                self.last_sent_at = time.time()
-            latency = time.monotonic() - ev.detected_mono
-            llog("SEND", f"Listing #{l.listing_id} ({'test' if res.test_only else 'channel'}, "
-                         f"{latency:.2f}s after detection)")
-        else:
-            l.status, l.reason = ListingStatus.SEND_FAILED, res.error
-            self.stats["failed"] += 1
-            llog("SEND", f"Listing #{l.listing_id} FAILED: {res.error}", level=40)
-        await self.db.update_listing(l)
+            async with self._repeat_lock:
+                self._reserved_gifts.discard(l.gift_unique_id)
+                self._reserved_sellers.discard(l.seller_key)
+                self._sending_gift_ids.discard(l.gift_id)
+                if res is not None and res.ok and not res.test_only:
+                    if self._last_sent_gift_id == l.gift_id:
+                        self._streak += 1
+                    else:
+                        self._last_sent_gift_id, self._streak = l.gift_id, 1

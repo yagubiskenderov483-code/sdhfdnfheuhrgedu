@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -91,4 +91,22 @@ MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS ix_listings_gift_sent ON listings(gift_unique_id, sent)",
         "CREATE INDEX IF NOT EXISTS ix_listings_seller_sent ON listings(seller_key, sent, sent_at)",
     ],
+    # v3: каноническая идентичность листинга и его состояние в market_items
+    3: [
+        "ALTER TABLE market_items ADD COLUMN listing_id TEXT",
+        "ALTER TABLE market_items ADD COLUMN state TEXT",
+        "UPDATE market_items SET listing_id = unique_id || ':' || seller_key WHERE listing_id IS NULL",
+        "UPDATE market_items SET state = 'KNOWN' WHERE state IS NULL",
+        # старые данные собраны неполной синхронизацией (только верх рынка) → коллекции
+        # нельзя считать complete, иначе ценовые изменения старых лотов примут за новые
+        "UPDATE collection_state SET complete = 0",
+    ],
+}
+
+# Колонки, без которых новая логика работать не может (проверяются после миграций)
+REQUIRED_COLUMNS: dict[str, set[str]] = {
+    "listings": {"listing_id", "gift_unique_id", "gift_id", "seller_key", "status", "sent", "sent_at",
+                 "first_seen"},
+    "market_items": {"unique_id", "gift_id", "seller_key", "stars", "ton_nano", "listing_id", "state"},
+    "collection_state": {"gift_id", "synced", "complete", "last_cursor"},
 }

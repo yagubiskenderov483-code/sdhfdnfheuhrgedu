@@ -3,8 +3,12 @@ MarketplaceCoordinator — единая точка, которая решает,
 и раздаёт запросы свободным sessions. Одна коллекция никогда не опрашивается двумя sessions
 одновременно (per-collection lock) → нет бессмысленных дублирующих запросов.
 
-Режимы:  INITIALIZING → INITIAL_SYNC (новые коллекции, без отправки) → RECOVERY (после рестарта,
-         догоняем пропущенное, отправляем) → LIVE 🟢
+Режимы:  INITIALIZING → INITIAL_SYNC (ПОЛНАЯ тихая синхронизация новых коллекций: читаются все
+         страницы, ничего не отправляется) → RECOVERY (после рестарта: только лоты выше надёжного
+         anchor в полностью синхронизированных коллекциях) → LIVE 🟢
+
+Алгоритм определения новизны — tracker/state.py. Источник истины — SQLite (market_items, listings).
+Sessions — только транспорт: общего состояния у них нет, всё хранится в одной БД.
 
 Планировщик LIVE:
   • у каждой коллекции есть due-время; каждую коллекцию стараемся опрашивать раз в TRACKER_INTERVAL;
@@ -27,11 +31,20 @@ from database.models import utcnow_iso
 from sessions.manager import SessionManager
 from tracker.marketplace import ResaleItem, fetch_catalog, fetch_resale_page
 from tracker.queue import ListingPipeline
-from tracker.state import CollectionState, KnownItem, classify
+from tracker.state import CollectionState, KnownItem, MarketState, classify
 from tracker.worker import WorkerUnavailable
-from utils.logger import get_logger
+from utils.logger import get_logger, llog
 
 log = get_logger("coordinator")
+
+
+def _price(stars: int | None, ton_nano: int | None) -> str:
+    parts = []
+    if stars is not None:
+        parts.append(f"{stars}⭐")
+    if ton_nano is not None:
+        parts.append(f"{ton_nano / 1e9:g}TON")
+    return "/".join(parts) or "none"
 
 
 class TrackerMode:
@@ -57,7 +70,8 @@ class MarketplaceCoordinator:
         self._poll_gap: dict[int, float] = {}
         self._tasks: list[asyncio.Task] = []
         self._stop = asyncio.Event()
-        self.stats = {"scanned": 0, "polls": 0, "poll_errors": 0, "silent": 0, "price_moves": 0}
+        self.stats = {"scanned": 0, "polls": 0, "poll_errors": 0, "silent": 0, "price_moves": 0,
+                      "resyncs": 0}
         self.started_at = time.time()
         self.last_catalog_at: float | None = None
 
@@ -73,7 +87,7 @@ class MarketplaceCoordinator:
         return sum(gaps) / len(gaps) if gaps else None
 
     async def _load_state(self) -> None:
-        known = await self.db.load_market_items()
+        # Лоты в RAM не грузим — для каждой страницы они берутся из SQLite (lookup_market_items).
         for row in await self.db.load_collection_states():
             if not self._wanted(row["gift_id"], row["title"] or ""):
                 continue
@@ -84,14 +98,13 @@ class MarketplaceCoordinator:
                 last_seen_timestamp=row["last_seen_timestamp"],
                 availability_resale=row["availability_resale"], last_poll=row["last_poll"],
                 last_session=row["last_session"])
-            st.known = {uid: KnownItem(*v) for uid, v in known.get(st.gift_id, {}).items()}
             self.states[st.gift_id] = st
         for k in ("scanned", "polls"):
             v = await self.db.kv_get(f"stat_{k}")
             if v and v.isdigit():
                 self.stats[k] = int(v)
         log.info("Loaded state: %s collections, %s known market items",
-                 len(self.states), sum(len(s.known) for s in self.states.values()))
+                 len(self.states), await self.db.count_market_items())
 
     async def _wait_for_sessions(self) -> None:
         last_log = 0.0
@@ -130,79 +143,161 @@ class MarketplaceCoordinator:
             log.info("Catalog: %s collections tracked (+%s new, %s changed)", len(self.states), added, hot)
 
     # ------------------------------------------------------------------ polling one collection
+    async def _fetch(self, gid: int, offset: str, limit: int):
+        page, session = await self.sessions.run(lambda c: fetch_resale_page(c, gid, offset, limit))
+        self.stats["scanned"] += len(page.items)
+        return page, session
+
+    async def _lookup(self, items: list[ResaleItem]) -> dict[int, KnownItem]:
+        rows = await self.db.lookup_market_items(it.unique_id for it in items)
+        return {u: KnownItem(*v) for u, v in rows.items()}
+
+    @staticmethod
+    def _row(it: ResaleItem, state: str) -> tuple:
+        return (it.unique_id, it.gift_id, it.listing_id, it.seller_key, it.stars, it.ton_nano, state)
+
+    async def full_sync(self, st: CollectionState, reason: str) -> int:
+        """Тихая ПОЛНАЯ синхронизация: читаем все страницы, регистрируем все лоты, НИЧЕГО не отправляем.
+        После неё коллекция complete=True — лот, которого нет в БД, гарантированно не существовал.
+
+        Пока мы листаем, рынок живёт: продажи сдвигают выдачу, и лот на границе страниц может
+        проскочить. Поэтому сравниваем число прочитанных уникальных лотов с ResaleStarGifts.count
+        и при нехватке делаем ещё проход (до SYNC_PASSES)."""
+        gid = st.gift_id
+        seen: set[int] = set()
+        session, first_id, reached_end, count, pages = None, None, False, 0, 0
+        max_pages = settings.initial_sync_pages or 10**9
+        for pass_no in range(1, settings.sync_passes + 1):
+            offset, reached_end, pass_pages = "", False, 0
+            while pass_pages < max_pages:
+                page, session = await self._fetch(gid, offset, 100)
+                pass_pages += 1
+                count = page.count
+                if pass_no == 1 and pass_pages == 1 and page.items:
+                    first_id = page.items[0].listing_id
+                fresh = [it for it in page.items if it.unique_id not in seen]
+                seen.update(it.unique_id for it in page.items)
+                await self.db.upsert_market_items(self._row(it, MarketState.KNOWN) for it in fresh)
+                if not page.next_offset or not page.items:
+                    reached_end = True
+                    break
+                offset = page.next_offset
+            pages += pass_pages
+            gap = count - len(seen)
+            if not reached_end or gap <= max(1, count // 500):
+                break
+            log.info('[%s] collection="%s" pass %s: read %s of %s, re-reading to close gaps',
+                     "INITIAL_SYNC" if reason == "initial" else "RESYNC", st.title, pass_no, len(seen), count)
+        gap = count - len(seen)
+        complete = reached_end and gap <= max(1, count // 500)
+        st.synced = True
+        st.complete = complete
+        st.needs_full_sync = False
+        st.last_cursor = first_id or st.last_cursor
+        st.last_poll = utcnow_iso()
+        st.last_session = session
+        await self.db.save_collection_state(st.to_row())
+        self._dirty.discard(gid)
+        tag = "INITIAL_SYNC" if reason == "initial" else "RESYNC"
+        llog(tag, f'collection="{st.title}" registered={len(seen)} api_count={count} pages={pages} '
+                  f'complete={complete} sent=0 reason="{reason}"')
+        if not complete:
+            log.warning('[%s] collection="%s" incomplete (read %s of %s) — NOTHING from it will be sent '
+                        'until a full resync succeeds', tag, st.title, len(seen), count)
+        return len(seen)
+
     async def poll_collection(self, st: CollectionState, mode: str) -> int:
+        """mode: sync | recover | live. Возвращает число НОВЫХ листингов, допущенных в pipeline."""
         lock = self._locks.setdefault(st.gift_id, asyncio.Lock())
         async with lock:
-            if mode != "sync" and not st.synced:
-                mode = "sync"
-            limit = 100 if mode in ("sync", "recover") else settings.page_limit
-            max_pages = {"sync": settings.initial_sync_pages, "recover": settings.recovery_max_pages}.get(
-                mode, settings.live_max_pages)
+            if mode == "sync" or not st.synced:
+                await self.full_sync(st, "initial")
+                return 0
+            if st.needs_full_sync or not st.complete:
+                await self.full_sync(st, "collection_incomplete")
+                if not st.complete:
+                    self._due[st.gift_id] = time.monotonic() + settings.resync_retry_seconds
+                return 0
+            cls, items, session = await self._scan_top(st, mode)
+            return await self._apply(st, cls, items, session, mode)
 
-            items: list[ResaleItem] = []
-            seen: set[int] = set()
-            offset = ""
-            reached_end = False
-            cls = None
-            session = None
-            gid = st.gift_id
+    async def _scan_top(self, st: CollectionState, mode: str):
+        """Читает верх рынка, пока не найдётся anchor. Сначала мелкими страницами (дёшево),
+        при всплеске — заново крупными страницами до RECOVERY_MAX_PAGES."""
+        gid = st.gift_id
+        plans = [(settings.page_limit, settings.live_max_pages)] if mode == "live" else []
+        plans.append((100, settings.recovery_max_pages))
+        cls, items, session = None, [], None
+        for limit, max_pages in plans:
+            items, seen, offset, reached_end = [], set(), "", False
             for _ in range(max_pages):
-                off = offset
-                page, session = await self.sessions.run(lambda c: fetch_resale_page(c, gid, off, limit))
-                self.stats["scanned"] += len(page.items)
+                page, session = await self._fetch(gid, offset, limit)
                 for it in page.items:
                     if it.unique_id not in seen:
                         seen.add(it.unique_id)
                         items.append(it)
                 reached_end = not page.next_offset or not page.items
-                if mode != "sync":
-                    cls = classify(st, items, reached_end)
-                    if cls.decided:
-                        break
-                if reached_end:
+                known = await self._lookup(items)
+                cls = classify(st, items, known, reached_end)
+                if cls.decided or reached_end:
                     break
                 offset = page.next_offset or ""
+            if cls is not None and cls.decided:
+                break
+        return cls, items, session
 
-            self.stats["polls"] += 1
-            now_iso = utcnow_iso()
-            new: list[ResaleItem] = []
+    async def _apply(self, st: CollectionState, cls, items: list[ResaleItem], session: str | None,
+                     mode: str) -> int:
+        gid = st.gift_id
+        self.stats["polls"] += 1
+        now_iso = utcnow_iso()
 
-            if mode == "sync":
-                st.synced = True
-                st.complete = reached_end
-                if not settings.initial_sync:
-                    new = items   # INITIAL_SYNC=false: существующие лоты тоже обрабатываются
-            else:
-                if cls is None or not cls.decided:
-                    log.warning("[%s] no anchor in %s page(s) — silent resync (%s items)",
-                                st.title, max_pages, len(items))
-                    st.complete = False
-                    self.stats["silent"] += len(items)
-                else:
-                    new = cls.new
-                    self.stats["silent"] += len(cls.silent)
-                    self.stats["price_moves"] += len(cls.moved)
-                    if reached_end:
-                        st.complete = True
-
-            # 1) глобальная дедупликация + запись NEW-листингов в БД (до пометки known — crash-safe)
-            if new:
-                await self.pipeline.admit(new, session, mode)
-                st.last_seen_listing_id = new[0].listing_id
-                st.last_seen_timestamp = now_iso
-            # 2) обновить state рынка
-            rows = st.remember(items)
-            if rows:
-                await self.db.upsert_market_items(rows)
-            if items:
-                st.last_cursor = str(items[0].unique_id)
-            st.last_poll = now_iso
-            st.last_session = session
+        if cls is None or not cls.decided:
+            # anchor не найден даже после дочитывания → ничего не отправляем, тихо пересинхронизируем
+            self.stats["resyncs"] += 1
+            log.warning('[RESYNC] collection="%s" reason="anchor_not_found" scanned=%s — nothing sent',
+                        st.title, len(items))
+            st.complete = False
+            st.needs_full_sync = True
+            await self.db.upsert_market_items(self._row(it, MarketState.SILENT_OLD) for it in items
+)
+            self._due[gid] = 0.0   # полная синхронизация — при следующем опросе
             self._dirty.add(gid)
-            if mode == "sync":
-                await self.db.save_collection_state(st.to_row())
-                self._dirty.discard(gid)
-            return len(new)
+            return 0
+
+        # 1) PRICE_MOVED — тот же листинг, новая цена: обновить, НЕ отправлять
+        for it, k in cls.moved:
+            self.stats["price_moves"] += 1
+            llog("PRICE_MOVE", f"listing={it.listing_id} old={_price(k.stars, k.ton_nano)} "
+                               f"new={_price(it.stars, it.ton_nano)}")
+        # 2) SILENT_OLD — старые лоты, впервые попавшие в окно: запомнить, НЕ отправлять
+        for it, reason in cls.silent:
+            self.stats["silent"] += 1
+            llog("SILENT_OLD", f'listing={it.listing_id} reason="{reason}"')
+        if cls.reason in ("above_anchor_but_incomplete", "end_of_list_incomplete"):
+            st.needs_full_sync = True
+
+        # 3) NEW — глобальная дедупликация (INSERT в listings) ДО записи в market_items:
+        #    при падении процесса листинг останется в listings со статусом NEW и будет дообработан.
+        admitted = 0
+        if cls.new:
+            if mode == "recover":
+                llog("RECOVERY", f'collection="{st.title}" new_during_downtime={len(cls.new)}')
+            admitted = await self.pipeline.admit(cls.new, session, mode)
+            st.last_seen_listing_id = cls.new[0].listing_id
+            st.last_seen_timestamp = now_iso
+
+        rows = [self._row(it, MarketState.NEW) for it in cls.new]
+        rows += [self._row(it, MarketState.PRICE_MOVED) for it, _ in cls.moved]
+        rows += [self._row(it, MarketState.SILENT_OLD) for it, _ in cls.silent]
+        await self.db.upsert_market_items(rows)
+
+        if items:
+            st.last_cursor = items[0].listing_id
+        st.last_poll = now_iso
+        st.last_session = session
+        self._dirty.add(gid)
+        return admitted
 
     async def _poll_safe(self, st: CollectionState, mode: str) -> int:
         try:
@@ -247,21 +342,26 @@ class MarketplaceCoordinator:
                 await asyncio.sleep(10)
 
         unsynced = [s for s in self.states.values() if not s.synced]
-        synced = [s for s in self.states.values() if s.synced]
+        incomplete = [s for s in self.states.values() if s.synced and not s.complete]
+        ready = [s for s in self.states.values() if s.synced and s.complete]
 
-        if unsynced:
+        if unsynced or incomplete:
             self.mode = TrackerMode.INITIAL_SYNC
-            log.info("Initial marketplace sync... (%s collections)", len(unsynced))
-            before = sum(len(s.known) for s in self.states.values())
-            await self._run_batch(unsynced, "sync")
-            after = sum(len(s.known) for s in self.states.values())
-            log.info("Existing listings saved: %s", after - before)
+            log.info("[INITIAL_SYNC] full silent sync of %s collection(s) (%s new, %s incomplete)...",
+                     len(unsynced) + len(incomplete), len(unsynced), len(incomplete))
+            before = await self.db.count_market_items()
+            sent_before = self.pipeline.stats["new"]
+            await self._run_batch(unsynced + incomplete, "sync")
+            after = await self.db.count_market_items()
+            llog("INITIAL_SYNC", f"completed: {after - before} existing listings registered, "
+                                 f"{self.pipeline.stats['new'] - sent_before} sent")
 
-        if synced:
+        if ready:
             self.mode = TrackerMode.RECOVERY
-            log.info("Recovering after restart: checking %s collections for missed listings...", len(synced))
-            missed = await self._run_batch(synced, "recover")
-            log.info("Recovery done: %s missed new listing(s) queued", missed)
+            log.info("[RECOVERY] checking %s collection(s) for listings that appeared while offline...",
+                     len(ready))
+            missed = await self._run_batch(ready, "recover")
+            llog("RECOVERY", f"done: {missed} new listing(s) found during downtime")
 
         await self._persist()
         log.info("Initial sync completed")

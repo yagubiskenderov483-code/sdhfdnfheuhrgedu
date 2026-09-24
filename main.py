@@ -186,7 +186,12 @@ async def amain(check: bool) -> None:
         except (NotImplementedError, RuntimeError):
             pass  # Windows — остановка через Ctrl+C (KeyboardInterrupt)
 
-    await app.start()
+    try:
+        await app.start()
+    except RuntimeError as e:          # несовместимая БД и т.п. — понятное сообщение, без удаления данных
+        log.error("%s", e)
+        await app.bot.session.close()
+        sys.exit(2)
     try:
         await stop_event.wait()
     except asyncio.CancelledError:

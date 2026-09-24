@@ -1,35 +1,68 @@
 """
-Состояние коллекций и алгоритм определения НОВЫХ лотов.
+Состояние коллекций и алгоритм определения НОВЫХ листингов.
 
-Telegram возвращает лоты коллекции отсортированными по времени последнего изменения цены
-(новые сверху). Поэтому новые листинги всегда появляются В НАЧАЛЕ списка.
+Источник истины — SQLite (таблица market_items). В RAM держится только метаданные коллекций;
+известные лоты для каждой полученной страницы запрашиваются из БД пачкой (lookup_market_items).
 
-Алгоритм (для каждой коллекции, страница за страницей сверху вниз):
+ИДЕНТИЧНОСТЬ ЛИСТИНГА
+  listing_id = "<starGiftUnique.id>:<seller_key>"   (отдельного ID листинга в API нет — Layer 229)
+  seller_key: u<user_id> | c<channel_id> | g<chat_id> | a<ton_address> — «сильные» ключи;
+              n:<owner_name> | n — «слабые» (владелец скрыт / не пришёл в ответе).
+  Слабый ключ нестабилен (в одном ответе владелец есть, в другом — нет), поэтому:
+    • тот же NFT, оба ключа сильные и разные → другой продавец → ДРУГОЙ листинг (перепродажа);
+    • тот же NFT, хотя бы один ключ слабый   → тот же листинг (продавец просто не пришёл).
+  Цена в идентичность НЕ входит: смена цены = PRICE_MOVED того же листинга.
 
-  known      — лот уже есть в state с тем же продавцом
-  «якорь»    — known-лот с НЕИЗМЕНЁННОЙ ценой: он не двигался, значит всё, что выше него, появилось
-               после прошлого опроса.
-  price-move — known-лот с изменённой ценой: поднялся наверх из-за смены цены, это НЕ новый листинг.
+ПОРЯДОК ВЫДАЧИ
+  payments.getResaleStarGifts без sort_by_* отдаёт лоты «by the unixtime (descending) when their
+  resell price was last changed» — новые листинги И изменения цены поднимаются наверх.
 
-  • все неизвестные лоты ВЫШЕ первого якоря → НОВЫЕ (идут в очередь, все до одного);
-  • неизвестные лоты НИЖЕ якоря → старые лоты, «съехавшие» в окно из-за продаж → silently known;
-  • если якоря на странице нет (всплеск > limit новых лотов) → берём следующую страницу
-    (до LIVE_MAX_PAGES / RECOVERY_MAX_PAGES);
-  • если дошли до конца списка без якоря: новые, только если коллекция ранее была
-    синхронизирована полностью (complete=1), иначе — безопасная тихая ре-синхронизация;
-  • если лимит страниц исчерпан без якоря — тихая ре-синхронизация + WARNING в лог
-    (лучше пропустить, чем разослать тысячи старых лотов).
+КЛАССИФИКАЦИЯ страницы (сверху вниз):
+  KNOWN (anchor) — известный листинг с той же ценой. Он не двигался → всё, что выше, свежее.
+  PRICE_MOVED    — известный листинг с другой ценой → НЕ новый, только обновить цену.
+  UNKNOWN        — листинга нет в market_items.
+    • выше первого anchor и коллекция complete (все её лоты были прочитаны) → NEW;
+    • выше anchor, но коллекция НЕ complete → SILENT_OLD (это может быть старый лот,
+      который мы никогда не видели и у которого сменили цену) + нужна полная синхронизация;
+    • ниже anchor → SILENT_OLD (старый лот впервые попал в окно сканирования).
+  anchor не найден:
+    • прочитан ВЕСЬ список (конец выдачи) и коллекция complete → UNKNOWN гарантированно
+      отсутствовал в полном известном наборе → NEW (случай пустой/маленькой коллекции);
+    • иначе → undecided: дочитать страницы, затем RESYNC без отправки.
+
+first_seen — время ПЕРВОГО ОБНАРУЖЕНИЯ нашим трекером, не дата выставления (её API не отдаёт).
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable
 
 from tracker.marketplace import ResaleItem
+
+STRONG_PREFIXES = ("u", "c", "g", "a")
+
+
+class MarketState:
+    KNOWN = "KNOWN"
+    PRICE_MOVED = "PRICE_MOVED"
+    SILENT_OLD = "SILENT_OLD"
+    NEW = "NEW"
+
+
+def is_strong(seller_key: str | None) -> bool:
+    return bool(seller_key) and seller_key[0] in STRONG_PREFIXES and not seller_key.startswith("n")
+
+
+def same_listing(old_seller_key: str, new_seller_key: str) -> bool:
+    """Тот же NFT: это тот же листинг или перепродажа другим продавцом?"""
+    if old_seller_key == new_seller_key:
+        return True
+    return not (is_strong(old_seller_key) and is_strong(new_seller_key))
 
 
 @dataclass
 class KnownItem:
+    """Строка market_items для одного NFT."""
+    listing_id: str
     seller_key: str
     stars: int | None
     ton_nano: int | None
@@ -40,14 +73,14 @@ class CollectionState:
     gift_id: int
     title: str
     synced: bool = False
-    complete: bool = False
-    last_cursor: str | None = None            # unique_id верхнего лота при последнем опросе
+    complete: bool = False                    # все лоты коллекции были прочитаны полной синхронизацией
+    last_cursor: str | None = None            # listing_id верхнего лота при последнем опросе
     last_seen_listing_id: str | None = None   # последний НОВЫЙ листинг
     last_seen_timestamp: str | None = None
     availability_resale: int | None = None
     last_poll: str | None = None
     last_session: str | None = None
-    known: dict[int, KnownItem] = field(default_factory=dict)
+    needs_full_sync: bool = False             # запланирована тихая полная ре-синхронизация
 
     def to_row(self) -> dict:
         return {
@@ -59,55 +92,73 @@ class CollectionState:
             "last_session": self.last_session,
         }
 
-    def remember(self, items: Iterable[ResaleItem]) -> list[tuple[int, int, str, int | None, int | None]]:
-        """Запомнить лоты; вернуть только изменившиеся строки для записи в БД."""
-        rows = []
-        for it in items:
-            new = KnownItem(it.seller_key, it.stars, it.ton_nano)
-            if self.known.get(it.unique_id) != new:
-                self.known[it.unique_id] = new
-                rows.append((it.unique_id, it.gift_id, it.seller_key, it.stars, it.ton_nano))
-        return rows
-
 
 @dataclass
 class Classification:
-    decided: bool                         # удалось однозначно разметить (найден якорь / конец списка)
+    decided: bool                                             # найден anchor или прочитан весь список
     new: list[ResaleItem] = field(default_factory=list)       # сверху вниз (новейшие первыми)
-    silent: list[ResaleItem] = field(default_factory=list)    # неизвестные, но старые
-    moved: list[ResaleItem] = field(default_factory=list)     # known с изменённой ценой
+    silent: list[tuple[ResaleItem, str]] = field(default_factory=list)   # (лот, причина)
+    moved: list[tuple[ResaleItem, KnownItem]] = field(default_factory=list)
+    known: list[ResaleItem] = field(default_factory=list)
     anchor: ResaleItem | None = None
+    reason: str = ""
 
 
-def classify(state: CollectionState, items: list[ResaleItem], reached_end: bool) -> Classification:
-    candidates: list[ResaleItem] = []
-    moved: list[ResaleItem] = []
-    anchor_idx: int | None = None
+def item_status(it: ResaleItem, known: dict[int, KnownItem]) -> tuple[str, KnownItem | None]:
+    """→ ("KNOWN" | "PRICE_MOVED" | "UNKNOWN", строка БД)"""
+    k = known.get(it.unique_id)
+    if k is None or not same_listing(k.seller_key, it.seller_key):
+        return "UNKNOWN", k
+    if k.stars == it.stars and k.ton_nano == it.ton_nano:
+        return "KNOWN", k
+    return "PRICE_MOVED", k
 
+
+def classify(state: CollectionState, items: list[ResaleItem], known: dict[int, KnownItem],
+             reached_end: bool) -> Classification:
+    above: list[ResaleItem] = []
+    c = Classification(decided=False)
+
+    anchor_idx = None
     for idx, it in enumerate(items):
-        k = state.known.get(it.unique_id)
-        if k is not None and k.seller_key == it.seller_key:
-            if k.stars == it.stars and k.ton_nano == it.ton_nano:
-                anchor_idx = idx
-                break
-            moved.append(it)
+        st, k = item_status(it, known)
+        if st == "KNOWN":
+            anchor_idx = idx
+            c.anchor = it
+            break
+        if st == "PRICE_MOVED":
+            c.moved.append((it, k))
         else:
-            candidates.append(it)
+            above.append(it)
 
     if anchor_idx is not None:
-        below = items[anchor_idx + 1:]
-        silent = [it for it in below
-                  if not (it.unique_id in state.known and state.known[it.unique_id].seller_key == it.seller_key)]
-        moved_below = [it for it in below
-                       if it.unique_id in state.known and state.known[it.unique_id].seller_key == it.seller_key
-                       and (state.known[it.unique_id].stars != it.stars
-                            or state.known[it.unique_id].ton_nano != it.ton_nano)]
-        return Classification(True, new=candidates, silent=silent, moved=moved + moved_below,
-                              anchor=items[anchor_idx])
+        c.decided = True
+        c.known.append(items[anchor_idx])
+        if state.complete:
+            c.new = above
+            c.reason = "above_anchor"
+        else:
+            c.silent += [(it, "collection_not_fully_synced") for it in above]
+            c.reason = "above_anchor_but_incomplete"
+        for it in items[anchor_idx + 1:]:
+            st, k = item_status(it, known)
+            if st == "UNKNOWN":
+                c.silent.append((it, "first_seen_below_anchor"))
+            elif st == "PRICE_MOVED":
+                c.moved.append((it, k))
+            else:
+                c.known.append(it)
+        return c
 
     if reached_end:
+        c.decided = True
         if state.complete:
-            return Classification(True, new=candidates, moved=moved)
-        return Classification(True, silent=candidates, moved=moved)
+            c.new = above
+            c.reason = "end_of_list_complete"
+        else:
+            c.silent += [(it, "end_of_list_incomplete") for it in above]
+            c.reason = "end_of_list_incomplete"
+        return c
 
-    return Classification(False, moved=moved)
+    c.reason = "anchor_not_found"
+    return c

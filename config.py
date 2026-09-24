@@ -82,7 +82,10 @@ class Settings:
 
     # --- трекер ---
     initial_sync: bool = True
-    initial_sync_pages: int = 1
+    initial_sync_pages: int = 0              # 0 = все страницы (полная синхронизация, рекомендуется)
+    sync_passes: int = 3                     # доп. проходы полной синхронизации, если выдача «уехала»
+    resync_retry_seconds: float = 300.0
+    max_same_collection_streak: int = 1      # не больше N отправок подряд из одной коллекции (0 = без лимита)
     tracker_interval: float = 1.0
     page_limit: int = 30
     live_max_pages: int = 5
@@ -157,6 +160,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "MAX_CONCURRENT_SESSIONS": ("max_concurrent_sessions", lambda v: max(1, int(v))),
     "TEST_MODE": ("test_mode", lambda v: _bool(v, False)),
     "UNIQUE_GIFTS": ("unique_gifts", lambda v: _bool(v, True)),
+    "MAX_SAME_COLLECTION_STREAK": ("max_same_collection_streak", lambda v: max(0, int(v))),
     "UNIQUE_SELLERS": ("unique_sellers", lambda v: _bool(v, True)),
     "SELLER_REPEAT_HOURS": ("seller_repeat_hours", lambda v: max(0.0, float(v))),
     "ALLOW_ALL_USERS": ("allow_all_users", lambda v: _bool(v, True)),
@@ -184,7 +188,10 @@ def _from_env() -> Settings:
         seller_repeat_hours=max(0.0, _float(e("SELLER_REPEAT_HOURS"), 0.0)),
         seller_phone_prefixes=_str_list(e("SELLER_PHONE_PREFIXES") or "7"),
         initial_sync=_bool(e("INITIAL_SYNC"), True),
-        initial_sync_pages=max(1, _int(e("INITIAL_SYNC_PAGES"), 1)),
+        initial_sync_pages=max(0, _int(e("INITIAL_SYNC_PAGES"), 0)),
+        sync_passes=max(1, _int(e("SYNC_PASSES"), 3)),
+        resync_retry_seconds=max(10.0, _float(e("RESYNC_RETRY_SECONDS"), 300.0)),
+        max_same_collection_streak=max(0, _int(e("MAX_SAME_COLLECTION_STREAK"), 1)),
         tracker_interval=max(0.2, _float(e("TRACKER_INTERVAL"), 1.0)),
         page_limit=max(1, min(100, _int(e("PAGE_LIMIT"), 30))),
         live_max_pages=max(1, _int(e("LIVE_MAX_PAGES"), 5)),

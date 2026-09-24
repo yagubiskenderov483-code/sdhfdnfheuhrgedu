@@ -14,7 +14,7 @@ from typing import Any, Iterable
 
 import aiosqlite
 
-from database.migrations import MIGRATIONS, SCHEMA_VERSION
+from database.migrations import MIGRATIONS, REQUIRED_COLUMNS, SCHEMA_VERSION
 from database.models import Listing, ListingStatus, utcnow_iso
 from utils.logger import get_logger
 
@@ -54,7 +54,12 @@ class Database:
         await self.conn.execute("PRAGMA journal_mode=WAL")
         await self.conn.execute("PRAGMA synchronous=NORMAL")
         await self.conn.execute("PRAGMA busy_timeout=5000")
-        await self._migrate()
+        try:
+            await self._migrate()
+        except Exception:
+            await self.conn.close()
+            self.conn = None
+            raise
         log.info("Database ready: %s", self.path.name)
 
     async def close(self) -> None:
@@ -68,14 +73,45 @@ class Database:
         cur = await self.conn.execute("SELECT value FROM kv WHERE key='schema_version'")
         row = await cur.fetchone()
         current = int(row[0]) if row else 0
+        if current > SCHEMA_VERSION:
+            log.warning("tracker.db schema v%s is newer than this code (v%s). Make a backup of %s "
+                        "before continuing.", current, SCHEMA_VERSION, self.path.name)
         for version in range(current + 1, SCHEMA_VERSION + 1):
             for stmt in MIGRATIONS[version]:
-                await self.conn.execute(stmt)
+                try:
+                    await self.conn.execute(stmt)
+                except aiosqlite.OperationalError as e:
+                    # колонка уже есть (частично применённая миграция) — пропускаем
+                    if "duplicate column" in str(e).lower():
+                        continue
+                    await self.conn.rollback()
+                    raise RuntimeError(
+                        f"DB migration v{version} failed: {e}. tracker.db НЕ удалена. Сделайте backup "
+                        f"файла {self.path} и либо исправьте его, либо переименуйте, чтобы начать с "
+                        f"чистой базы (будет выполнена новая initial sync).") from e
             await self.conn.execute(
                 "INSERT INTO kv(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(version),))
             log.info("Applied DB migration v%s", version)
         await self.conn.commit()
+        await self._check_schema()
+
+    async def _check_schema(self) -> None:
+        """Защита от старой/битой базы: без нужных колонок работать нельзя — но и не удаляем."""
+        assert self.conn
+        problems = []
+        for table, cols in REQUIRED_COLUMNS.items():
+            cur = await self.conn.execute(f"PRAGMA table_info({table})")
+            have = {r[1] for r in await cur.fetchall()}
+            missing = cols - have
+            if missing:
+                problems.append(f"{table}: нет колонок {sorted(missing)}")
+        if problems:
+            msg = ("tracker.db несовместима с текущей версией (" + "; ".join(problems) + "). "
+                   f"База НЕ удалена. Сделайте backup {self.path} и переименуйте файл — "
+                   "трекер создаст новую базу и выполнит тихую initial sync.")
+            log.warning(msg)
+            raise RuntimeError(msg)
 
     # ------------------------------------------------------------------ kv
     async def kv_get(self, key: str, default: str | None = None) -> str | None:
@@ -96,35 +132,46 @@ class Database:
         await self.kv_set_many({key: value})
 
     # ------------------------------------------------------------------ market state
-    async def load_market_items(self) -> dict[int, dict[int, tuple[str, int | None, int | None]]]:
-        """{gift_id: {unique_id: (seller_key, stars, ton_nano)}}"""
+    async def lookup_market_items(self, unique_ids: Iterable[int]) -> dict[int, tuple[str, str, int | None, int | None]]:
+        """{unique_id: (listing_id, seller_key, stars, ton_nano)} только для запрошенных NFT."""
         assert self.conn
-        out: dict[int, dict[int, tuple[str, int | None, int | None]]] = {}
-        async with self.conn.execute(
-                "SELECT unique_id, gift_id, seller_key, stars, ton_nano FROM market_items") as cur:
-            async for r in cur:
-                out.setdefault(r["gift_id"], {})[r["unique_id"]] = (r["seller_key"], r["stars"], r["ton_nano"])
+        ids = list({int(u) for u in unique_ids})
+        out: dict[int, tuple[str, str, int | None, int | None]] = {}
+        for i in range(0, len(ids), 500):
+            chunk = ids[i:i + 500]
+            q = ",".join("?" for _ in chunk)
+            async with self.conn.execute(
+                    f"SELECT unique_id, listing_id, seller_key, stars, ton_nano FROM market_items "
+                    f"WHERE unique_id IN ({q})", chunk) as cur:
+                async for r in cur:
+                    out[r["unique_id"]] = (r["listing_id"] or f"{r['unique_id']}:{r['seller_key']}",
+                                           r["seller_key"], r["stars"], r["ton_nano"])
         return out
 
-    async def upsert_market_items(self, rows: Iterable[tuple[int, int, str, int | None, int | None]]) -> None:
-        """rows: (unique_id, gift_id, seller_key, stars, ton_nano)"""
+    async def upsert_market_items(self, rows: Iterable[tuple]) -> None:
+        """rows: (unique_id, gift_id, listing_id, seller_key, stars, ton_nano, state)"""
         assert self.conn
         now = utcnow_iso()
-        data = [(u, g, s, st, t, now, now) for (u, g, s, st, t) in rows]
+        data = [(*r, now, now) for r in rows]
         if not data:
             return
         async with self._write_lock:
             await self.conn.executemany(
-                """INSERT INTO market_items(unique_id, gift_id, seller_key, stars, ton_nano, first_seen, last_seen)
-                   VALUES(?,?,?,?,?,?,?)
+                """INSERT INTO market_items(unique_id, gift_id, listing_id, seller_key, stars, ton_nano,
+                                            state, first_seen, last_seen)
+                   VALUES(?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(unique_id) DO UPDATE SET
-                     gift_id=excluded.gift_id, seller_key=excluded.seller_key, stars=excluded.stars,
-                     ton_nano=excluded.ton_nano, last_seen=excluded.last_seen""", data)
+                     gift_id=excluded.gift_id, listing_id=excluded.listing_id,
+                     seller_key=excluded.seller_key, stars=excluded.stars, ton_nano=excluded.ton_nano,
+                     state=excluded.state, last_seen=excluded.last_seen""", data)
             await self.conn.commit()
 
-    async def count_market_items(self) -> int:
+    async def count_market_items(self, gift_id: int | None = None) -> int:
         assert self.conn
-        cur = await self.conn.execute("SELECT COUNT(*) FROM market_items")
+        if gift_id is None:
+            cur = await self.conn.execute("SELECT COUNT(*) FROM market_items")
+        else:
+            cur = await self.conn.execute("SELECT COUNT(*) FROM market_items WHERE gift_id=?", (gift_id,))
         return (await cur.fetchone())[0]
 
     # ------------------------------------------------------------------ collection state
