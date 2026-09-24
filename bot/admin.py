@@ -146,6 +146,9 @@ def build_routers(app: "App") -> list[Router]:
     async def cmd_start(m: Message) -> None:
         if m.from_user and is_allowed(m.from_user.id):
             await m.answer(HELP if m.from_user.id in all_admins() else USER_HELP)
+            if not app.sessions.usable():
+                await m.answer("⚠️ Нет ни одного авторизованного аккаунта — трекер не работает.\n"
+                               "Нажмите /add_session: нужен только номер телефона и код.")
         else:
             await m.answer(f"Ваш Telegram ID: <code>{m.from_user.id if m.from_user else '?'}</code>\n"
                            "Доступ только для администраторов.")
@@ -311,9 +314,17 @@ def build_routers(app: "App") -> list[Router]:
     async def add_start(m: Message, state: FSMContext) -> None:
         await _cleanup_pending(m.from_user.id)
         await state.clear()
-        await state.set_state(AddSession.api_id)
-        await m.answer("➕ <b>Новая session</b>\n\nШаг 1/5. Отправьте <b>API ID</b> (my.telegram.org)\n"
-                       "или <code>-</code>, чтобы использовать API_ID из .env.\n/cancel — отмена")
+        # API_ID / API_HASH берутся из .env — пользователю нужен только номер и код.
+        # Свои API можно задать так: /add_session api
+        if (m.text or "").strip().endswith(" api") or not (settings.api_id and settings.api_hash):
+            await state.set_state(AddSession.api_id)
+            await m.answer("➕ <b>Новая session</b>\n\nОтправьте <b>API ID</b> (my.telegram.org)\n"
+                           "или <code>-</code>, чтобы использовать API_ID из .env.\n/cancel — отмена")
+            return
+        await state.update_data(api_id=settings.api_id, api_hash=settings.api_hash)
+        await state.set_state(AddSession.phone)
+        await m.answer("➕ <b>Добавление аккаунта</b>\n\n"
+                       "Шаг 1/3. Отправьте <b>номер телефона</b> в формате +79991234567\n/cancel — отмена")
 
     @users.message(AddSession.api_id, F.text)
     async def add_api_id(m: Message, state: FSMContext) -> None:
@@ -330,7 +341,7 @@ def build_routers(app: "App") -> list[Router]:
             return
         await state.update_data(api_id=api_id)
         await state.set_state(AddSession.api_hash)
-        await m.answer("Шаг 2/5. Отправьте <b>API HASH</b> или <code>-</code> (из .env).\n"
+        await m.answer("Отправьте <b>API HASH</b> или <code>-</code> (из .env).\n"
                        "Сообщение будет сразу удалено.")
 
     @users.message(AddSession.api_hash, F.text)
@@ -349,7 +360,7 @@ def build_routers(app: "App") -> list[Router]:
             return
         await state.update_data(api_hash=api_hash)
         await state.set_state(AddSession.phone)
-        await m.answer("Шаг 3/5. Отправьте <b>номер телефона</b> аккаунта в формате +79991234567")
+        await m.answer("Отправьте <b>номер телефона</b> аккаунта в формате +79991234567")
 
     @users.message(AddSession.phone, F.text)
     async def add_phone(m: Message, state: FSMContext) -> None:
@@ -389,7 +400,7 @@ def build_routers(app: "App") -> list[Router]:
                                    "hash": sent.phone_code_hash, "api_id": data["api_id"],
                                    "api_hash": data["api_hash"]}
         await state.set_state(AddSession.code)
-        await m.answer("Шаг 4/5. Отправьте <b>код входа</b> из Telegram.\n\n"
+        await m.answer("Шаг 2/3. Отправьте <b>код входа</b>, который пришёл в Telegram.\n\n"
                        "⚠️ Вводите код <b>с пробелами или дефисами</b>, например <code>1 2 3 4 5</code> — "
                        "иначе Telegram сочтёт, что код переслали, и заблокирует вход.")
 
@@ -420,7 +431,7 @@ def build_routers(app: "App") -> list[Router]:
             await p["client"].sign_in(phone=p["phone"], code=code, phone_code_hash=p["hash"])
         except errors.SessionPasswordNeededError:
             await state.set_state(AddSession.password)
-            await m.answer("Шаг 5/5. Включена 2FA. Отправьте <b>пароль</b> (сообщение будет удалено).")
+            await m.answer("Шаг 3/3. Включена 2FA. Отправьте <b>пароль</b> (сообщение будет удалено).")
             return
         except errors.PhoneCodeInvalidError:
             await m.answer("❌ Неверный код. Отправьте ещё раз (с пробелами) или /cancel")
