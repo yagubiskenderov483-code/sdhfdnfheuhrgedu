@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import html
 import signal
+import time
 import sys
 
 from aiogram import Bot, Dispatcher
@@ -47,6 +48,8 @@ class App:
         self.backup = SessionBackup(self.bot, self.storage, all_admins, save_admins,
                                     history_export=lambda: self.db.export_sent_history(),
                                     history_import=lambda rows: self.db.import_sent_history(rows))
+        self.backup.market_export = self.db.export_market_snapshot
+        self.backup.market_import = self.db.import_market_snapshot
         self.formatter = MessageFormatter(settings.path(settings.template_path))
         self.price_filter = PriceFilter()
         self.seller_filter = SellerFilter(settings.path("data"))
@@ -116,6 +119,7 @@ class App:
         await self.db.connect()
         # после деплоя папка telegram_sessions/ может быть пустой → восстановить из Telegram
         await self.backup.restore()
+        await self.backup.restore_market()    # снимок рынка → без долгой полной синхронизации
         await self.sessions.start_all()
         await self.backup.sync_if_needed()   # например, sessions положены в папку вручную
         if run_bot:
@@ -146,16 +150,28 @@ class App:
             log.warning("setMyCommands failed: %s", e)
 
     async def _backup_loop(self) -> None:
-        """Раз в 10 минут сохранять историю отправленных лотов (если что-то отправлено)."""
+        """История отправленного — раз в 10 мин (если что-то отправлено);
+        снимок рынка — когда все коллекции впервые в LIVE и далее раз в MARKET_BACKUP_MINUTES."""
         last_sent = self.pipeline.stats["sent"]
+        last_hist = last_market = time.monotonic()
+        market_saved_full = False
         while True:
-            await asyncio.sleep(600)
-            if self.pipeline.stats["sent"] != last_sent and self.storage.list_sessions():
-                last_sent = self.pipeline.stats["sent"]
-                try:
+            await asyncio.sleep(60)
+            if not self.storage.list_sessions():
+                continue
+            now = time.monotonic()
+            try:
+                if self.pipeline.stats["sent"] != last_sent and now - last_hist >= 600:
+                    last_sent, last_hist = self.pipeline.stats["sent"], now
                     await self.backup.save()
-                except Exception:
-                    log.exception("Periodic backup failed")
+                live, total = self.coordinator.sync_progress()
+                all_live = total > 0 and live == total
+                if (all_live and not market_saved_full) or now - last_market >= settings.market_backup_minutes * 60:
+                    if await self.backup.save_market():
+                        last_market = now
+                        market_saved_full = market_saved_full or all_live
+            except Exception:
+                log.exception("Periodic backup failed")
 
     async def stop(self) -> None:
         log.info("Shutting down...")
@@ -167,6 +183,7 @@ class App:
         try:
             if self.storage.list_sessions():
                 await asyncio.wait_for(self.backup.save(), timeout=15)
+                await asyncio.wait_for(self.backup.save_market(), timeout=40)
         except Exception:
             pass
         # дать очереди дообработать уже найденные листинги (до 15 сек)

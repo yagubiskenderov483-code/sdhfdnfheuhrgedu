@@ -235,7 +235,9 @@ def build_routers(app: "App") -> list[Router]:
             f"🟡 Connecting: {c.get('CONNECTING', 0)}\n"
             f"📚 Collections LIVE: {coord.sync_progress()[0]}/{len(coord.states)} "
             f"(остальные в тихой синхронизации)\n"
-            f"🔁 Poll cycle: {f'{cycle:.1f}s' if cycle else '—'} (target {settings.tracker_interval}s)\n"
+            f"⚡ Реакция на новый лот: {f'{coord.hot_latency:.1f}s' if coord.hot_latency is not None else '—'} "
+            f"(+ до {settings.catalog_interval:g}s на проверку каталога)\n"
+            f"🔁 Страховочный обход: {f'{cycle:.0f}s' if cycle else '—'} (цель {settings.cold_poll_interval:g}s)\n"
             f"📦 Scanned: {coord.stats['scanned']}\n"
             f"🎁 New listings: {pipe.stats['new']}\n"
             f"📨 Sent: {pipe.stats['sent']}\n"
@@ -349,6 +351,7 @@ def build_routers(app: "App") -> list[Router]:
         rej = await app.db.seller_reject_counts()
         if rej:
             names = {"PAID_MESSAGES": "платные сообщения / только Premium", "TOO_MANY_NFTS": "много NFT",
+                     "LEVEL_TOO_HIGH": "Level выше лимита",
                      "UNKNOWN_BLOCKED": "не русский (нет данных)", "PHONE_MISMATCH": "номер не +7",
                      "BLACKLIST": "blacklist"}
             lines += ["", "<b>Почему отсеяны продавцы:</b>"]

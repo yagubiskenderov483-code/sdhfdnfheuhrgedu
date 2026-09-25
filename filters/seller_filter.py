@@ -106,6 +106,11 @@ class SellerFilter:
             return SellerResult(False, "TOO_MANY_NFTS",
                                 f"{l.seller_nfts} NFT > MAX_SELLER_NFTS={settings.max_seller_nfts}")
 
+        # Level продавца (UserFull.stars_rating.level); нет рейтинга = Level 0
+        if settings.max_seller_level > 0 and (l.level or 0) > settings.max_seller_level:
+            return SellerResult(False, "LEVEL_TOO_HIGH",
+                                f"level {l.level} > MAX_SELLER_LEVEL={settings.max_seller_level}")
+
         if not settings.russian_only:
             return SellerResult(True, "DISABLED", "RUSSIAN_ONLY=false")
 

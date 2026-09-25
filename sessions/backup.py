@@ -25,6 +25,8 @@ import hashlib
 import io
 import json
 import sqlite3
+import time
+import zlib
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -42,6 +44,9 @@ log = get_logger("backup")
 BACKUP_FILENAME = "sessions.backup"
 POINTER_LANG = "yo"
 POINTER_PREFIX = "gtb1|"
+POINTER_PREFIX2 = "gtb2"
+MARKET_FILENAME = "market.backup"
+MAX_BOT_DOWNLOAD = 19 * 1024 * 1024       # Bot API отдаёт файлы до 20 МБ
 
 
 def _fernet() -> Fernet | None:
@@ -91,26 +96,41 @@ class SessionBackup:
         self._last_chat: int | None = None
         self._last_msg: int | None = None
         self.last_error: str | None = None
+        self._ptr: dict | None = None
+        self.market_export: Callable[[], Awaitable[dict]] | None = None
+        self.market_import: Callable[[dict], Awaitable[int]] | None = None
 
     # ------------------------------------------------------------------ pointer (bot description)
-    async def _read_pointer(self) -> tuple[str, int | None, int | None] | None:
+    async def _read_pointer(self) -> dict:
+        """{"s": [file_id, chat, msg], "m": [file_id, chat, msg, ts]} — где лежат копии."""
+        if self._ptr is not None:
+            return self._ptr
         try:
             d = await self.bot.get_my_description(language_code=POINTER_LANG)
         except Exception as e:
             log.warning("getMyDescription failed: %s", e)
-            return None
+            return {}
         text = (d.description or "") if d else ""
-        if not text.startswith(POINTER_PREFIX):
-            return None
-        parts = text[len(POINTER_PREFIX):].split("|")
-        file_id = parts[0]
-        chat = int(parts[1]) if len(parts) > 1 and parts[1].lstrip("-").isdigit() else None
-        msg = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
-        return file_id, chat, msg
+        ptr: dict = {}
+        if text.startswith(POINTER_PREFIX2):
+            try:
+                ptr = json.loads(text[len(POINTER_PREFIX2):])
+            except json.JSONDecodeError:
+                ptr = {}
+        elif text.startswith(POINTER_PREFIX):          # старый формат
+            parts = text[len(POINTER_PREFIX):].split("|")
+            chat = int(parts[1]) if len(parts) > 1 and parts[1].lstrip("-").isdigit() else None
+            msg = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else None
+            ptr = {"s": [parts[0], chat, msg]}
+        self._ptr = ptr
+        return ptr
 
-    async def _write_pointer(self, file_id: str, chat: int, msg: int) -> None:
-        await self.bot.set_my_description(description=f"{POINTER_PREFIX}{file_id}|{chat}|{msg}",
+    async def _write_pointer(self, key: str, value: list) -> None:
+        ptr = dict(await self._read_pointer())
+        ptr[key] = value
+        await self.bot.set_my_description(description=POINTER_PREFIX2 + json.dumps(ptr, separators=(",", ":")),
                                           language_code=POINTER_LANG)
+        self._ptr = ptr
 
     # ------------------------------------------------------------------ save
     def candidate_chats(self, hint: int | None = None) -> list[int]:
@@ -142,9 +162,9 @@ class SessionBackup:
         blob = f.encrypt(json.dumps(payload).encode())
 
         if self._last_chat is None:
-            ptr = await self._read_pointer()
+            ptr = (await self._read_pointer()).get("s")
             if ptr:
-                _, self._last_chat, self._last_msg = ptr
+                _, self._last_chat, self._last_msg = ptr[:3]
 
         errors = []
         for chat in self.candidate_chats(chat_hint):
@@ -153,7 +173,7 @@ class SessionBackup:
                     chat, BufferedInputFile(blob, BACKUP_FILENAME),
                     caption=f"🔐 Служебная копия трекера: аккаунтов {len(items)}. Зашифрована, не удаляйте.",
                     disable_notification=True)
-                await self._write_pointer(msg.document.file_id, chat, msg.message_id)
+                await self._write_pointer("s", [msg.document.file_id, chat, msg.message_id])
             except Exception as e:
                 errors.append(f"{chat}: {e}")
                 continue
@@ -180,11 +200,11 @@ class SessionBackup:
     # ------------------------------------------------------------------ restore
     async def restore(self) -> int:
         f = _fernet()
-        ptr = await self._read_pointer()
-        if f is None or ptr is None:
+        ptr = (await self._read_pointer()).get("s")
+        if f is None or not ptr:
             log.info("No backup pointer found — nothing to restore")
             return 0
-        file_id, self._last_chat, self._last_msg = ptr
+        file_id, self._last_chat, self._last_msg = ptr[:3]
         try:
             buf = io.BytesIO()
             await self.bot.download(file_id, destination=buf)
@@ -220,3 +240,60 @@ class SessionBackup:
                 log.error("Restore %s failed: %s", it.get("name"), e)
         log.info("Restored %s session(s) from Telegram backup", restored)
         return restored
+
+    # ------------------------------------------------------------------ market snapshot
+    async def save_market(self) -> bool:
+        """Снимок известных лотов рынка — чтобы после деплоя не перечитывать весь маркет заново."""
+        f = _fernet()
+        if f is None or self.market_export is None:
+            return False
+        try:
+            snap = await self.market_export()
+            snap["ts"] = time.time()
+            blob = f.encrypt(zlib.compress(json.dumps(snap, separators=(",", ":")).encode(), 6))
+        except Exception as e:
+            log.warning("Market snapshot export failed: %s", e)
+            return False
+        if len(blob) > MAX_BOT_DOWNLOAD:
+            log.warning("Market snapshot too big for Bot API (%.1f MB) — skipped", len(blob) / 2**20)
+            return False
+        old = (await self._read_pointer()).get("m")
+        for chat in self.candidate_chats():
+            try:
+                msg = await self.bot.send_document(
+                    chat, BufferedInputFile(blob, MARKET_FILENAME),
+                    caption="🗂 Служебный снимок рынка трекера (ускоряет запуск после деплоя). Не удаляйте.",
+                    disable_notification=True)
+                await self._write_pointer("m", [msg.document.file_id, chat, msg.message_id, int(time.time())])
+            except Exception as e:
+                log.warning("Market snapshot upload to %s failed: %s", chat, e)
+                continue
+            if old and len(old) >= 3 and (old[1], old[2]) != (chat, msg.message_id):
+                try:
+                    await self.bot.delete_message(old[1], old[2])
+                except Exception:
+                    pass
+            log.info("Market snapshot saved: %s items, %.1f MB", len(snap.get("items", [])), len(blob) / 2**20)
+            return True
+        return False
+
+    async def restore_market(self) -> int:
+        f = _fernet()
+        ptr = (await self._read_pointer()).get("m")
+        if f is None or not ptr or self.market_import is None:
+            return 0
+        age_h = (time.time() - (ptr[3] if len(ptr) > 3 else 0)) / 3600
+        if age_h > settings.market_snapshot_max_age_hours:
+            log.info("Market snapshot is %.1f h old (> %s h) — full silent sync instead",
+                     age_h, settings.market_snapshot_max_age_hours)
+            return 0
+        try:
+            buf = io.BytesIO()
+            await self.bot.download(ptr[0], destination=buf)
+            snap = json.loads(zlib.decompress(f.decrypt(buf.getvalue())))
+            n = await self.market_import(snap)
+            log.info("Market snapshot restored: %s items (%.1f h old) — no full resync needed", n, age_h)
+            return n
+        except Exception as e:
+            log.warning("Market snapshot restore failed: %s — full silent sync instead", e)
+            return 0

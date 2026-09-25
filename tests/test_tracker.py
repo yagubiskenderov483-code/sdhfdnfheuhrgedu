@@ -122,6 +122,7 @@ def reset_settings():
     settings.russian_only = False
     settings.require_free_messages = False
     settings.max_seller_nfts = 0
+    settings.max_seller_level = 0
     settings.fetch_full_seller = False
     settings.test_mode = False
     settings.unique_gifts = False
@@ -446,7 +447,69 @@ def test_15_seller_rules():
     assert f.check(Listing(**base, messages="бесплатно", seller_nfts=2, seller_about=None,
                            seller_channel="Мой канал про подарки")).code == "CHANNEL_RU"
     assert f.check(Listing(**base, messages="бесплатно", seller_nfts=2)).code == "UNKNOWN_BLOCKED"
+    settings.max_seller_level = 5
+    assert f.check(Listing(**base, messages="бесплатно", level=5, seller_about="Продаю подарки")).passed
+    assert f.check(Listing(**base, messages="бесплатно", level=6,
+                           seller_about="Продаю подарки")).code == "LEVEL_TOO_HIGH"
     print("✔ TEST 15 продавец: платные сообщения / >12 NFT отсеяны, русский bio или канал проходят")
+
+
+async def test_16_market_snapshot_redeploy():
+    """Снимок рынка: после «деплоя» (пустая база) трекер сразу в LIVE без полной синхронизации,
+    старые лоты не отправляются, новые — отправляются."""
+    from sessions.backup import SessionBackup
+    from sessions.storage import SessionStorage
+    e, tmp = await fresh(300)
+    settings.bot_token, settings.session_backup_key, settings.target_chat_id = "123:abc", "", -100
+    bot = FakeBackupBot()
+    b = SessionBackup(bot, SessionStorage(tmp / "s", 1, "h" * 32), lambda: {1})
+    b.market_export = e.db.export_market_snapshot
+    assert await b.save_market()
+    await e.shutdown()
+    # новая пустая база, та же «Telegram»-копия
+    tmp2 = Path(tempfile.mkdtemp())
+    db2 = Database(tmp2 / "t.db"); await db2.connect()
+    b2 = SessionBackup(bot, SessionStorage(tmp2 / "s", 1, "h" * 32), lambda: set())
+    b2.market_import = db2.import_market_snapshot
+    assert await b2.restore_market() == 300
+    await db2.close()
+    x = e.market.item(9000)
+    e.market.list_new(x)
+    e.market.change_price(e.market.lots[GID][100].unique_id, 7777)
+    e2 = Env(tmp2, e.market)
+    e2.db = Database(tmp2 / "t.db"); await e2.db.connect()
+    e2.sender = FakeSender()
+    e2.pipe = ListingPipeline(e2.db, FakeSessions(), e2.sender, MessageFormatter(TEMPLATE), PriceFilter(),
+                              SellerFilter(tmp2))
+    e2.coord = MarketplaceCoordinator(e2.db, FakeSessions(), e2.pipe)
+    e2.pipe.start()
+    await e2.coord.start()
+    for t in e2.coord._tasks:
+        t.cancel()
+    await e2.pipe.queue.join()
+    assert e2.coord.sync_progress() == (1, 1), "коллекция сразу LIVE — без полной синхронизации"
+    assert e2.pipe.stats["new"] == 1 and len(e2.sender.sent) == 1
+    await e2.shutdown(); shutil.rmtree(tmp); shutil.rmtree(tmp2)
+    print("✔ TEST 16 снимок рынка: после деплоя сразу LIVE, найден только новый лот (смена цены — нет)")
+
+
+async def test_17_hot_cold_schedule():
+    e, tmp = await fresh(50)
+    settings.cold_poll_interval, settings.tracker_interval = 20.0, 1.0
+    import time as _t
+    st = e.coord.states[GID]
+    e.coord._running.add(GID)
+    await e.coord._live_poll(st)
+    assert e.coord._due[GID] - _t.monotonic() > 15, "без изменений — страховочный опрос нескоро"
+    e.market.list_new(e.market.item(9000))
+    await e.coord.refresh_catalog()
+    assert e.coord._due[GID] == 0.0, "каталог показал изменение → опрос сразу"
+    e.coord._running.add(GID)
+    await e.coord._live_poll(st)
+    await e.pipe.queue.join()
+    assert e.pipe.stats["new"] == 1 and e.coord._due[GID] - _t.monotonic() < 2
+    await e.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 17 без изменений — опрос раз в 20с; изменился счётчик в каталоге — опрос сразу")
 
 
 async def run() -> None:
@@ -454,7 +517,7 @@ async def run() -> None:
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
               test_8_seller_change, test_9_burst_500, test_10_no_anchor, test_11_filters_and_repeats,
               test_12_count_mismatch_and_backup_fallback, test_13_backup_survives_deploy,
-              test_14_ton_rate_changes):
+              test_14_ton_rate_changes, test_16_market_snapshot_redeploy, test_17_hot_cold_schedule):
         await t()
     test_15_seller_rules()
     print("\nALL TESTS PASSED")

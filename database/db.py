@@ -284,6 +284,30 @@ class Database:
             await self.conn.commit()
         return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 
+    async def export_market_snapshot(self) -> dict:
+        assert self.conn
+        cur = await self.conn.execute("SELECT unique_id, gift_id, seller_key, stars, ton_nano FROM market_items")
+        items = [list(r) for r in await cur.fetchall()]
+        return {"v": 1, "items": items, "collections": await self.load_collection_states()}
+
+    async def import_market_snapshot(self, snap: dict) -> int:
+        """Только в пустую базу (свежий деплой) — существующее состояние не перезаписываем."""
+        assert self.conn
+        if await self.count_market_items() > 0:
+            return 0
+        now = utcnow_iso()
+        rows = [(u, g, f"{u}:{sk}", sk, st, t, "KNOWN", now, now) for u, g, sk, st, t in snap.get("items", [])]
+        async with self._write_lock:
+            await self.conn.executemany(
+                "INSERT OR IGNORE INTO market_items(unique_id, gift_id, listing_id, seller_key, stars, ton_nano, "
+                "state, first_seen, last_seen) VALUES(?,?,?,?,?,?,?,?,?)", rows)
+            await self.conn.commit()
+        for c in snap.get("collections", []):
+            await self.save_collection_state({k: c.get(k) for k in (
+                "gift_id", "title", "synced", "complete", "last_cursor", "last_seen_listing_id",
+                "last_seen_timestamp", "availability_resale", "last_poll", "last_session")})
+        return len(rows)
+
     async def seller_reject_counts(self) -> dict[str, int]:
         assert self.conn
         cur = await self.conn.execute(

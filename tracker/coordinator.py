@@ -70,6 +70,8 @@ class MarketplaceCoordinator:
         self._poll_gap: dict[int, float] = {}
         self._tasks: list[asyncio.Task] = []
         self._sync_retry_at: dict[int, float] = {}
+        self._hot_since: dict[int, float] = {}
+        self.hot_latency: float | None = None     # сек от изменения счётчика в каталоге до опроса коллекции
         self._stop = asyncio.Event()
         self.stats = {"scanned": 0, "polls": 0, "poll_errors": 0, "silent": 0, "price_moves": 0,
                       "resyncs": 0}
@@ -139,10 +141,11 @@ class MarketplaceCoordinator:
             if c.availability_resale != st.availability_resale:
                 st.availability_resale = c.availability_resale
                 self._due[c.gift_id] = 0.0  # hot → опросить немедленно
+                self._hot_since.setdefault(c.gift_id, time.monotonic())
                 self._dirty.add(c.gift_id)
                 hot += 1
             self._due.setdefault(c.gift_id, 0.0)
-        if added or hot:
+        if added:
             log.info("Catalog: %s collections tracked (+%s new, %s changed)", len(self.states), added, hot)
 
     # ------------------------------------------------------------------ polling one collection
@@ -495,8 +498,13 @@ class MarketplaceCoordinator:
 
     async def _live_poll(self, st: CollectionState) -> None:
         gid = st.gift_id
+        found = 0
+        hot_at = self._hot_since.pop(gid, None)
+        if hot_at is not None:
+            lat = time.monotonic() - hot_at
+            self.hot_latency = lat if self.hot_latency is None else self.hot_latency * 0.8 + lat * 0.2
         try:
-            await self._poll_safe(st, "live")
+            found = await self._poll_safe(st, "live")
         finally:
             now = time.monotonic()
             prev = self._last_poll_mono.get(gid)
@@ -504,7 +512,9 @@ class MarketplaceCoordinator:
                 g = now - prev
                 self._poll_gap[gid] = g if gid not in self._poll_gap else self._poll_gap[gid] * 0.8 + g * 0.2
             self._last_poll_mono[gid] = now
-            self._due[gid] = now + settings.tracker_interval
+            # коллекция, где только что были новые лоты, остаётся «горячей»; остальные — страховочный
+            # опрос раз в COLD_POLL_INTERVAL, а мгновенно — когда каталог покажет изменение счётчика
+            self._due[gid] = now + (settings.tracker_interval if found else settings.cold_poll_interval)
             self._running.discard(gid)
 
     async def _catalog_loop(self) -> None:
