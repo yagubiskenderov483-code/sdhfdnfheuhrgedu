@@ -28,6 +28,7 @@ class SessionManager:
         self.limiter = TokenBucket(settings.global_rps)
         self._connect_sem = asyncio.Semaphore(settings.connect_concurrency)
         self._changed = asyncio.Event()
+        self.on_auth_error = None      # async callback(worker)
 
     # ------------------------------------------------------------------ loading
     async def start_all(self) -> None:
@@ -46,6 +47,7 @@ class SessionManager:
             return w
         w = SessionWorker(rec.name, rec.path, rec.api_id, rec.api_hash, self.limiter,
                           lambda: settings.session_rps)
+        w.on_auth_error = self.on_auth_error
         self.workers[rec.name] = w
         async with self._connect_sem:
             await w.connect()

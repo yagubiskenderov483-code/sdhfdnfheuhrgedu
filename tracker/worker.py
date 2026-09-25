@@ -32,6 +32,19 @@ class WorkerStatus(str, Enum):
     STOPPED = "STOPPED"
 
 
+# Почему Telegram «выкинул» аккаунт — понятным языком
+AUTH_REASONS = {
+    "AuthKeyDuplicatedError": "аккаунт был запущен в двух местах одновременно (две копии бота, "
+                              "например старая и новая при деплое) — Telegram аннулировал эту сессию",
+    "AuthKeyUnregisteredError": "сессия завершена: её закрыли в «Устройствах» Telegram, "
+                                "это сделал прежний владелец аккаунта или сам Telegram",
+    "SessionRevokedError": "сессия завершена из «Устройств» Telegram (владелец или прежний владелец аккаунта)",
+    "SessionExpiredError": "сессия истекла",
+    "UserDeactivatedError": "аккаунт удалён",
+    "UserDeactivatedBanError": "аккаунт заблокирован Telegram",
+}
+
+
 class WorkerUnavailable(Exception):
     """Запрос не выполнен по причине, связанной с самой session (flood / disconnect / auth) —
     координатор должен повторить его на другой session."""
@@ -60,6 +73,7 @@ class SessionWorker:
         self._reconnect_attempt = 0
         self._running = True
         self._health_task: asyncio.Task | None = None
+        self.on_auth_error = None          # async callback(worker) — уведомить владельца
 
     # ------------------------------------------------------------------ lifecycle
     def _make_client(self) -> TelegramClient:
@@ -88,7 +102,10 @@ class SessionWorker:
                 await self.client.connect()
             if not await self.client.is_user_authorized():
                 self.status = WorkerStatus.AUTH_ERROR
-                self.reason = "session is not authorized (login required)"
+                self.reason = ("сессия не авторизована: Telegram завершил её (закрыли в «Устройствах» / "
+                               "прежний владелец / две копии бота одновременно)")
+                if self.on_auth_error:
+                    asyncio.get_running_loop().create_task(self.on_auth_error(self))
                 log.warning("Session %s: %s", self.name, self.reason)
                 await self._safe_disconnect()
                 return False
@@ -156,9 +173,15 @@ class SessionWorker:
             pass
 
     def _auth_failed(self, e: Exception) -> None:
+        first = self.status != WorkerStatus.AUTH_ERROR
         self.status = WorkerStatus.AUTH_ERROR
-        self.reason = f"authorization revoked / invalid ({type(e).__name__})"
+        self.reason = f"{AUTH_REASONS.get(type(e).__name__, 'авторизация отозвана Telegram')} ({type(e).__name__})"
         log.error("Session %s: %s", self.name, self.reason)
+        if first and self.on_auth_error:
+            try:
+                asyncio.get_running_loop().create_task(self.on_auth_error(self))
+            except RuntimeError:
+                pass
 
     # ------------------------------------------------------------------ availability
     def is_usable(self) -> bool:

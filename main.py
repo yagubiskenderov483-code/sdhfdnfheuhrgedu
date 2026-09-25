@@ -51,6 +51,7 @@ class App:
         self.backup.market_export = self.db.export_market_snapshot
         self.backup.market_import = self.db.import_market_snapshot
         self.backup.paused_getter = lambda: self.coordinator.paused
+        self.sessions.on_auth_error = self._notify_auth_error
         self.formatter = MessageFormatter(settings.path(settings.template_path))
         self.price_filter = PriceFilter()
         self.seller_filter = SellerFilter(settings.path("data"))
@@ -123,6 +124,11 @@ class App:
         await self.backup.restore_market()    # снимок рынка → без долгой полной синхронизации
         if self.backup.restored_paused:
             await self.db.kv_set("paused", 1)  # пауза, поставленная до деплоя, сохраняется
+        if settings.startup_delay > 0 and self.storage.list_sessions():
+            # при деплое старая копия бота может ещё работать: если обе подключат один аккаунт,
+            # Telegram аннулирует его (AUTH_KEY_DUPLICATED). Даём старой копии завершиться.
+            log.info("Waiting %ss before connecting accounts (old instance shutdown)...", settings.startup_delay)
+            await asyncio.sleep(settings.startup_delay)
         await self.sessions.start_all()
         await self.backup.sync_if_needed()   # например, sessions положены в папку вручную
         if run_bot:
@@ -134,6 +140,20 @@ class App:
                 self.dp.start_polling(self.bot, handle_signals=False), name="admin-bot"))
         self.pipeline.start()
         self._tasks.append(asyncio.create_task(self.coordinator.start(), name="coordinator-start"))
+
+    async def _notify_auth_error(self, w) -> None:
+        owner = next((r.owner_id for r in self.storage.list_sessions() if r.name == w.name), None)
+        targets = {owner} if owner else set()
+        targets |= all_admins()
+        text = (f"⚠️ Аккаунт <b>{html.escape(w.name)}</b> отключён Telegram.\n"
+                f"Причина: {html.escape(w.reason or '—')}\n\n"
+                "Трекер его не удалял — Telegram больше не принимает эту сессию. "
+                "Удалите его в /sessions и добавьте аккаунт заново через /add_session.")
+        for chat in targets:
+            try:
+                await self.bot.send_message(chat, text)
+            except Exception:
+                pass
 
     async def _set_menu(self) -> None:
         """Команды в синей кнопке «Меню» рядом с полем ввода."""
