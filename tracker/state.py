@@ -126,7 +126,18 @@ def same_price(old_stars: int | None, old_ton: int | None, new_stars: int | None
         return True
     if old_ton is not None and old_ton == new_ton:
         return True
+    # иногда Telegram пересчитывает ОБЕ суммы на доли процента (57193⭐/605.87 → 57187⭐/605.75) —
+    # это не действие продавца. Настоящая смена цены — больше PRICE_TOLERANCE.
+    if _close(old_stars, new_stars) or _close(old_ton, new_ton):
+        return True
     return old_stars == new_stars and old_ton == new_ton
+
+
+PRICE_TOLERANCE = 0.005   # 0.5%
+
+
+def _close(a: int | None, b: int | None) -> bool:
+    return a is not None and b is not None and a > 0 and abs(a - b) / a <= PRICE_TOLERANCE
 
 
 def classify(state: CollectionState, items: list[ResaleItem], known: dict[int, KnownItem],

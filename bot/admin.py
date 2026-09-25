@@ -279,7 +279,7 @@ def build_routers(app: "App") -> list[Router]:
             f"🔴 Errors: {c.get('ERROR', 0) + c.get('AUTH_ERROR', 0)}\n"
             f"⏳ FloodWait: {c.get('FLOOD_WAIT', 0)}\n"
             f"🟡 Connecting: {c.get('CONNECTING', 0)}\n"
-            f"📚 Collections LIVE: {coord.sync_progress()[0]}/{len(coord.states)} "
+            f"📚 Collections LIVE: {coord.sync_progress()[0]}/{coord.sync_progress()[1]} "
             f"(остальные в тихой синхронизации)\n"
             f"🚫 Пропущено коллекций (флор ниже {settings.collection_min_floor}⭐): {len(coord.skipped)}\n"
             f"⚡ Реакция на новый лот: {f'{coord.hot_latency:.1f}s' if coord.hot_latency is not None else '—'} "

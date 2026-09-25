@@ -249,8 +249,17 @@ class SessionWorker:
             self.status = WorkerStatus.ERROR
             self.reason = f"connection{' (proxy ' + mask_proxy(self.proxy) + ')' if self.proxy else ''}: {type(e).__name__}"
             raise WorkerUnavailable(self.reason) from e
+        except errors.ServerError as e:
+            # «Telegram is having internal issues» (500, RpcMcgetFail и т.п.) — сбой на стороне Telegram,
+            # аккаунт в порядке: запрос повторит другой аккаунт
+            raise WorkerUnavailable(f"telegram internal error: {type(e).__name__}") from e
         except errors.RPCError:
             self.errors += 1
+            raise
+        except ValueError as e:
+            # Telethon после нескольких неудачных повторов: «Request was unsuccessful N time(s)»
+            if "unsuccessful" in str(e):
+                raise WorkerUnavailable("telegram internal error (retries exhausted)") from e
             raise
         finally:
             self.busy = False

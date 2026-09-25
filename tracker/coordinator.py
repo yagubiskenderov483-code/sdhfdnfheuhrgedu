@@ -193,7 +193,8 @@ class MarketplaceCoordinator:
         if not names:
             return None
         order = sorted(g for g in self.states if g not in self.skipped)
-        idx = order.index(gid) if gid in self.states else gid
+        # коллекция могла только что стать «пропущенной» по флору — тогда просто любой аккаунт
+        idx = order.index(gid) if gid in order else gid
         return names[idx % len(names)]
 
     def shard_counts(self) -> dict[str, int]:

@@ -615,13 +615,41 @@ async def test_21_ton_priced_lots():
     print("✔ TEST 21 лот за TON: Stars плавают по курсу — не смена цены; настоящая смена — 1 PRICE_MOVE")
 
 
+async def test_22_log_regressions():
+    """Ошибки из логов прода: shard_owner у пропущенной коллекции, сбои Telegram, дрожание цены."""
+    from types import SimpleNamespace as NS
+    from telethon import errors
+    from tracker.state import same_price
+    from tracker.worker import SessionWorker, WorkerUnavailable
+    from tracker.ratelimit import TokenBucket
+    e, tmp = await fresh(10)
+    e.coord.skipped.add(GID)
+    assert e.coord.shard_owner(GID) in ("session_001", "session_002")   # раньше: ValueError
+    e.coord.skipped.discard(GID)
+    await e.shutdown(); shutil.rmtree(tmp)
+    w = SessionWorker("s", Path("/tmp/x.session"), 1, "h", TokenBucket(0), lambda: 100)
+    w.client = object()
+    for exc in (errors.RpcMcgetFailError(request=None), ValueError("Request was unsuccessful 3 time(s)")):
+        async def boom(c, exc=exc):
+            raise exc
+        try:
+            await w.call(boom)
+            raise AssertionError("должно было упасть")
+        except WorkerUnavailable:
+            pass
+    assert same_price(57193, 605_870_000_000, 57187, 605_750_000_000)
+    assert not same_price(29238, 310_000_000_000, 28367, 300_000_000_000)
+    print("✔ TEST 22 ошибки из логов: пропущенная коллекция, сбой Telegram → повтор другим аккаунтом, дрожание цены")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
               test_8_seller_change, test_9_burst_500, test_10_no_anchor, test_11_filters_and_repeats,
               test_12_count_mismatch_and_backup_fallback, test_13_backup_survives_deploy,
               test_14_ton_rate_changes, test_16_market_snapshot_redeploy, test_17_hot_cold_schedule,
-              test_18_pause, test_19_floor_filter, test_21_ton_priced_lots):
+              test_18_pause, test_19_floor_filter, test_21_ton_priced_lots,
+              test_22_log_regressions):
         await t()
     test_15_seller_rules()
     test_20_proxies()
