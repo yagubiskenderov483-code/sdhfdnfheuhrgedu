@@ -82,6 +82,8 @@ class CollectionState:
     last_session: str | None = None
     needs_full_sync: bool = False             # запланирована тихая полная ре-синхронизация
     floor_stars: int | None = None            # StarGift.resell_min_stars — флор коллекции (из каталога)
+    partial: bool = False                     # Telegram отдал при синхронизации заметно меньше лотов, чем count
+    last_count: int | None = None             # ResaleStarGifts.count при последнем чтении
 
     def to_row(self) -> dict:
         return {
@@ -91,6 +93,7 @@ class CollectionState:
             "last_seen_timestamp": self.last_seen_timestamp,
             "availability_resale": self.availability_resale, "last_poll": self.last_poll,
             "last_session": self.last_session,
+            "partial": int(self.partial), "last_count": self.last_count,
         }
 
 

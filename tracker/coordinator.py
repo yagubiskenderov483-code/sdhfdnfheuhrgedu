@@ -108,7 +108,11 @@ class MarketplaceCoordinator:
                 last_seen_listing_id=row["last_seen_listing_id"],
                 last_seen_timestamp=row["last_seen_timestamp"],
                 availability_resale=row["availability_resale"], last_poll=row["last_poll"],
-                last_session=row["last_session"])
+                last_session=row["last_session"],
+                partial=bool(row.get("partial") or 0), last_count=row.get("last_count"))
+            if st.synced and st.last_count is None:
+                # состояние от версии без проверки неполных коллекций → один раз тихо перечитать
+                st.needs_full_sync = True
             self.states[st.gift_id] = st
         for k in ("scanned", "polls"):
             v = await self.db.kv_get(f"stat_{k}")
@@ -290,8 +294,14 @@ class MarketplaceCoordinator:
                      "INITIAL_SYNC" if reason == "initial" else "RESYNC", st.title, pass_no, len(seen), count)
         gap = count - len(seen)
         complete = reached_end and (stable or gap <= max(1, count // 500))
+        # Большие коллекции Telegram иногда отдаёт не целиком (1101 из 10153): повторные проходы
+        # ничего не добавляют. Такую коллекцию читаем дальше, но помечаем partial — для неё
+        # «незнакомый лот наверху» ещё не значит «новый» (см. _apply: сверка с изменением count).
+        partial = complete and gap > max(1, count // 100)
         st.synced = True
         st.complete = complete
+        st.partial = partial
+        st.last_count = count
         st.needs_full_sync = False
         st.last_cursor = first_id or st.last_cursor
         st.last_poll = utcnow_iso()
@@ -300,7 +310,7 @@ class MarketplaceCoordinator:
         self._dirty.discard(gid)
         tag = "INITIAL_SYNC" if reason == "initial" else "RESYNC"
         llog(tag, f'collection="{st.title}" registered={len(seen)} api_count={count} pages={pages} '
-                  f'complete={complete} sent=0 reason="{reason}"')
+                  f'complete={complete} partial={partial} sent=0 reason="{reason}"')
         if not complete:
             log.warning('[%s] collection="%s" incomplete (read %s of %s) — NOTHING from it will be sent '
                         'until a full resync succeeds', tag, st.title, len(seen), count)
@@ -318,8 +328,8 @@ class MarketplaceCoordinator:
                 if not st.complete:
                     self._due[st.gift_id] = time.monotonic() + settings.resync_retry_seconds
                 return 0
-            cls, items, session = await self._scan_top(st, mode)
-            return await self._apply(st, cls, items, session, mode)
+            cls, items, session, count = await self._scan_top(st, mode)
+            return await self._apply(st, cls, items, session, mode, count)
 
     async def _scan_top(self, st: CollectionState, mode: str):
         """Читает верх рынка, пока не найдётся anchor. Сначала мелкими страницами (дёшево),
@@ -327,11 +337,13 @@ class MarketplaceCoordinator:
         gid = st.gift_id
         plans = [(settings.page_limit, settings.live_max_pages)] if mode == "live" else []
         plans.append((100, settings.recovery_max_pages))
-        cls, items, session = None, [], None
+        cls, items, session, count = None, [], None, None
         for limit, max_pages in plans:
             items, seen, offset, reached_end = [], set(), "", False
             for _ in range(max_pages):
                 page, session = await self._fetch(gid, offset, limit)
+                if count is None or not offset:
+                    count = page.count
                 for it in page.items:
                     if it.unique_id not in seen:
                         seen.add(it.unique_id)
@@ -344,10 +356,10 @@ class MarketplaceCoordinator:
                 offset = page.next_offset or ""
             if cls is not None and cls.decided:
                 break
-        return cls, items, session
+        return cls, items, session, count
 
     async def _apply(self, st: CollectionState, cls, items: list[ResaleItem], session: str | None,
-                     mode: str) -> int:
+                     mode: str, count: int | None = None) -> int:
         gid = st.gift_id
         self.stats["polls"] += 1
         now_iso = utcnow_iso()
@@ -376,6 +388,21 @@ class MarketplaceCoordinator:
             llog("SILENT_OLD", f'listing={it.listing_id} reason="{reason}"')
         if cls.reason in ("above_anchor_but_incomplete", "end_of_list_incomplete"):
             st.needs_full_sync = True
+
+        # 2b) Коллекция, которую Telegram отдаёт не целиком: незнакомый лот наверху может быть
+        #     старым лотом, которого мы не видели, со сменённой ценой. Новый листинг увеличивает
+        #     count, смена цены — нет. Пропускаем как NEW не больше, чем вырос count; иначе — тихо.
+        if cls.new and st.partial:
+            delta = (count - st.last_count) if (count is not None and st.last_count is not None) else 0
+            if len(cls.new) > max(delta, 0):
+                for it in cls.new:
+                    self.stats["silent"] += 1
+                    llog("SILENT_OLD", f'listing={it.listing_id} reason="partial_collection_uncertain" '
+                                       f'new={len(cls.new)} count_delta={delta}')
+                cls.silent += [(it, "partial_collection_uncertain") for it in cls.new]
+                cls.new = []
+        if count is not None:
+            st.last_count = count
 
         # 3) NEW — глобальная дедупликация (INSERT в listings) ДО записи в market_items:
         #    при падении процесса листинг останется в listings со статусом NEW и будет дообработан.

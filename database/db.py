@@ -185,15 +185,19 @@ class Database:
         async with self._write_lock:
             await self.conn.execute(
                 """INSERT INTO collection_state(gift_id, title, synced, complete, last_cursor,
-                       last_seen_listing_id, last_seen_timestamp, availability_resale, last_poll, last_session)
+                       last_seen_listing_id, last_seen_timestamp, availability_resale, last_poll, last_session,
+                       partial, last_count)
                    VALUES(:gift_id, :title, :synced, :complete, :last_cursor, :last_seen_listing_id,
-                          :last_seen_timestamp, :availability_resale, :last_poll, :last_session)
+                          :last_seen_timestamp, :availability_resale, :last_poll, :last_session,
+                          :partial, :last_count)
                    ON CONFLICT(gift_id) DO UPDATE SET
                      title=excluded.title, synced=excluded.synced, complete=excluded.complete,
                      last_cursor=excluded.last_cursor, last_seen_listing_id=excluded.last_seen_listing_id,
                      last_seen_timestamp=excluded.last_seen_timestamp,
                      availability_resale=excluded.availability_resale,
-                     last_poll=excluded.last_poll, last_session=excluded.last_session""", s)
+                     last_poll=excluded.last_poll, last_session=excluded.last_session,
+                     partial=excluded.partial, last_count=excluded.last_count""",
+                {"partial": 0, "last_count": None, **s})
             await self.conn.commit()
 
     # ------------------------------------------------------------------ listings
@@ -303,9 +307,11 @@ class Database:
                 "state, first_seen, last_seen) VALUES(?,?,?,?,?,?,?,?,?)", rows)
             await self.conn.commit()
         for c in snap.get("collections", []):
-            await self.save_collection_state({k: c.get(k) for k in (
+            row = {k: c.get(k) for k in (
                 "gift_id", "title", "synced", "complete", "last_cursor", "last_seen_listing_id",
-                "last_seen_timestamp", "availability_resale", "last_poll", "last_session")})
+                "last_seen_timestamp", "availability_resale", "last_poll", "last_session", "last_count")}
+            row["partial"] = int(c.get("partial") or 0)
+            await self.save_collection_state(row)
         return len(rows)
 
     async def recent_listings(self, limit: int = 15) -> list[dict]:

@@ -101,6 +101,11 @@ MIGRATIONS: dict[int, list[str]] = {
         # нельзя считать complete, иначе ценовые изменения старых лотов примут за новые
         "UPDATE collection_state SET complete = 0",
     ],
+    # v4: коллекции, которые Telegram отдаёт не целиком (прочитано заметно меньше, чем count)
+    4: [
+        "ALTER TABLE collection_state ADD COLUMN partial INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE collection_state ADD COLUMN last_count INTEGER",
+    ],
 }
 
 # Колонки, без которых новая логика работать не может (проверяются после миграций)

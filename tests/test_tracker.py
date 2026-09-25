@@ -683,6 +683,38 @@ async def test_23_cheap_collections_slow():
     print("✔ TEST 23 дешёвые коллекции (slow): тоже отслеживаются, дорогой лот в них найден, опрос реже")
 
 
+async def test_24_partial_collection():
+    """Telegram отдаёт только часть большой коллекции (400 из 12384). Старый невиданный лот,
+    у которого сменили цену, всплывает наверх — count не растёт → НЕ новый. Новый листинг растит count."""
+    reset_settings()
+    tmp = Path(tempfile.mkdtemp())
+    market = FakeMarket()
+    for _ in range(60):
+        market.list_new(market.item())
+    market.hidden = 500
+    patch_market(market)
+    e = await Env(tmp, market).boot()
+    st = e.coord.states[GID]
+    assert st.complete and st.partial and st.last_count == 560, (st.complete, st.partial, st.last_count)
+    market.hidden -= 1                                   # скрытый старый лот сменил цену и всплыл
+    market.list_new(market.item(15000))
+    await e.poll()
+    assert e.pipe.stats["new"] == 0 and not e.sender.sent, "старый лот из невидимой части не должен уйти"
+    market.list_new(market.item(12000))                  # настоящий новый листинг: count +1
+    await e.poll()
+    assert e.pipe.stats["new"] == 1 and len(e.sender.sent) == 1
+    market.sell(market.lots[GID][-1].unique_id)          # продажа и новый листинг за один опрос
+    market.hidden -= 1
+    market.list_new(market.item(13000)); market.list_new(market.item(14000))
+    await e.poll()
+    assert e.pipe.stats["new"] == 1, "count не объясняет двух незнакомых — ничего не отправляем"
+    await e.shutdown()
+    e = await Env(tmp, market).boot()                    # partial и last_count переживают рестарт
+    assert e.coord.states[GID].partial and e.coord.states[GID].last_count is not None
+    await e.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 24 неполная коллекция: всплывший старый лот не уходит, новый (count +1) уходит")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
@@ -690,7 +722,7 @@ async def run() -> None:
               test_12_count_mismatch_and_backup_fallback, test_13_backup_survives_deploy,
               test_14_ton_rate_changes, test_16_market_snapshot_redeploy, test_17_hot_cold_schedule,
               test_18_pause, test_19_floor_filter, test_21_ton_priced_lots,
-              test_22_log_regressions, test_23_cheap_collections_slow):
+              test_22_log_regressions, test_23_cheap_collections_slow, test_24_partial_collection):
         await t()
     test_15_seller_rules()
     test_20_proxies()
