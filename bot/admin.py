@@ -49,6 +49,16 @@ def all_admins() -> set[int]:
     return set(settings.admin_ids) | _load_claimed()
 
 
+def save_admins(ids: set[int]) -> None:
+    """Админы, назначенные ботом (первый добавивший аккаунт, /claim, восстановленные из копии)."""
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    ADMINS_FILE.write_text(json.dumps(sorted(_load_claimed() | set(ids))), encoding="utf-8")
+
+
+def can_manage(user_id: int, owner_id: int | None) -> bool:
+    return user_id in all_admins() or (owner_id is not None and owner_id == user_id)
+
+
 class IsAdmin(Filter):
     async def __call__(self, message: Message) -> bool:
         return bool(message.from_user and message.from_user.id in all_admins())
@@ -109,7 +119,7 @@ HELP = (
     "/status — состояние трекера\n"
     "/sessions — состояние sessions\n"
     "/add_session — добавить Telegram-аккаунт\n"
-    "/remove_session &lt;name&gt; — удалить session\n"
+    "/remove_session — удалить аккаунт (кнопками)\n"
     "/stats — статистика листингов\n"
     "/settings — текущие настройки\n"
     "/set &lt;KEY&gt; &lt;VALUE&gt; — изменить настройку на лету\n"
@@ -124,6 +134,7 @@ USER_HELP = (
     "/status — состояние трекера\n"
     "/sessions — состояние sessions\n"
     "/add_session — добавить свой Telegram-аккаунт в трекер\n"
+    "/remove_session — удалить свой аккаунт\n"
     "/stats — статистика листингов\n"
     "/settings — текущие настройки\n"
     "/test — проверка работы (пример сообщения придёт вам)\n"
@@ -235,35 +246,76 @@ def build_routers(app: "App") -> list[Router]:
         )
         await m.answer(text)
 
-    @users.message(Command("sessions"))
-    async def cmd_sessions(m: Message) -> None:
+    def _sessions_view(uid: int) -> tuple[str, InlineKeyboardMarkup | None]:
         c = app.sessions.counts()
         lines = [
             f"Total sessions: {len(app.sessions.workers)}",
             f"🟢 Active: {c.get('ACTIVE', 0)}",
             f"🔴 Error: {c.get('ERROR', 0) + c.get('AUTH_ERROR', 0)}",
             f"⏳ FloodWait: {c.get('FLOOD_WAIT', 0)}",
-            f"🟡 Connecting: {c.get('CONNECTING', 0)}",
+            f"🟡 Connecting: {c.get('CONNECTING', 0)}", "",
         ]
-        problems = app.sessions.problem_workers()
-        for w in problems[:40]:
-            lines.append(f"\n<b>{html.escape(w.name)}</b>\nStatus: {w.status.value}\n"
-                         f"Reason: {html.escape(w.reason or '—')}")
-        if len(problems) > 40:
-            lines.append(f"\n… и ещё {len(problems) - 40}")
-        await m.answer("\n".join(lines))
+        owners = {r.name: r.owner_id for r in app.storage.list_sessions()}
+        shards = app.coordinator.shard_counts()
+        rows = []
+        icons = {"ACTIVE": "🟢", "FLOOD_WAIT": "⏳", "CONNECTING": "🟡"}
+        for name, w in sorted(app.sessions.workers.items())[:60]:
+            line = (f"{icons.get(w.status.value, '🔴')} <b>{html.escape(name)}</b> — {w.status.value}, "
+                    f"коллекций: {shards.get(name, 0)}")
+            if w.status.value not in ("ACTIVE", "CONNECTING"):
+                line += f"\n    Reason: {html.escape(w.reason or '—')}"
+            lines.append(line)
+            if can_manage(uid, owners.get(name)):
+                rows.append([InlineKeyboardButton(text=f"🗑 Удалить {name}", callback_data=f"rmsess:{name}")])
+        if len(app.sessions.workers) > 60:
+            lines.append(f"… и ещё {len(app.sessions.workers) - 60}")
+        return "\n".join(lines), (InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
 
-    @admin.message(Command("remove_session"))
+    @users.message(Command("sessions"))
+    async def cmd_sessions(m: Message) -> None:
+        text, kb = _sessions_view(m.from_user.id)
+        await m.answer(text, reply_markup=kb)
+
+    async def _remove_session(uid: int, name: str) -> str:
+        owners = {r.name: r.owner_id for r in app.storage.list_sessions()}
+        if name not in owners and name not in app.sessions.workers:
+            return f"❌ Не найдена: {html.escape(name)}"
+        if not can_manage(uid, owners.get(name)):
+            return "⛔ Удалять можно только свои аккаунты (или если вы админ)."
+        await app.sessions.remove(name)
+        saved = await app.backup.save()
+        return (f"✅ {html.escape(name)} удалена" +
+                ("" if saved else f"\n⚠️ Копия не обновлена: {html.escape(app.backup.last_error or '')}"))
+
+    @users.callback_query(F.data.startswith("rmsess:"))
+    async def cb_rmsess(q: CallbackQuery) -> None:
+        name = q.data.split(":", 1)[1]
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"✅ Да, удалить {name}", callback_data=f"rmsess_ok:{name}"),
+            InlineKeyboardButton(text="✖ Отмена", callback_data="rmsess_no")]])
+        await q.message.answer(f"Удалить {html.escape(name)}? Аккаунт перестанет использоваться трекером.",
+                               reply_markup=kb)
+        await q.answer()
+
+    @users.callback_query(F.data.startswith("rmsess_ok:"))
+    async def cb_rmsess_ok(q: CallbackQuery) -> None:
+        text = await _remove_session(q.from_user.id, q.data.split(":", 1)[1])
+        await q.message.edit_text(text)
+        await q.answer()
+
+    @users.callback_query(F.data == "rmsess_no")
+    async def cb_rmsess_no(q: CallbackQuery) -> None:
+        await q.message.edit_text("Отменено.")
+        await q.answer()
+
+    @users.message(Command("remove_session"))
     async def cmd_remove(m: Message, command: CommandObject) -> None:
         name = (command.args or "").strip()
         if not re.fullmatch(r"[\w\-]+", name or ""):
-            await m.answer("Использование: /remove_session session_023")
+            text, kb = _sessions_view(m.from_user.id)
+            await m.answer("Выберите аккаунт для удаления:\n\n" + text, reply_markup=kb)
             return
-        ok = await app.sessions.remove(name)
-        if ok:
-            await app.backup.save()
-        await m.answer(f"{'✅ Удалена' if ok else '❌ Не найдена'}: {html.escape(name)}"
-                       + ("\n(файл перенесён в telegram_sessions/removed/)" if ok else ""))
+        await m.answer(await _remove_session(m.from_user.id, name))
 
     @admin.message(Command("reload"))
     async def cmd_reload(m: Message) -> None:
@@ -439,17 +491,20 @@ def build_routers(app: "App") -> list[Router]:
         client: TelegramClient = p["client"]
         me = await client.get_me()
         await client.disconnect()
-        app.storage.save_meta(p["name"], p["api_id"], p["api_hash"], p["phone"])
+        uid = m.from_user.id
+        app.storage.save_meta(p["name"], p["api_id"], p["api_hash"], p["phone"], owner_id=uid)
         await state.clear()
-        rec = SessionRecord(p["name"], app.storage.session_path(p["name"]), p["api_id"], p["api_hash"])
+        if not all_admins():
+            save_admins({uid})           # первый, кто добавил аккаунт, становится админом
+        rec = SessionRecord(p["name"], app.storage.session_path(p["name"]), p["api_id"], p["api_hash"], uid)
         w = await app.sessions.add_record(rec)
-        log.info("Session %s added via bot (user id %s)", p["name"], getattr(me, "id", "?"))
-        saved = await app.backup.save()
-        await m.answer(f"✅ Session <b>{p['name']}</b> добавлена\n"
+        log.info("Session %s added via bot (account id %s, by user %s)", p["name"], getattr(me, "id", "?"), uid)
+        saved = await app.backup.save(chat_hint=m.chat.id)
+        await m.answer(f"✅ Аккаунт <b>{p['name']}</b> добавлен\n"
                        f"Аккаунт ID: <code>{getattr(me, 'id', '?')}</code>\n"
                        f"Статус: {w.status.value}\n"
-                       + ("💾 Сохранено в резервную копию — аккаунт не пропадёт после деплоя"
-                          if saved else "⚠️ Резервная копия не сохранена (нужны SESSION_BACKUP_KEY и админ)"))
+                       + ("💾 Сохранён — после деплоя восстановится сам, добавлять заново не нужно."
+                          if saved else f"⚠️ Копию сохранить не удалось: {html.escape(app.backup.last_error or '')}"))
 
     @users.message(AddSession.code, F.text)
     async def add_code(m: Message, state: FSMContext) -> None:

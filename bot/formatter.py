@@ -4,7 +4,7 @@
 Шаблон можно полностью менять. Доступные переменные ({имя}):
   gift_name, gift_title_link, gift_link, gift_num, gift_slug, gift_slug_link, detected_at,
   model, backdrop, symbol,
-  price_line, stars_price, ton_price, currency,
+  price_line, floor_line, stars_price, ton_price, currency,
   seller_line, seller_username, seller_id, seller_name, seller_profile, seller_check,
   level, messages, premium_status, listing_id, first_seen, session_source
 Все значения уже экранированы для HTML. Неизвестная переменная → пустая строка.
@@ -67,6 +67,20 @@ def listing_keyboard(l: Listing, with_seller: bool = True) -> InlineKeyboardMark
     if second:
         rows.append(second)
     return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def floor_line(l: Listing) -> str:
+    """Флор коллекции (минимальная цена на маркете из payments.getStarGifts) и отклонение цены лота."""
+    if not l.floor_stars:
+        return DASH
+    out = f"{l.floor_stars} Stars"
+    if l.stars_price:
+        diff = (l.stars_price - l.floor_stars) / l.floor_stars * 100
+        if abs(diff) < 0.5:
+            out += " (цена = флор 🔥)"
+        else:
+            out += f" (цена {'+' if diff > 0 else '−'}{abs(diff):.0f}% к флору{' 🔥' if diff < 0 else ''})"
+    return out
 
 
 def price_line(l: Listing) -> str:
@@ -136,6 +150,7 @@ class MessageFormatter:
             backdrop=_e(l.backdrop),
             symbol=_e(l.symbol),
             price_line=html.escape(price_line(l)),
+            floor_line=html.escape(floor_line(l)),
             stars_price=_e(l.stars_price),
             ton_price=_e(fmt_ton(l.ton_price)),
             currency=_e(l.currency),

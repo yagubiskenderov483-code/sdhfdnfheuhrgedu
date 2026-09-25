@@ -125,7 +125,8 @@ class MarketplaceCoordinator:
                 continue
             st = self.states.get(c.gift_id)
             if st is None:
-                st = CollectionState(gift_id=c.gift_id, title=c.title, availability_resale=c.availability_resale)
+                st = CollectionState(gift_id=c.gift_id, title=c.title, availability_resale=c.availability_resale,
+                                     floor_stars=c.resell_min_stars)
                 self.states[c.gift_id] = st
                 self._due[c.gift_id] = 0.0
                 self._dirty.add(c.gift_id)
@@ -134,6 +135,7 @@ class MarketplaceCoordinator:
             if st.title != c.title:
                 st.title = c.title
                 self._dirty.add(c.gift_id)
+            st.floor_stars = c.resell_min_stars
             if c.availability_resale != st.availability_resale:
                 st.availability_resale = c.availability_resale
                 self._due[c.gift_id] = 0.0  # hot → опросить немедленно
@@ -144,8 +146,28 @@ class MarketplaceCoordinator:
             log.info("Catalog: %s collections tracked (+%s new, %s changed)", len(self.states), added, hot)
 
     # ------------------------------------------------------------------ polling one collection
+    # ------------------------------------------------------------------ sharding
+    def shard_owner(self, gid: int) -> str | None:
+        """За каждой коллекцией закреплена своя session (равномерно по кругу).
+        Если она занята/недоступна — запрос берёт любая свободная, коллекция не простаивает."""
+        names = sorted(w.name for w in self.sessions.usable())
+        if not names:
+            return None
+        order = sorted(self.states)
+        idx = order.index(gid) if gid in self.states else gid
+        return names[idx % len(names)]
+
+    def shard_counts(self) -> dict[str, int]:
+        out: dict[str, int] = {}
+        for gid in self.states:
+            n = self.shard_owner(gid)
+            if n:
+                out[n] = out.get(n, 0) + 1
+        return out
+
     async def _fetch(self, gid: int, offset: str, limit: int):
-        page, session = await self.sessions.run(lambda c: fetch_resale_page(c, gid, offset, limit))
+        page, session = await self.sessions.run(lambda c: fetch_resale_page(c, gid, offset, limit),
+                                                prefer=self.shard_owner(gid))
         self.stats["scanned"] += len(page.items)
         return page, session
 
@@ -291,7 +313,7 @@ class MarketplaceCoordinator:
         if cls.new:
             if mode == "recover":
                 llog("RECOVERY", f'collection="{st.title}" new_during_downtime={len(cls.new)}')
-            admitted = await self.pipeline.admit(cls.new, session, mode)
+            admitted = await self.pipeline.admit(cls.new, session, mode, floor_stars=st.floor_stars)
             st.last_seen_listing_id = cls.new[0].listing_id
             st.last_seen_timestamp = now_iso
 

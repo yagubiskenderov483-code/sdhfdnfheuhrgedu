@@ -69,7 +69,8 @@ class FakeSessions:
         self.workers = {"session_001": object(), "session_002": object()}
 
     def usable(self):
-        return [1, 2]
+        from types import SimpleNamespace
+        return [SimpleNamespace(name=n) for n in self.workers]
 
     async def run(self, fn, **kw):
         return await fn(None), "session_001"
@@ -343,11 +344,73 @@ async def test_12_count_mismatch_and_backup_fallback():
     print("✔ TEST 12 count API > выдачи → коллекция всё равно LIVE; копия аккаунтов без ADMIN_IDS → канал")
 
 
+class FakeBackupBot:
+    """Имитация Bot API для резервной копии: send_document + описание бота + скачивание."""
+    def __init__(self):
+        self.files, self.desc, self.deleted, self.n = {}, {}, [], 0
+
+    async def send_document(self, chat, f, **kw):
+        from types import SimpleNamespace as NS
+        self.n += 1
+        self.files[f"fid{self.n}"] = f.data
+        return NS(message_id=self.n, document=NS(file_id=f"fid{self.n}"))
+
+    async def set_my_description(self, description=None, language_code=None):
+        self.desc[language_code] = description
+
+    async def get_my_description(self, language_code=None):
+        from types import SimpleNamespace as NS
+        return NS(description=self.desc.get(language_code, ""))
+
+    async def download(self, file_id, destination):
+        destination.write(self.files[file_id])
+
+    async def delete_message(self, chat, mid):
+        self.deleted.append(mid)
+
+
+async def test_13_backup_survives_deploy():
+    import os
+    from telethon.crypto import AuthKey
+    from telethon.sessions import SQLiteSession
+    from sessions.backup import SessionBackup
+    from sessions.storage import SessionStorage
+    reset_settings()
+    settings.bot_token, settings.session_backup_key, settings.target_chat_id = "123:abc", "", -100
+    bot = FakeBackupBot()
+    d1 = Path(tempfile.mkdtemp())
+    st1 = SessionStorage(d1, 1, "h" * 32)
+    for n in ("session_001", "session_002"):
+        x = SQLiteSession(str(d1 / n)); x.set_dc(2, "149.154.167.51", 443)
+        x.auth_key = AuthKey(os.urandom(256)); x.save(); x.close()
+        st1.save_meta(n, 1, "h" * 32, owner_id=777)
+    admins = {777}
+    sent = [["1:u9", 1, 5, "u9", "2026-01-01T00:00:00+00:00"]]
+    async def exp():
+        return sent
+    b1 = SessionBackup(bot, st1, lambda: admins, history_export=exp)
+    assert await b1.save(chat_hint=777)
+    assert await b1.save(chat_hint=777)          # повторное сохранение удаляет прошлую копию
+    assert bot.deleted == [1]
+    # «деплой»: пустая папка, пустая база
+    d2 = Path(tempfile.mkdtemp())
+    st2 = SessionStorage(d2, 1, "h" * 32)
+    got_admins, got_hist = set(), []
+    async def imp(rows):
+        got_hist.extend(rows); return len(rows)
+    b2 = SessionBackup(bot, st2, lambda: set(), got_admins.update, history_import=imp)
+    assert await b2.restore() == 2
+    recs = st2.list_sessions()
+    assert [r.name for r in recs] == ["session_001", "session_002"] and recs[0].owner_id == 777
+    assert got_admins == {777} and got_hist == sent
+    print("✔ TEST 13 копия без ADMIN_IDS и закрепов: после «деплоя» восстановлены аккаунты, админ, история")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
               test_8_seller_change, test_9_burst_500, test_10_no_anchor, test_11_filters_and_repeats,
-              test_12_count_mismatch_and_backup_fallback):
+              test_12_count_mismatch_and_backup_fallback, test_13_backup_survives_deploy):
         await t()
     print("\nALL TESTS PASSED")
 

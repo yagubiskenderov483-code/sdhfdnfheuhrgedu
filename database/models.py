@@ -43,6 +43,7 @@ class Listing:
     seller_profile_link: str | None = None
     seller_phone: str | None = None    # НЕ сохраняется в БД, только для фильтра
     seller_about: str | None = None    # bio продавца — НЕ сохраняется в БД, только для фильтра
+    floor_stars: int | None = None     # флор коллекции на момент обнаружения (для поста)
 
     stars_price: int | None = None
     ton_nano: int | None = None

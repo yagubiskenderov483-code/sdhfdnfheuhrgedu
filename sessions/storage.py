@@ -26,6 +26,7 @@ class SessionRecord:
     path: Path
     api_id: int
     api_hash: str
+    owner_id: int | None = None      # кто добавил session через бота (может её удалить)
 
 
 def _secure(path: Path) -> None:
@@ -50,16 +51,17 @@ class SessionStorage:
         out = []
         for p in sorted(self.dir.glob("*.session")):
             name = p.stem
-            api_id, api_hash = self.default_api_id, self.default_api_hash
+            api_id, api_hash, owner = self.default_api_id, self.default_api_hash, None
             meta = p.with_suffix(".json")
             if meta.exists():
                 try:
                     data = json.loads(meta.read_text(encoding="utf-8"))
                     api_id = int(data.get("api_id") or api_id)
                     api_hash = str(data.get("api_hash") or api_hash)
+                    owner = int(data["owner_id"]) if data.get("owner_id") else None
                 except (ValueError, json.JSONDecodeError):
                     pass
-            out.append(SessionRecord(name, p, api_id, api_hash))
+            out.append(SessionRecord(name, p, api_id, api_hash, owner))
         return out
 
     def next_name(self) -> str:
@@ -72,9 +74,12 @@ class SessionStorage:
     def session_path(self, name: str) -> Path:
         return self.dir / f"{name}.session"
 
-    def save_meta(self, name: str, api_id: int, api_hash: str, phone: str | None = None) -> None:
+    def save_meta(self, name: str, api_id: int, api_hash: str, phone: str | None = None,
+                  owner_id: int | None = None) -> None:
         meta = self.dir / f"{name}.json"
         data = {"api_id": api_id, "api_hash": api_hash}
+        if owner_id:
+            data["owner_id"] = owner_id
         if phone:
             data["phone_hint"] = phone[:4] + "****" + phone[-2:] if len(phone) > 6 else "****"
         meta.write_text(json.dumps(data), encoding="utf-8")

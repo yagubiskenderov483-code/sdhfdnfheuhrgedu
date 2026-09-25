@@ -17,8 +17,9 @@ import sys
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.types import BotCommand
 
-from bot.admin import all_admins, build_routers, init_claim_code
+from bot.admin import all_admins, build_routers, init_claim_code, save_admins
 from bot.formatter import MessageFormatter
 from bot.sender import TelegramSender
 from config import settings
@@ -43,7 +44,9 @@ class App:
         self.sessions = SessionManager(self.storage)
         self.bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode="HTML"))
         self.sender = TelegramSender(self.bot)
-        self.backup = SessionBackup(self.bot, self.storage, all_admins)
+        self.backup = SessionBackup(self.bot, self.storage, all_admins, save_admins,
+                                    history_export=lambda: self.db.export_sent_history(),
+                                    history_import=lambda rows: self.db.import_sent_history(rows))
         self.formatter = MessageFormatter(settings.path(settings.template_path))
         self.price_filter = PriceFilter()
         self.seller_filter = SellerFilter(settings.path("data"))
@@ -116,11 +119,43 @@ class App:
         await self.sessions.start_all()
         await self.backup.sync_if_needed()   # например, sessions положены в папку вручную
         if run_bot:
+            await self._set_menu()
+            self._tasks.append(asyncio.create_task(self._backup_loop(), name="backup-loop"))
+        if run_bot:
             init_claim_code()
             self._tasks.append(asyncio.create_task(
                 self.dp.start_polling(self.bot, handle_signals=False), name="admin-bot"))
         self.pipeline.start()
         self._tasks.append(asyncio.create_task(self.coordinator.start(), name="coordinator-start"))
+
+    async def _set_menu(self) -> None:
+        """Команды в синей кнопке «Меню» рядом с полем ввода."""
+        cmds = [
+            BotCommand(command="start", description="Главное меню"),
+            BotCommand(command="add_session", description="Добавить аккаунт"),
+            BotCommand(command="sessions", description="Мои аккаунты / удалить"),
+            BotCommand(command="status", description="Состояние трекера"),
+            BotCommand(command="stats", description="Статистика"),
+            BotCommand(command="settings", description="Настройки"),
+            BotCommand(command="test", description="Проверка работы"),
+            BotCommand(command="cancel", description="Отменить действие"),
+        ]
+        try:
+            await self.bot.set_my_commands(cmds)
+        except Exception as e:
+            log.warning("setMyCommands failed: %s", e)
+
+    async def _backup_loop(self) -> None:
+        """Раз в 10 минут сохранять историю отправленных лотов (если что-то отправлено)."""
+        last_sent = self.pipeline.stats["sent"]
+        while True:
+            await asyncio.sleep(600)
+            if self.pipeline.stats["sent"] != last_sent and self.storage.list_sessions():
+                last_sent = self.pipeline.stats["sent"]
+                try:
+                    await self.backup.save()
+                except Exception:
+                    log.exception("Periodic backup failed")
 
     async def stop(self) -> None:
         log.info("Shutting down...")
@@ -129,6 +164,11 @@ class App:
         except Exception:
             pass
         await self.coordinator.stop()
+        try:
+            if self.storage.list_sessions():
+                await asyncio.wait_for(self.backup.save(), timeout=15)
+        except Exception:
+            pass
         # дать очереди дообработать уже найденные листинги (до 15 сек)
         try:
             await asyncio.wait_for(self.pipeline.queue.join(), timeout=15)

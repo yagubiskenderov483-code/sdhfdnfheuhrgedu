@@ -80,13 +80,13 @@ class SessionManager:
         return [w for w in self.workers.values() if w.is_usable()]
 
     async def run(self, fn, only: str | None = None, attempts: int = 6,
-                  timeout: float | None = 60) -> tuple[Any, str]:
+                  timeout: float | None = 60, prefer: str | None = None) -> tuple[Any, str]:
         """Выполнить MTProto-запрос на любой свободной session (или строго на `only`).
         FloodWait / обрыв на одной session → автоматически повтор на другой.
         Возвращает (результат, имя session)."""
         last: Exception | None = None
         for attempt in range(attempts):
-            w = await self.acquire(timeout=timeout, only=only)
+            w = await self.acquire(timeout=timeout, only=only, prefer=prefer if attempt == 0 else None)
             try:
                 return await w.call(fn), w.name
             except WorkerUnavailable as e:
@@ -98,7 +98,8 @@ class SessionManager:
                 self.release(w)
         raise last or WorkerUnavailable("no sessions")
 
-    async def acquire(self, timeout: float | None = None, only: str | None = None) -> SessionWorker:
+    async def acquire(self, timeout: float | None = None, only: str | None = None,
+                      prefer: str | None = None) -> SessionWorker:
         """Ждёт свободную session с наименьшим ready_at. Резервирует её (busy=True)."""
         deadline = None if timeout is None else time.monotonic() + timeout
         while True:
@@ -111,7 +112,8 @@ class SessionManager:
             else:
                 candidates = [w for w in self.workers.values() if w.is_usable() and not w.busy]
             if candidates:
-                best = min(candidates, key=lambda w: w.ready_at())
+                pw = self.workers.get(prefer) if prefer else None
+                best = pw if pw in candidates else min(candidates, key=lambda w: w.ready_at())
                 best.busy = True   # остаток интервала session выдержит сам внутри call()
                 return best
             if deadline is not None and now >= deadline:

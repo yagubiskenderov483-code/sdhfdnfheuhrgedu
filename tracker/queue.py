@@ -152,11 +152,13 @@ class ListingPipeline:
         self.last_sent_at: float | None = None
 
     # ------------------------------------------------------------------ admission (global dedup)
-    async def admit(self, items: list[ResaleItem], session: str | None, mode: str) -> int:
+    async def admit(self, items: list[ResaleItem], session: str | None, mode: str,
+                    floor_stars: int | None = None) -> int:
         """items — сверху вниз (новейшие первыми). В очередь кладём от старых к новым."""
         admitted = 0
         for it in reversed(items):
             listing = build_listing(it, session)
+            listing.floor_stars = floor_stars
             # Глобальная дедупликация: право на обработку получает только тот, чей INSERT прошёл.
             if not await self.db.insert_listing_if_new(listing):
                 self.stats["duplicates"] += 1

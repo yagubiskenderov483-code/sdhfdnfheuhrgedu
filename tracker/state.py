@@ -81,6 +81,7 @@ class CollectionState:
     last_poll: str | None = None
     last_session: str | None = None
     needs_full_sync: bool = False             # запланирована тихая полная ре-синхронизация
+    floor_stars: int | None = None            # StarGift.resell_min_stars — флор коллекции (из каталога)
 
     def to_row(self) -> dict:
         return {

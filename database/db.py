@@ -265,6 +265,25 @@ class Database:
                 "SELECT 1 FROM listings WHERE seller_key=? AND sent=1 LIMIT 1", (seller_key,))
         return (await cur.fetchone()) is not None
 
+    async def export_sent_history(self, limit: int = 20000) -> list[list]:
+        """Отправленные листинги для переноса через деплой: [listing_id, gift_unique_id, gift_id, seller_key, sent_at]."""
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT listing_id, gift_unique_id, gift_id, seller_key, sent_at FROM listings "
+            "WHERE sent=1 ORDER BY id DESC LIMIT ?", (limit,))
+        return [list(r) for r in await cur.fetchall()]
+
+    async def import_sent_history(self, rows: list[list]) -> int:
+        assert self.conn
+        now = utcnow_iso()
+        data = [(r[0], r[1], r[2], r[3], r[4] or now, r[4] or now) for r in rows if len(r) >= 5]
+        async with self._write_lock:
+            cur = await self.conn.executemany(
+                "INSERT OR IGNORE INTO listings(listing_id, gift_unique_id, gift_id, seller_key, sent_at, "
+                "first_seen, status, sent, reason) VALUES(?,?,?,?,?,?,'SENT',1,'restored from backup')", data)
+            await self.conn.commit()
+        return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
     async def status_counts(self) -> dict[str, int]:
         assert self.conn
         cur = await self.conn.execute("SELECT status, COUNT(*) FROM listings GROUP BY status")
