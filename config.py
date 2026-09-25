@@ -73,6 +73,20 @@ def _price_routes(v: str | None) -> list[tuple[int, int | None, int]]:
     return routes
 
 
+def _backdrop_routes(v: str | None) -> list[tuple[str, int]]:
+    """Разбор BACKDROP_ROUTES: 'название_фона:chat_id' через запятую. Совпадение по подстроке.
+    Пример: 'Black:-1001,Gold:-1002'. Пустая строка — маршрутов по фону нет."""
+    routes: list[tuple[str, int]] = []
+    for part in (v or "").replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        name, _, chat = part.rpartition(":")
+        if name.strip():
+            routes.append((name.strip(), int(chat)))
+    return routes
+
+
 @dataclass
 class Settings:
     # --- Telegram / секреты ---
@@ -81,6 +95,7 @@ class Settings:
     bot_token: str = ""
     target_chat_id: int = 0
     price_routes: list[tuple[int, int | None, int]] = field(default_factory=list)  # каналы по диапазону цены
+    backdrop_routes: list[tuple[str, int]] = field(default_factory=list)  # каналы по фону подарка (тема)
     admin_ids: set[int] = field(default_factory=set)
     allow_all_users: bool = True
 
@@ -158,8 +173,13 @@ class Settings:
         p = Path(rel)
         return p if p.is_absolute() else BASE_DIR / p
 
-    def route_chat(self, stars: int | None) -> int:
-        """Канал для лота по его цене (Stars). Если маршрутов нет или ни один не подошёл — общий канал."""
+    def route_chat(self, stars: int | None, backdrop: str | None = None) -> int:
+        """Канал для лота: сначала по фону (тема), затем по цене, иначе общий канал."""
+        if backdrop:
+            bl = backdrop.lower()
+            for name, chat in self.backdrop_routes:
+                if name.lower() in bl:
+                    return chat
         if stars is not None:
             for lo, hi, chat in self.price_routes:
                 if stars >= lo and (hi is None or stars < hi):
@@ -186,6 +206,7 @@ class Settings:
 RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "MIN_STARS": ("min_stars", lambda v: int(v)),
     "PRICE_ROUTES": ("price_routes", _price_routes),
+    "BACKDROP_ROUTES": ("backdrop_routes", _backdrop_routes),
     "COLLECTION_MIN_FLOOR": ("collection_min_floor", lambda v: max(0, int(v))),
     "COLLECTION_FLOOR_MODE": ("collection_floor_mode", lambda v: v.strip().lower()),
     "LOW_PRIORITY_POLL_INTERVAL": ("low_priority_poll_interval", lambda v: max(5.0, float(v))),
@@ -223,6 +244,7 @@ def _from_env() -> Settings:
         bot_token=(e("BOT_TOKEN") or "").strip().strip('"'),
         target_chat_id=_int(e("TARGET_CHAT_ID"), 0),
         price_routes=_price_routes(e("PRICE_ROUTES")),
+        backdrop_routes=_backdrop_routes(e("BACKDROP_ROUTES")),
         admin_ids=_int_set(e("ADMIN_IDS")),
         allow_all_users=_bool(e("ALLOW_ALL_USERS"), True),
         min_stars=_int(e("MIN_STARS"), 5000),

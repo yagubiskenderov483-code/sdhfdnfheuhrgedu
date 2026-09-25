@@ -805,7 +805,12 @@ def test_29_price_routes():
     assert st.route_chat(None) == -100999
     st.price_routes = []
     assert st.route_chat(7000) == -100999     # маршрутов нет → общий
-    print("✔ TEST 29 каналы по цене: лот идёт в канал своего диапазона, иначе в общий")
+    # маршрут по фону — в приоритете над ценой
+    st.price_routes = config._price_routes("5000-:-1003")
+    st.backdrop_routes = config._backdrop_routes("Black:-1009")
+    assert st.route_chat(9000, "Black Velvet") == -1009   # чёрный фон → в свой канал, не в 5000+
+    assert st.route_chat(9000, "Blue") == -1003           # не чёрный → по цене
+    print("✔ TEST 29 каналы по цене и по фону: фон в приоритете, иначе по цене, иначе общий")
 
 
 def test_28_russian_detection_softened():
