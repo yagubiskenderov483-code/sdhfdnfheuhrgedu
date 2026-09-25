@@ -308,6 +308,13 @@ class Database:
                 "last_seen_timestamp", "availability_resale", "last_poll", "last_session")})
         return len(rows)
 
+    async def recent_listings(self, limit: int = 15) -> list[dict]:
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT gift_name, gift_num, stars_price, status, reason, seller_filter_result FROM listings "
+            "WHERE reason IS NULL OR reason != 'restored from backup' ORDER BY id DESC LIMIT ?", (limit,))
+        return [dict(r) for r in await cur.fetchall()]
+
     async def seller_reject_counts(self) -> dict[str, int]:
         assert self.conn
         cur = await self.conn.execute(

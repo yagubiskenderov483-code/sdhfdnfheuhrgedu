@@ -47,6 +47,11 @@ def _price(stars: int | None, ton_nano: int | None) -> str:
     return "/".join(parts) or "none"
 
 
+def _log_task_death(t: asyncio.Task) -> None:
+    if not t.cancelled() and t.exception() is not None:
+        log.error("Background task %s crashed: %r", t.get_name(), t.exception())
+
+
 class TrackerMode:
     INITIALIZING = "INITIALIZING"
     INITIAL_SYNC = "INITIAL_SYNC"
@@ -450,6 +455,8 @@ class MarketplaceCoordinator:
             asyncio.create_task(self._persist_loop(), name="persist-loop"),
             asyncio.create_task(self._sync_loop(), name="sync-loop"),
         ]
+        for t in self._tasks:
+            t.add_done_callback(_log_task_death)
 
     def _is_live(self, st: CollectionState) -> bool:
         return st.synced and st.complete and not st.needs_full_sync and st.gift_id not in self.skipped
@@ -529,26 +536,35 @@ class MarketplaceCoordinator:
     # ------------------------------------------------------------------ loops
     async def _live_loop(self) -> None:
         while not self._stop.is_set():
-            if self.paused:
-                await asyncio.sleep(0.5)
+            try:
+                await self._live_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Live loop tick failed (continuing)")
+                await asyncio.sleep(1)
+
+    async def _live_tick(self) -> None:
+        if self.paused:
+            await asyncio.sleep(0.5)
+            return
+        now = time.monotonic()
+        capacity = max(1, min(settings.max_concurrent_sessions, max(1, len(self.sessions.usable()))))
+        due = sorted((t, gid) for gid, t in self._due.items()
+                     if t <= now and gid not in self._running
+                     and gid in self.states and self._is_live(self.states[gid]))
+        live_running = sum(1 for g in self._running if g in self.states and self._is_live(self.states[g]))
+        for _, gid in due:
+            if live_running >= capacity:
+                break
+            live_running += 1
+            st = self.states.get(gid)
+            if st is None:
+                self._due.pop(gid, None)
                 continue
-            now = time.monotonic()
-            capacity = max(1, min(settings.max_concurrent_sessions, max(1, len(self.sessions.usable()))))
-            due = sorted((t, gid) for gid, t in self._due.items()
-                         if t <= now and gid not in self._running
-                         and gid in self.states and self._is_live(self.states[gid]))
-            live_running = sum(1 for g in self._running if g in self.states and self._is_live(self.states[g]))
-            for _, gid in due:
-                if live_running >= capacity:
-                    break
-                live_running += 1
-                st = self.states.get(gid)
-                if st is None:
-                    self._due.pop(gid, None)
-                    continue
-                self._running.add(gid)
-                asyncio.create_task(self._live_poll(st), name=f"poll-{gid}")
-            await asyncio.sleep(0.02)
+            self._running.add(gid)
+            asyncio.create_task(self._live_poll(st), name=f"poll-{gid}")
+        await asyncio.sleep(0.02)
 
     async def _live_poll(self, st: CollectionState) -> None:
         gid = st.gift_id

@@ -119,27 +119,37 @@ class App:
     # ------------------------------------------------------------------ lifecycle
     async def start(self, run_bot: bool = True) -> None:
         await self.db.connect()
+        # 1) бот отвечает на команды СРАЗУ, ещё до долгого запуска трекера
+        if run_bot:
+            init_claim_code()
+            self._tasks.append(asyncio.create_task(
+                self.dp.start_polling(self.bot, handle_signals=False), name="admin-bot"))
+            await self._set_menu()
+        # 2) всё остальное — в фоне; ошибка любого шага не роняет бота
+        self._tasks.append(asyncio.create_task(self._boot(run_bot), name="boot"))
+
+    async def _boot(self, run_bot: bool) -> None:
+        async def step(name, coro):
+            try:
+                return await coro
+            except Exception:
+                log.exception("Startup step failed: %s (continuing)", name)
         # после деплоя папка telegram_sessions/ может быть пустой → восстановить из Telegram
-        await self.backup.restore()
-        await self.backup.restore_market()    # снимок рынка → без долгой полной синхронизации
+        await step("restore backup", self.backup.restore())
+        await step("restore market snapshot", self.backup.restore_market())
         if self.backup.restored_paused:
-            await self.db.kv_set("paused", 1)  # пауза, поставленная до деплоя, сохраняется
+            await step("restore pause", self.db.kv_set("paused", 1))
         if settings.startup_delay > 0 and self.storage.list_sessions():
             # при деплое старая копия бота может ещё работать: если обе подключат один аккаунт,
             # Telegram аннулирует его (AUTH_KEY_DUPLICATED). Даём старой копии завершиться.
             log.info("Waiting %ss before connecting accounts (old instance shutdown)...", settings.startup_delay)
             await asyncio.sleep(settings.startup_delay)
-        await self.sessions.start_all()
-        await self.backup.sync_if_needed()   # например, sessions положены в папку вручную
+        await step("connect sessions", self.sessions.start_all())
+        await step("backup sync", self.backup.sync_if_needed())
         if run_bot:
-            await self._set_menu()
             self._tasks.append(asyncio.create_task(self._backup_loop(), name="backup-loop"))
-        if run_bot:
-            init_claim_code()
-            self._tasks.append(asyncio.create_task(
-                self.dp.start_polling(self.bot, handle_signals=False), name="admin-bot"))
         self.pipeline.start()
-        self._tasks.append(asyncio.create_task(self.coordinator.start(), name="coordinator-start"))
+        await step("tracker", self.coordinator.start())
 
     async def _notify_auth_error(self, w) -> None:
         owner = next((r.owner_id for r in self.storage.list_sessions() if r.name == w.name), None)
@@ -163,6 +173,7 @@ class App:
             BotCommand(command="sessions", description="Мои аккаунты / удалить"),
             BotCommand(command="status", description="Состояние трекера"),
             BotCommand(command="stats", description="Статистика"),
+            BotCommand(command="last", description="Последние лоты и почему не отправлены"),
             BotCommand(command="pause", description="Остановить парсинг"),
             BotCommand(command="resume", description="Продолжить парсинг"),
             BotCommand(command="settings", description="Настройки"),

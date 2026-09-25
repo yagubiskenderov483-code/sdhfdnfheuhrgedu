@@ -20,10 +20,11 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from aiogram import F, Router
-from aiogram.filters import Command, CommandObject, CommandStart, Filter
+from aiogram.filters import Command, CommandObject, CommandStart, Filter, or_f
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message,
+                           ReplyKeyboardMarkup)
 from telethon import TelegramClient, errors
 
 from config import DATA_DIR, RUNTIME_KEYS, reload_settings, set_runtime_value, settings
@@ -59,9 +60,37 @@ def can_manage(user_id: int, owner_id: int | None) -> bool:
     return user_id in all_admins() or (owner_id is not None and owner_id == user_id)
 
 
+_owner_ids_getter = lambda: set()   # noqa: E731 — задаётся в build_routers (владельцы добавленных аккаунтов)
+
+
+def is_manager(uid: int | None) -> bool:
+    """Управлять трекером (/pause /resume /set /reload) может админ или тот, кто добавил аккаунт.
+    Если ни админов, ни владельцев ещё нет — первый, кто нажал, становится админом."""
+    if not uid:
+        return False
+    if uid in all_admins() or uid in _owner_ids_getter():
+        return True
+    if not all_admins() and not _owner_ids_getter():
+        save_admins({uid})
+        return True
+    return False
+
+
 class IsAdmin(Filter):
     async def __call__(self, message: Message) -> bool:
-        return bool(message.from_user and message.from_user.id in all_admins())
+        return is_manager(message.from_user.id if message.from_user else None)
+
+
+# Кнопки под полем ввода
+BTN_STATUS, BTN_PAUSE, BTN_RESUME = "📊 Статус", "⏸ Пауза", "▶️ Продолжить"
+BTN_SESSIONS, BTN_ADD, BTN_STATS = "👥 Аккаунты", "➕ Добавить аккаунт", "📈 Статистика"
+BTN_LAST = "🕘 Последние лоты"
+MAIN_KB = ReplyKeyboardMarkup(keyboard=[
+    [KeyboardButton(text=BTN_STATUS), KeyboardButton(text=BTN_STATS)],
+    [KeyboardButton(text=BTN_PAUSE), KeyboardButton(text=BTN_RESUME)],
+    [KeyboardButton(text=BTN_SESSIONS), KeyboardButton(text=BTN_ADD)],
+    [KeyboardButton(text=BTN_LAST)],
+], resize_keyboard=True, is_persistent=True)
 
 
 def is_allowed(user_id: int | None) -> bool:
@@ -121,6 +150,7 @@ HELP = (
     "/add_session — добавить Telegram-аккаунт\n"
     "/remove_session — удалить аккаунт (кнопками)\n"
     "/stats — статистика листингов\n"
+    "/last — последние найденные лоты и почему не отправлены\n"
     "/settings — текущие настройки\n"
     "/set &lt;KEY&gt; &lt;VALUE&gt; — изменить настройку на лету\n"
     "/pause — остановить парсинг (аккаунты не делают запросов)\n"
@@ -138,6 +168,8 @@ USER_HELP = (
     "/add_session — добавить свой Telegram-аккаунт в трекер\n"
     "/remove_session — удалить свой аккаунт\n"
     "/stats — статистика листингов\n"
+    "/last — последние найденные лоты и почему не отправлены\n"
+    "/pause, /resume — пауза (если вы добавили аккаунт)\n"
     "/settings — текущие настройки\n"
     "/test — проверка работы (пример сообщения придёт вам)\n"
     "/cancel — отменить текущий диалог"
@@ -153,13 +185,15 @@ def build_routers(app: "App") -> list[Router]:
     users.message.filter(IsAllowed())
 
     pending: dict[int, dict[str, Any]] = {}   # user_id → {client, name, phone, hash, api_id, api_hash}
+    global _owner_ids_getter
+    _owner_ids_getter = lambda: {r.owner_id for r in app.storage.list_sessions() if r.owner_id}  # noqa: E731
 
     # ------------------------------------------------------------ public
     @public.message(CommandStart())
     async def cmd_start(m: Message) -> None:
         if m.from_user and is_allowed(m.from_user.id):
-            await m.answer((HELP if m.from_user.id in all_admins() else USER_HELP)
-                           + f"\n\nВаш Telegram ID: <code>{m.from_user.id}</code>")
+            await m.answer((HELP if is_manager(m.from_user.id) else USER_HELP)
+                           + f"\n\nВаш Telegram ID: <code>{m.from_user.id}</code>", reply_markup=MAIN_KB)
             if not app.sessions.usable():
                 await m.answer("⚠️ Нет ни одного авторизованного аккаунта — трекер не работает.\n"
                                "Нажмите /add_session: нужен только номер телефона и код.")
@@ -221,12 +255,17 @@ def build_routers(app: "App") -> list[Router]:
                 pass
             app.storage.discard(p["name"])
 
-    @users.message(Command("status"))
+    @users.message(or_f(Command("pause", "resume", "reload", "set"), F.text.in_({BTN_PAUSE, BTN_RESUME})))
+    async def cmd_denied(m: Message) -> None:
+        await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
+                       f"Ваш Telegram ID: <code>{m.from_user.id}</code> — его можно вписать в ADMIN_IDS.")
+
+    @users.message(or_f(Command("status"), F.text == BTN_STATUS))
     async def cmd_status(m: Message) -> None:
         c = app.sessions.counts()
         coord, pipe = app.coordinator, app.pipeline
         running = coord.mode == "LIVE" and not coord.paused
-        icon = "🟢" if running else ("🟡" if coord.mode in ("INITIALIZING", "INITIAL_SYNC", "RECOVERY") else "🔴")
+        icon = "⏸" if coord.paused else "🟢" if running else ("🟡" if coord.mode in ("INITIALIZING", "INITIAL_SYNC", "RECOVERY") else "🔴")
         cycle = coord.avg_cycle_seconds()
         text = (
             f"{icon} TRACKER: {'⏸ PAUSED (/resume)' if coord.paused else ('RUNNING' if running else coord.mode)}\n"
@@ -276,7 +315,7 @@ def build_routers(app: "App") -> list[Router]:
             lines.append(f"… и ещё {len(app.sessions.workers) - 60}")
         return "\n".join(lines), (InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
 
-    @users.message(Command("sessions"))
+    @users.message(or_f(Command("sessions"), F.text == BTN_SESSIONS))
     async def cmd_sessions(m: Message) -> None:
         text, kb = _sessions_view(m.from_user.id)
         await m.answer(text, reply_markup=kb)
@@ -322,14 +361,14 @@ def build_routers(app: "App") -> list[Router]:
             return
         await m.answer(await _remove_session(m.from_user.id, name))
 
-    @admin.message(Command("pause"))
+    @admin.message(or_f(Command("pause"), F.text == BTN_PAUSE))
     async def cmd_pause(m: Message) -> None:
         await app.coordinator.set_paused(True)
         await app.backup.save()          # чтобы пауза сохранилась и после деплоя
         await m.answer("⏸ Парсинг остановлен: трекер не делает запросов к Telegram, аккаунты отдыхают.\n"
                        "Продолжить: /resume")
 
-    @admin.message(Command("resume"))
+    @admin.message(or_f(Command("resume"), F.text == BTN_RESUME))
     async def cmd_resume(m: Message) -> None:
         await app.coordinator.set_paused(False)
         await app.backup.save()
@@ -346,7 +385,26 @@ def build_routers(app: "App") -> list[Router]:
         await m.answer(f"🔄 Настройки, шаблон и списки продавцов перечитаны.\n"
                        f"Новых sessions: {len(added)}" + (f" ({', '.join(added)})" if added else ""))
 
-    @users.message(Command("stats"))
+    @users.message(or_f(Command("last"), F.text == BTN_LAST))
+    async def cmd_last(m: Message) -> None:
+        """Последние найденные новые лоты и почему они (не) отправлены."""
+        rows = await app.db.recent_listings(15)
+        if not rows:
+            await m.answer("Новых лотов пока не найдено. Проверьте /status — сколько коллекций уже в LIVE.")
+            return
+        icons = {"SENT": "✅", "FILTERED_PRICE": "💲", "FILTERED_SELLER": "👤", "FILTERED_DUPLICATE": "🔁",
+                 "SEND_FAILED": "❌", "NEW": "⏳", "TEST_ONLY": "🧪", "ERROR": "⚠️"}
+        lines = ["<b>Последние новые лоты</b> (✅ отправлен, 💲 цена, 👤 продавец, 🔁 повтор):", ""]
+        for r in rows:
+            price = f"{r['stars_price']}⭐" if r["stars_price"] is not None else "TON"
+            reason = r["reason"] or ""
+            if r["status"] == "FILTERED_SELLER" and r["seller_filter_result"]:
+                reason = r["seller_filter_result"]
+            lines.append(f"{icons.get(r['status'], '•')} {html.escape(r['gift_name'] or '?')} #{r['gift_num'] or ''} "
+                         f"— {price}" + (f" — {html.escape(reason[:60])}" if r["status"] != "SENT" else ""))
+        await m.answer("\n".join(lines))
+
+    @users.message(or_f(Command("stats"), F.text == BTN_STATS))
     async def cmd_stats(m: Message) -> None:
         counts = await app.db.status_counts()
         since = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 86400))
@@ -418,7 +476,7 @@ def build_routers(app: "App") -> list[Router]:
             await m.answer("✅ В канал отправлено" if res.ok else f"❌ Канал: {html.escape(res.error or '')}")
 
     # ------------------------------------------------------------ admin: /add_session
-    @users.message(Command("add_session"), F.chat.type == "private")
+    @users.message(or_f(Command("add_session"), F.text == BTN_ADD), F.chat.type == "private")
     async def add_start(m: Message, state: FSMContext) -> None:
         await _cleanup_pending(m.from_user.id)
         await state.clear()
