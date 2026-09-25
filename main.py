@@ -82,6 +82,7 @@ class App:
         for r in build_routers(self):
             self.dp.include_router(r)
         self._tasks: list[asyncio.Task] = []
+        self.booting = True          # аккаунты ещё подключаются после запуска
 
     # ------------------------------------------------------------------ diagnostics
     async def run_check(self) -> tuple[str, str | None]:
@@ -165,6 +166,7 @@ class App:
             log.info("Waiting %ss before connecting accounts (old instance shutdown)...", settings.startup_delay)
             await asyncio.sleep(settings.startup_delay)
         await step("connect sessions", self.sessions.start_all())
+        self.booting = False
         await step("backup sync", self.backup.sync_if_needed())
         if run_bot:
             self._tasks.append(asyncio.create_task(self._backup_loop(), name="backup-loop"))

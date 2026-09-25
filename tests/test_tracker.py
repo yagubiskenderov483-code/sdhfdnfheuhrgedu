@@ -394,6 +394,8 @@ async def test_13_backup_survives_deploy():
     async def exp():
         return sent
     b1 = SessionBackup(bot, st1, lambda: admins, history_export=exp)
+    assert not await b1.save(chat_hint=777), "до восстановления копию не перезаписываем"
+    assert await b1.restore() == 0 and b1.restore_done
     assert await b1.save(chat_hint=777)
     assert await b1.save(chat_hint=777)          # повторное сохранение удаляет прошлую копию
     assert bot.deleted == [1]
@@ -408,7 +410,18 @@ async def test_13_backup_survives_deploy():
     recs = st2.list_sessions()
     assert [r.name for r in recs] == ["session_001", "session_002"] and recs[0].owner_id == 777
     assert got_admins == {777} and got_hist == sent
-    print("✔ TEST 13 копия без ADMIN_IDS и закрепов: после «деплоя» восстановлены аккаунты, админ, история")
+    # защита: если аккаунтов стало меньше (файл не готов / не восстановился) — старая копия не затирается
+    (d2 / "session_002.session").unlink()
+    assert not await b2.save() and "старая копия" in b2.last_error
+    assert await b2.save(allow_shrink=True), "удаление аккаунта — разрешено"
+    # указатель не читается (сбой Telegram) — ничего не затираем
+    class Broken(FakeBackupBot):
+        async def get_my_description(self, language_code=None):
+            raise RuntimeError("telegram down")
+    b3 = SessionBackup(Broken(), st2, lambda: set())
+    b3.restore_done = True
+    assert not await b3.save()
+    print("✔ TEST 13 копия переживает деплой; пустая/меньшая копия и сбой Telegram не затирают старую")
 
 
 async def test_14_ton_rate_changes():

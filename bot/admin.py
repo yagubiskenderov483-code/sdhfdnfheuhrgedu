@@ -272,7 +272,7 @@ def build_routers(app: "App") -> list[Router]:
         running = coord.mode == "LIVE" and not coord.paused
         icon = "⏸" if coord.paused else "🟢" if running else ("🟡" if coord.mode in ("INITIALIZING", "INITIAL_SYNC", "RECOVERY") else "🔴")
         cycle = coord.avg_cycle_seconds()
-        text = (
+        text = _boot_note() + (
             f"{icon} TRACKER: {'⏸ PAUSED (/resume)' if coord.paused else ('RUNNING' if running else coord.mode)}\n"
             f"👥 Sessions: {len(app.sessions.workers)}\n"
             f"🟢 Active: {c.get('ACTIVE', 0)}\n"
@@ -295,9 +295,17 @@ def build_routers(app: "App") -> list[Router]:
         )
         await m.answer(text)
 
+    def _boot_note() -> str:
+        if not app.backup.restore_done:
+            return "⏳ Бот только что запущен: восстанавливаю аккаунты из копии…\n\n"
+        if app.booting:
+            return (f"⏳ Аккаунты восстановлены ({app.backup.restored_count}), подключаю их "
+                    f"(пауза до {settings.startup_delay:g} с после деплоя)…\n\n")
+        return ""
+
     def _sessions_view(uid: int) -> tuple[str, InlineKeyboardMarkup | None]:
         c = app.sessions.counts()
-        lines = [
+        lines = [_boot_note() + 
             f"Total sessions: {len(app.sessions.workers)}",
             f"🟢 Active: {c.get('ACTIVE', 0)}",
             f"🔴 Error: {c.get('ERROR', 0) + c.get('AUTH_ERROR', 0)}",
@@ -332,7 +340,7 @@ def build_routers(app: "App") -> list[Router]:
         if not can_manage(uid, owners.get(name)):
             return "⛔ Удалять можно только свои аккаунты (или если вы админ)."
         await app.sessions.remove(name)
-        saved = await app.backup.save()
+        saved = await app.backup.save(allow_shrink=True)
         return (f"✅ {html.escape(name)} удалена" +
                 ("" if saved else f"\n⚠️ Копия не обновлена: {html.escape(app.backup.last_error or '')}"))
 

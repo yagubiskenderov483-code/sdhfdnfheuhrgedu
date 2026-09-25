@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import io
@@ -41,6 +42,10 @@ from sessions.storage import SessionStorage
 from utils.logger import get_logger
 
 log = get_logger("backup")
+
+
+class BackupUnavailable(Exception):
+    """Не удалось прочитать указатель на копию — нельзя ни восстанавливать, ни перезаписывать."""
 BACKUP_FILENAME = "sessions.backup"
 POINTER_LANG = "yo"
 POINTER_PREFIX = "gtb1|"
@@ -97,6 +102,8 @@ class SessionBackup:
         self._last_msg: int | None = None
         self.last_error: str | None = None
         self._ptr: dict | None = None
+        self.restore_done = False       # пока восстановление не завершено, копию НЕ перезаписываем
+        self.restored_count = 0
         self.market_export: Callable[[], Awaitable[dict]] | None = None
         self.market_import: Callable[[dict], Awaitable[int]] | None = None
         self.paused_getter: Callable[[], bool] | None = None
@@ -107,11 +114,16 @@ class SessionBackup:
         """{"s": [file_id, chat, msg], "m": [file_id, chat, msg, ts]} — где лежат копии."""
         if self._ptr is not None:
             return self._ptr
-        try:
-            d = await self.bot.get_my_description(language_code=POINTER_LANG)
-        except Exception as e:
-            log.warning("getMyDescription failed: %s", e)
-            return {}
+        d = None
+        for attempt in range(3):
+            try:
+                d = await self.bot.get_my_description(language_code=POINTER_LANG)
+                break
+            except Exception as e:
+                log.warning("getMyDescription failed (attempt %s): %s", attempt + 1, e)
+                await asyncio.sleep(2 * (attempt + 1))
+        else:
+            raise BackupUnavailable("cannot read backup pointer from Telegram")
         text = (d.description or "") if d else ""
         ptr: dict = {}
         if text.startswith(POINTER_PREFIX2):
@@ -128,7 +140,7 @@ class SessionBackup:
         return ptr
 
     async def _write_pointer(self, key: str, value: list) -> None:
-        ptr = dict(await self._read_pointer())
+        ptr = dict(await self._read_pointer())      # BackupUnavailable → не затираем чужие ключи
         ptr[key] = value
         await self.bot.set_my_description(description=POINTER_PREFIX2 + json.dumps(ptr, separators=(",", ":")),
                                           language_code=POINTER_LANG)
@@ -143,10 +155,17 @@ class SessionBackup:
                 out.append(c)
         return out
 
-    async def save(self, chat_hint: int | None = None) -> bool:
+    async def save(self, chat_hint: int | None = None, allow_shrink: bool = False) -> bool:
+        """allow_shrink=True — только при удалении аккаунта: разрешает сохранить копию с меньшим
+        числом аккаунтов, чем в прошлой. В остальных случаях меньшая копия НЕ перезаписывает старую
+        (защита от затирания, если аккаунты ещё не восстановились или файл временно недоступен)."""
         f = _fernet()
         if f is None:
             self.last_error = "нет BOT_TOKEN/SESSION_BACKUP_KEY"
+            return False
+        if not self.restore_done:
+            self.last_error = "аккаунты ещё восстанавливаются после запуска — копия сохранится позже"
+            log.info("Backup skipped: restore not finished yet")
             return False
         items = []
         for rec in self.storage.list_sessions():
@@ -154,6 +173,11 @@ class SessionBackup:
             if s:
                 items.append({"name": rec.name, "string": s, "api_id": rec.api_id,
                               "api_hash": rec.api_hash, "owner_id": rec.owner_id, "proxy": rec.proxy})
+        if not allow_shrink and self.backup_names and len(items) < len(self.backup_names):
+            self.last_error = (f"в копии {len(self.backup_names)} аккаунтов, сейчас доступно {len(items)} — "
+                               "старая копия сохранена без изменений")
+            log.warning("Backup NOT overwritten: %s", self.last_error)
+            return False
         history = []
         if self._history_export:
             try:
@@ -166,7 +190,11 @@ class SessionBackup:
         blob = f.encrypt(json.dumps(payload).encode())
 
         if self._last_chat is None:
-            ptr = (await self._read_pointer()).get("s")
+            try:
+                ptr = (await self._read_pointer()).get("s")
+            except BackupUnavailable as e:
+                self.last_error = str(e)
+                return False
             if ptr:
                 _, self._last_chat, self._last_msg = ptr[:3]
 
@@ -178,6 +206,9 @@ class SessionBackup:
                     caption=f"🔐 Служебная копия трекера: аккаунтов {len(items)}. Зашифрована, не удаляйте.",
                     disable_notification=True)
                 await self._write_pointer("s", [msg.document.file_id, chat, msg.message_id])
+            except BackupUnavailable as e:
+                self.last_error = str(e)
+                return False
             except Exception as e:
                 errors.append(f"{chat}: {e}")
                 continue
@@ -203,6 +234,19 @@ class SessionBackup:
 
     # ------------------------------------------------------------------ restore
     async def restore(self) -> int:
+        for attempt in range(10):
+            try:
+                n = await self._restore_once()
+                self.restored_count = n
+                self.restore_done = True
+                return n
+            except BackupUnavailable as e:
+                log.warning("Backup restore delayed: %s (retry %s/10)", e, attempt + 1)
+                await asyncio.sleep(10)
+        log.error("Backup could not be read — saving is disabled this run to protect the old copy")
+        return 0
+
+    async def _restore_once(self) -> int:
         f = _fernet()
         ptr = (await self._read_pointer()).get("s")
         if f is None or not ptr:
@@ -217,8 +261,7 @@ class SessionBackup:
             log.error("Backup: wrong key (BOT_TOKEN or SESSION_BACKUP_KEY changed?)")
             return 0
         except Exception as e:
-            log.error("Backup download failed: %s", e)
-            return 0
+            raise BackupUnavailable(f"backup download failed: {e}") from e
 
         self.restored_paused = bool(data.get("paused"))
         if self._set_admins and data.get("admins"):
@@ -264,7 +307,10 @@ class SessionBackup:
         if len(blob) > MAX_BOT_DOWNLOAD:
             log.warning("Market snapshot too big for Bot API (%.1f MB) — skipped", len(blob) / 2**20)
             return False
-        old = (await self._read_pointer()).get("m")
+        try:
+            old = (await self._read_pointer()).get("m")
+        except BackupUnavailable:
+            return False
         for chat in self.candidate_chats():
             try:
                 msg = await self.bot.send_document(
@@ -272,6 +318,8 @@ class SessionBackup:
                     caption="🗂 Служебный снимок рынка трекера (ускоряет запуск после деплоя). Не удаляйте.",
                     disable_notification=True)
                 await self._write_pointer("m", [msg.document.file_id, chat, msg.message_id, int(time.time())])
+            except BackupUnavailable:
+                return False
             except Exception as e:
                 log.warning("Market snapshot upload to %s failed: %s", chat, e)
                 continue
@@ -286,7 +334,10 @@ class SessionBackup:
 
     async def restore_market(self) -> int:
         f = _fernet()
-        ptr = (await self._read_pointer()).get("m")
+        try:
+            ptr = (await self._read_pointer()).get("m")
+        except BackupUnavailable:
+            return 0
         if f is None or not ptr or self.market_import is None:
             return 0
         age_h = (time.time() - (ptr[3] if len(ptr) > 3 else 0)) / 3600
