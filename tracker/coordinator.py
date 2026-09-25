@@ -69,6 +69,7 @@ class MarketplaceCoordinator:
         self._last_poll_mono: dict[int, float] = {}
         self._poll_gap: dict[int, float] = {}
         self._tasks: list[asyncio.Task] = []
+        self._sync_retry_at: dict[int, float] = {}
         self._stop = asyncio.Event()
         self.stats = {"scanned": 0, "polls": 0, "poll_errors": 0, "silent": 0, "price_moves": 0,
                       "resyncs": 0}
@@ -165,10 +166,11 @@ class MarketplaceCoordinator:
         и при нехватке делаем ещё проход (до SYNC_PASSES)."""
         gid = st.gift_id
         seen: set[int] = set()
-        session, first_id, reached_end, count, pages = None, None, False, 0, 0
+        session, first_id, reached_end, count, pages, stable = None, None, False, 0, 0, False
         max_pages = settings.initial_sync_pages or 10**9
         for pass_no in range(1, settings.sync_passes + 1):
             offset, reached_end, pass_pages = "", False, 0
+            seen_before = len(seen)
             while pass_pages < max_pages:
                 page, session = await self._fetch(gid, offset, 100)
                 pass_pages += 1
@@ -184,12 +186,18 @@ class MarketplaceCoordinator:
                 offset = page.next_offset
             pages += pass_pages
             gap = count - len(seen)
+            added = len(seen) - seen_before
             if not reached_end or gap <= max(1, count // 500):
+                break
+            if pass_no > 1 and added == 0:
+                # повторный проход ничего нового не дал → мы видим всё, что API реально отдаёт
+                # (count может учитывать лоты, которые в выдачу не попадают)
+                stable = True
                 break
             log.info('[%s] collection="%s" pass %s: read %s of %s, re-reading to close gaps',
                      "INITIAL_SYNC" if reason == "initial" else "RESYNC", st.title, pass_no, len(seen), count)
         gap = count - len(seen)
-        complete = reached_end and gap <= max(1, count // 500)
+        complete = reached_end and (stable or gap <= max(1, count // 500))
         st.synced = True
         st.complete = complete
         st.needs_full_sync = False
@@ -315,8 +323,9 @@ class MarketplaceCoordinator:
             log.exception("[%s] poll failed", st.title)
         return 0
 
-    async def _run_batch(self, states: list[CollectionState], mode: str) -> int:
-        sem = asyncio.Semaphore(max(1, min(settings.max_concurrent_sessions, len(self.sessions.usable()) or 1)))
+    async def _run_batch(self, states: list[CollectionState], mode: str, concurrency: int | None = None) -> int:
+        sem = asyncio.Semaphore(concurrency or max(1, min(settings.max_concurrent_sessions,
+                                                          len(self.sessions.usable()) or 1)))
 
         async def one(s: CollectionState) -> int:
             async with sem:
@@ -341,21 +350,8 @@ class MarketplaceCoordinator:
                 log.error("Catalog fetch failed: %s — retry in 10s", e)
                 await asyncio.sleep(10)
 
-        unsynced = [s for s in self.states.values() if not s.synced]
-        incomplete = [s for s in self.states.values() if s.synced and not s.complete]
-        ready = [s for s in self.states.values() if s.synced and s.complete]
-
-        if unsynced or incomplete:
-            self.mode = TrackerMode.INITIAL_SYNC
-            log.info("[INITIAL_SYNC] full silent sync of %s collection(s) (%s new, %s incomplete)...",
-                     len(unsynced) + len(incomplete), len(unsynced), len(incomplete))
-            before = await self.db.count_market_items()
-            sent_before = self.pipeline.stats["new"]
-            await self._run_batch(unsynced + incomplete, "sync")
-            after = await self.db.count_market_items()
-            llog("INITIAL_SYNC", f"completed: {after - before} existing listings registered, "
-                                 f"{self.pipeline.stats['new'] - sent_before} sent")
-
+        ready = [s for s in self.states.values() if s.synced and s.complete and not s.needs_full_sync]
+        pending = self._pending_sync()
         if ready:
             self.mode = TrackerMode.RECOVERY
             log.info("[RECOVERY] checking %s collection(s) for listings that appeared while offline...",
@@ -364,9 +360,13 @@ class MarketplaceCoordinator:
             llog("RECOVERY", f"done: {missed} new listing(s) found during downtime")
 
         await self._persist()
-        log.info("Initial sync completed")
         self.mode = TrackerMode.LIVE
-        log.info("LIVE TRACKER ENABLED 🟢")
+        log.info("LIVE TRACKER ENABLED 🟢 (%s collections live, %s waiting for silent full sync)",
+                 len(ready), len(pending))
+        if pending:
+            log.info("[INITIAL_SYNC] %s collection(s) will be synced in background, smallest first; "
+                     "each goes LIVE right after its own sync. Nothing from them is sent before that.",
+                     len(pending))
         await self.db.kv_set("tracker_mode", self.mode)
 
         now = time.monotonic()
@@ -376,7 +376,68 @@ class MarketplaceCoordinator:
             asyncio.create_task(self._live_loop(), name="live-loop"),
             asyncio.create_task(self._catalog_loop(), name="catalog-loop"),
             asyncio.create_task(self._persist_loop(), name="persist-loop"),
+            asyncio.create_task(self._sync_loop(), name="sync-loop"),
         ]
+
+    def _is_live(self, st: CollectionState) -> bool:
+        return st.synced and st.complete and not st.needs_full_sync
+
+    def _pending_sync(self) -> list[CollectionState]:
+        now = time.monotonic()
+        out = [st for st in self.states.values()
+               if not self._is_live(st) and self._sync_retry_at.get(st.gift_id, 0.0) <= now
+               and st.gift_id not in self._running]
+        return sorted(out, key=lambda st: st.availability_resale or 0)
+
+    def sync_progress(self) -> tuple[int, int]:
+        """(коллекций в LIVE, всего коллекций)"""
+        return sum(1 for st in self.states.values() if self._is_live(st)), len(self.states)
+
+    async def sync_pending(self) -> None:
+        """Тихо синхронизировать все коллекции, которые ещё не в LIVE (используется и тестами)."""
+        pending = self._pending_sync()
+        if not pending:
+            return
+        before = await self.db.count_market_items()
+        await self._run_batch(pending, "sync", concurrency=self._sync_concurrency())
+        after = await self.db.count_market_items()
+        for st in pending:
+            if not self._is_live(st):
+                self._sync_retry_at[st.gift_id] = time.monotonic() + settings.resync_retry_seconds
+        llog("INITIAL_SYNC", f"completed: {after - before} existing listings registered, 0 sent "
+                             f"({self.sync_progress()[0]}/{len(self.states)} collections live)")
+
+    def _sync_concurrency(self) -> int:
+        # полная синхронизация занимает не больше половины sessions — остальные держат LIVE
+        return max(1, min(settings.max_concurrent_sessions, len(self.sessions.usable()) // 2))
+
+    async def _sync_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                pending = self._pending_sync()
+                if pending:
+                    sem = asyncio.Semaphore(self._sync_concurrency())
+
+                    async def one(st: CollectionState) -> None:
+                        async with sem:
+                            if self._stop.is_set():
+                                return
+                            self._running.add(st.gift_id)
+                            try:
+                                await self._poll_safe(st, "sync")
+                            finally:
+                                self._running.discard(st.gift_id)
+                                if not self._is_live(st):
+                                    self._sync_retry_at[st.gift_id] = (time.monotonic()
+                                                                       + settings.resync_retry_seconds)
+                                self._due[st.gift_id] = time.monotonic()
+
+                    await asyncio.gather(*(one(st) for st in pending))
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("Background sync failed")
+            await asyncio.sleep(5)
 
     async def stop(self) -> None:
         self._stop.set()
@@ -393,11 +454,15 @@ class MarketplaceCoordinator:
     async def _live_loop(self) -> None:
         while not self._stop.is_set():
             now = time.monotonic()
-            capacity = max(1, min(settings.max_concurrent_sessions, len(self.sessions.usable())))
-            due = sorted((t, gid) for gid, t in self._due.items() if t <= now and gid not in self._running)
+            capacity = max(1, min(settings.max_concurrent_sessions, max(1, len(self.sessions.usable()))))
+            due = sorted((t, gid) for gid, t in self._due.items()
+                         if t <= now and gid not in self._running
+                         and gid in self.states and self._is_live(self.states[gid]))
+            live_running = sum(1 for g in self._running if g in self.states and self._is_live(self.states[g]))
             for _, gid in due:
-                if len(self._running) >= capacity:
+                if live_running >= capacity:
                     break
+                live_running += 1
                 st = self.states.get(gid)
                 if st is None:
                     self._due.pop(gid, None)

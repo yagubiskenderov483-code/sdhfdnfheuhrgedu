@@ -32,6 +32,7 @@ class FakeMarket:
         self.lots: dict[int, list[ResaleItem]] = {GID: []}
         self.uid = 1000
         self.seller = 5000
+        self.hidden = 0          # сколько лотов API учитывает в count, но не отдаёт в выдаче
 
     def item(self, stars=9000, seller=None, gid=GID) -> ResaleItem:
         self.uid += 1
@@ -60,7 +61,7 @@ class FakeMarket:
         start = int(offset or 0)
         items = self.lots[gift_id][start:start + limit]
         nxt = str(start + limit) if start + limit < len(self.lots[gift_id]) else None
-        return ResalePage(items=list(items), next_offset=nxt, count=len(self.lots[gift_id]))
+        return ResalePage(items=list(items), next_offset=nxt, count=len(self.lots[gift_id]) + self.hidden)
 
 
 class FakeSessions:
@@ -96,8 +97,9 @@ class Env:
         self.coord = MarketplaceCoordinator(self.db, FakeSessions(), self.pipe)
         self.pipe.start()
         await self.coord.start()
-        for t in self.coord._tasks:           # LIVE-петли не нужны — опрашиваем вручную
+        for t in self.coord._tasks:           # фоновые петли не нужны — управляем вручную
             t.cancel()
+        await self.coord.sync_pending()       # тихая полная синхронизация (в проде — в фоне)
         await self.pipe.queue.join()
         return self
 
@@ -316,10 +318,36 @@ async def test_11_filters_and_repeats():
     print("✔ TEST 11 MIN_STARS 4999→FILTERED/5000→SENT, одна коллекция подряд и повтор продавца отсеяны")
 
 
+async def test_12_count_mismatch_and_backup_fallback():
+    # count у Telegram больше, чем реально отдаётся → коллекция всё равно становится LIVE
+    reset_settings()
+    tmp = Path(tempfile.mkdtemp())
+    market = FakeMarket()
+    for _ in range(250):
+        market.list_new(market.item())
+    market.hidden = 40
+    patch_market(market)
+    e = await Env(tmp, market).boot()
+    assert e.coord.states[GID].complete, "стабильный повторный проход = коллекция прочитана"
+    market.list_new(market.item(9000))
+    await e.poll()
+    assert e.pipe.stats["new"] == 1
+    await e.shutdown(); shutil.rmtree(tmp)
+    # копия аккаунтов без ADMIN_IDS уходит в канал
+    from sessions.backup import SessionBackup
+    from sessions.storage import SessionStorage
+    settings.sessions_backup_chat_id = 0
+    settings.target_chat_id = -100123
+    b = SessionBackup(None, SessionStorage(Path(tempfile.mkdtemp()), 1, "h" * 32), lambda: set())
+    assert b.candidate_chats() == [-100123]
+    print("✔ TEST 12 count API > выдачи → коллекция всё равно LIVE; копия аккаунтов без ADMIN_IDS → канал")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
-              test_8_seller_change, test_9_burst_500, test_10_no_anchor, test_11_filters_and_repeats):
+              test_8_seller_change, test_9_burst_500, test_10_no_anchor, test_11_filters_and_repeats,
+              test_12_count_mismatch_and_backup_fallback):
         await t()
     print("\nALL TESTS PASSED")
 

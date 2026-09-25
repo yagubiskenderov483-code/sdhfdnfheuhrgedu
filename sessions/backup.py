@@ -75,15 +75,30 @@ class SessionBackup:
         self._admins = admins_getter
         self.backup_names: set[str] | None = None   # имена sessions в закреплённой копии
 
+    def candidate_chats(self) -> list[int]:
+        """Куда класть/где искать копию: SESSIONS_BACKUP_CHAT_ID → ADMIN_IDS → канал TARGET_CHAT_ID.
+        Канал — запасной вариант, чтобы аккаунты сохранялись даже без ADMIN_IDS."""
+        out: list[int] = []
+        for c in ([settings.sessions_backup_chat_id] + sorted(self._admins()) + [settings.target_chat_id]):
+            if c and c not in out:
+                out.append(c)
+        return out
+
     def chat_id(self) -> int | None:
-        if settings.sessions_backup_chat_id:
-            return settings.sessions_backup_chat_id
-        return next(iter(sorted(self._admins())), None)
+        c = self.candidate_chats()
+        return c[0] if c else None
+
+    async def _pinned_backup(self, chat: int):
+        info = await self.bot.get_chat(chat)
+        pinned = info.pinned_message
+        if pinned and pinned.document and pinned.document.file_name == BACKUP_FILENAME:
+            return pinned
+        return None
 
     async def save(self) -> bool:
-        f, chat = _fernet(), self.chat_id()
-        if f is None or chat is None:
-            log.warning("Session backup skipped: set SESSION_BACKUP_KEY and ADMIN_IDS (or claim admin)")
+        f = _fernet()
+        if f is None:
+            log.warning("Session backup skipped: SESSION_BACKUP_KEY is not set")
             return False
         items = []
         for rec in self.storage.list_sessions():
@@ -91,23 +106,33 @@ class SessionBackup:
             if s:
                 items.append({"name": rec.name, "string": s, "api_id": rec.api_id, "api_hash": rec.api_hash})
         blob = f.encrypt(json.dumps({"v": 1, "sessions": items}).encode())
-        try:
-            msg = await self.bot.send_document(
-                chat, BufferedInputFile(blob, BACKUP_FILENAME),
-                caption=f"🔐 Резервная копия аккаунтов трекера: {len(items)} шт.\n"
-                        "Не удаляйте и не открепляйте это сообщение.",
-                disable_notification=True)
+        for chat in self.candidate_chats():
             try:
-                await self.bot.unpin_all_chat_messages(chat)
-            except Exception:
-                pass
-            await self.bot.pin_chat_message(chat, msg.message_id, disable_notification=True)
-            self.backup_names = {it["name"] for it in items}
-            log.info("Sessions backup saved: %s account(s)", len(items))
-            return True
-        except Exception as e:
-            log.error("Sessions backup failed: %s", e)
-            return False
+                old = None
+                try:
+                    old = await self._pinned_backup(chat)
+                except Exception:
+                    pass
+                msg = await self.bot.send_document(
+                    chat, BufferedInputFile(blob, BACKUP_FILENAME),
+                    caption=f"🔐 Служебная копия аккаунтов трекера ({len(items)} шт.), зашифрована.\n"
+                            "Не удаляйте и не открепляйте.",
+                    disable_notification=True)
+                await self.bot.pin_chat_message(chat, msg.message_id, disable_notification=True)
+                if old is not None:   # убрать прошлую копию, чужие закрепы не трогаем
+                    for call in (self.bot.unpin_chat_message(chat, message_id=old.message_id),
+                                 self.bot.delete_message(chat, old.message_id)):
+                        try:
+                            await call
+                        except Exception:
+                            pass
+                self.backup_names = {it["name"] for it in items}
+                log.info("Sessions backup saved to chat %s: %s account(s)", chat, len(items))
+                return True
+            except Exception as e:
+                log.warning("Sessions backup to chat %s failed: %s", chat, e)
+        log.error("Sessions backup failed in all chats — accounts will be lost after redeploy")
+        return False
 
     async def sync_if_needed(self) -> None:
         """Сохранить копию, если локальных sessions нет в закреплённой копии."""
@@ -116,23 +141,26 @@ class SessionBackup:
             await self.save()
 
     async def restore(self) -> int:
-        f, chat = _fernet(), self.chat_id()
-        if f is None or chat is None:
+        f = _fernet()
+        if f is None:
             return 0
-        try:
-            info = await self.bot.get_chat(chat)
-            pinned = info.pinned_message
-            if not pinned or not pinned.document or pinned.document.file_name != BACKUP_FILENAME:
-                log.info("No sessions backup pinned in backup chat")
-                return 0
-            buf = io.BytesIO()
-            await self.bot.download(pinned.document, destination=buf)
-            data = json.loads(f.decrypt(buf.getvalue()))
-        except InvalidToken:
-            log.error("Sessions backup: wrong SESSION_BACKUP_KEY")
-            return 0
-        except Exception as e:
-            log.error("Sessions backup restore failed: %s", e)
+        data = None
+        for chat in self.candidate_chats():
+            try:
+                pinned = await self._pinned_backup(chat)
+                if pinned is None:
+                    continue
+                buf = io.BytesIO()
+                await self.bot.download(pinned.document, destination=buf)
+                data = json.loads(f.decrypt(buf.getvalue()))
+                log.info("Sessions backup found in chat %s", chat)
+                break
+            except InvalidToken:
+                log.error("Sessions backup in chat %s: wrong SESSION_BACKUP_KEY", chat)
+            except Exception as e:
+                log.warning("Sessions backup lookup in chat %s failed: %s", chat, e)
+        if data is None:
+            log.info("No sessions backup found (checked %s)", self.candidate_chats())
             return 0
         restored = 0
         self.backup_names = {it.get("name") for it in data.get("sessions", [])}
