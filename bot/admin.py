@@ -86,11 +86,12 @@ class IsAdmin(Filter):
 BTN_STATUS, BTN_PAUSE, BTN_RESUME = "📊 Статус", "⏸ Пауза", "▶️ Продолжить"
 BTN_SESSIONS, BTN_ADD, BTN_STATS = "👥 Аккаунты", "➕ Добавить аккаунт", "📈 Статистика"
 BTN_LAST = "🕘 Последние лоты"
+BTN_COLLECTIONS = "📚 Коллекции"
 MAIN_KB = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text=BTN_STATUS), KeyboardButton(text=BTN_STATS)],
     [KeyboardButton(text=BTN_PAUSE), KeyboardButton(text=BTN_RESUME)],
     [KeyboardButton(text=BTN_SESSIONS), KeyboardButton(text=BTN_ADD)],
-    [KeyboardButton(text=BTN_LAST)],
+    [KeyboardButton(text=BTN_LAST), KeyboardButton(text=BTN_COLLECTIONS)],
 ], resize_keyboard=True, is_persistent=True)
 
 
@@ -152,6 +153,7 @@ HELP = (
     "/remove_session — удалить аккаунт (кнопками)\n"
     "/stats — статистика листингов\n"
     "/last — последние найденные лоты и почему не отправлены\n"
+    "/collections — какие коллекции отслеживаются\n"
     "/settings — текущие настройки\n"
     "/set &lt;KEY&gt; &lt;VALUE&gt; — изменить настройку на лету\n"
     "/pause — остановить парсинг (аккаунты не делают запросов)\n"
@@ -171,6 +173,7 @@ USER_HELP = (
     "/remove_session — удалить свой аккаунт\n"
     "/stats — статистика листингов\n"
     "/last — последние найденные лоты и почему не отправлены\n"
+    "/collections — какие коллекции отслеживаются\n"
     "/pause, /resume — пауза (если вы добавили аккаунт)\n"
     "/settings — текущие настройки\n"
     "/test — проверка работы (пример сообщения придёт вам)\n"
@@ -453,6 +456,33 @@ def build_routers(app: "App") -> list[Router]:
         added = await app.sessions.rescan()
         await m.answer(f"🔄 Настройки, шаблон и списки продавцов перечитаны.\n"
                        f"Новых sessions: {len(added)}" + (f" ({', '.join(added)})" if added else ""))
+
+    @users.message(or_f(Command("collections"), F.text == BTN_COLLECTIONS))
+    async def cmd_collections(m: Message) -> None:
+        """Какие коллекции отслеживаются, а какие пропущены по флору."""
+        coord = app.coordinator
+        states = sorted(coord.states.values(), key=lambda st: -(st.floor_stars or 0))
+        if not states:
+            await m.answer("Каталог коллекций ещё не загружен — подождите минуту после запуска.")
+            return
+        tracked = [st for st in states if st.gift_id not in coord.skipped]
+        skipped = [st for st in states if st.gift_id in coord.skipped]
+
+        def row(st) -> str:
+            mark = "🟢" if coord._is_live(st) else "🟡"
+            floor = f"{st.floor_stars}⭐" if st.floor_stars else "—"
+            return f"{mark} {html.escape(st.title)} — флор {floor}, лотов {st.availability_resale or 0}"
+
+        lines = [f"<b>📚 Отслеживается: {len(tracked)}</b> (флор от {settings.collection_min_floor}⭐)",
+                 "🟢 в работе, 🟡 ещё синхронизируется", ""]
+        lines += [row(st) for st in tracked] or ["—"]
+        lines += ["", f"<b>🚫 Пропущено: {len(skipped)}</b> (флор ниже порога)"]
+        cheap = [f"{html.escape(st.title)} ({st.floor_stars or '—'}⭐)" for st in skipped[:40]]
+        lines.append(", ".join(cheap) + (f" и ещё {len(skipped) - 40}" if len(skipped) > 40 else ""))
+        lines += ["", "Изменить порог: <code>/set COLLECTION_MIN_FLOOR 3000</code>"]
+        text = "\n".join(lines)
+        for i in range(0, len(text), 3900):          # лимит длины сообщения Telegram
+            await m.answer(text[i:i + 3900])
 
     @users.message(or_f(Command("last"), F.text == BTN_LAST))
     async def cmd_last(m: Message) -> None:

@@ -194,6 +194,7 @@ class App:
             BotCommand(command="status", description="Состояние трекера"),
             BotCommand(command="stats", description="Статистика"),
             BotCommand(command="last", description="Последние лоты и почему не отправлены"),
+            BotCommand(command="collections", description="Какие коллекции отслеживаются"),
             BotCommand(command="pause", description="Остановить парсинг"),
             BotCommand(command="resume", description="Продолжить парсинг"),
             BotCommand(command="proxies", description="Прокси для аккаунтов"),
