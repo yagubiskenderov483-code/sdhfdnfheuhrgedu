@@ -12,6 +12,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import re
@@ -66,15 +67,11 @@ _owner_ids_getter = lambda: set()   # noqa: E731 — задаётся в build_r
 
 def is_manager(uid: int | None) -> bool:
     """Управлять трекером (/pause /resume /set /reload) может админ или тот, кто добавил аккаунт.
-    Если ни админов, ни владельцев ещё нет — первый, кто нажал, становится админом."""
+    Бутстрап первого админа — только явной командой /claim <код> (код печатается в логах при старте),
+    а НЕ автоматически первому написавшему: иначе любой чужой первым сообщением стал бы админом."""
     if not uid:
         return False
-    if uid in all_admins() or uid in _owner_ids_getter():
-        return True
-    if not all_admins() and not _owner_ids_getter():
-        save_admins({uid})
-        return True
-    return False
+    return uid in all_admins() or uid in _owner_ids_getter()
 
 
 class IsAdmin(Filter):
@@ -257,6 +254,8 @@ def build_routers(app: "App") -> list[Router]:
     users.message.filter(IsAllowed())
 
     pending: dict[int, dict[str, Any]] = {}   # user_id → {client, name, phone, hash, api_id, api_hash}
+    claimed: set[tuple[int, int]] = set()     # (chat_id, message_id) уже занятых лотов — атомарность «Занять»
+    claim_lock = asyncio.Lock()
     global _owner_ids_getter
     _owner_ids_getter = lambda: {r.owner_id for r in app.storage.list_sessions() if r.owner_id}  # noqa: E731
 
@@ -285,6 +284,13 @@ def build_routers(app: "App") -> list[Router]:
         if not first.text.startswith("✓"):
             await q.answer(f"Лот уже {first.text.lstrip('✅ ').lower()}", show_alert=True)
             return
+        # атомарно: первый нажавший занимает лот, второй получает отказ (раньше могли выиграть оба)
+        key = (msg.chat.id, msg.message_id)
+        async with claim_lock:
+            if key in claimed:
+                await q.answer("Лот уже занят", show_alert=True)
+                return
+            claimed.add(key)
         u = q.from_user
         who = f"@{u.username}" if u.username else (u.full_name or str(u.id))
         rows = [[InlineKeyboardButton(text=f"✅ Занял {who}", callback_data="taken")]] + kb.inline_keyboard[1:]
@@ -748,7 +754,9 @@ def build_routers(app: "App") -> list[Router]:
                        "иначе Telegram сочтёт, что код переслали, и заблокирует вход.")
 
     async def _finish(m: Message, state: FSMContext) -> None:
-        p = pending.pop(m.from_user.id)
+        p = pending.pop(m.from_user.id, None)
+        if p is None:                          # двойная отправка кода/пароля — второй вызов без данных
+            return
         client: TelegramClient = p["client"]
         me = await client.get_me()
         await client.disconnect()

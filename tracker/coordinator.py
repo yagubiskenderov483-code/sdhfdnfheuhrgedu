@@ -209,8 +209,12 @@ class MarketplaceCoordinator:
             # Пока коллекция была пропущена, рынок жил — её complete-база устарела. Нельзя сразу слать
             # то, что накопилось (иначе смена порога = выброс старых лотов как «новых»). Заставляем
             # сначала тихую полную ре-синхронизацию, и только потом идут по-настоящему новые лоты.
+            # complete=False персистится в БД → если процесс рестартнёт до ре-синка, коллекция не
+            # попадёт в RECOVERY (которая отправляет), а честно пере-синхронизируется молча.
             if st.synced:
                 st.needs_full_sync = True
+                st.complete = False
+                self._dirty.add(gid)
             self._due[gid] = 0.0
         return False
 
@@ -307,10 +311,11 @@ class MarketplaceCoordinator:
         # ничего не добавляют. Такую коллекцию читаем дальше, но помечаем partial — для неё
         # «незнакомый лот наверху» ещё не значит «новый» (см. _apply: сверка с изменением count).
         partial = complete and gap > max(1, count // 100)
-        if reason == "initial" and complete:
-            # первый опрос сразу после initial sync — тихий: пока мы листали, рынок менялся,
-            # и «незнакомый лот наверху» на первом live-опросе не отличить от старого. Один опрос
-            # закрепляет базу, после него уходят только по-настоящему новые лоты.
+        if complete:
+            # первый опрос сразу после ЛЮБОЙ полной синхронизации — тихий: пока мы листали, рынок
+            # менялся, и «незнакомый лот наверху» на первом live-опросе не отличить от старого. Один
+            # опрос закрепляет базу, после него уходят только по-настоящему новые лоты. Это важно и
+            # для ре-синка (не только initial): full_sync мог пропустить лот на границе страниц.
             self._baseline_pending.add(gid)
         st.synced = True
         st.complete = complete
@@ -416,13 +421,18 @@ class MarketplaceCoordinator:
 
         if cls.new and st.partial:
             delta = (count - st.last_count) if (count is not None and st.last_count is not None) else 0
-            if len(cls.new) > max(delta, 0):
-                for it in cls.new:
+            keep = max(delta, 0)
+            if len(cls.new) > keep:
+                # count вырос на delta → столько лотов точно новые. Оставляем верхние keep (они
+                # свежее всех по времени изменения цены), остальные — тихо (могут быть старые,
+                # всплывшие из непрочитанной части). Раньше глушили ВЕСЬ пакет и теряли настоящие новые.
+                extra = cls.new[keep:]
+                for it in extra:
                     self.stats["silent"] += 1
                     llog("SILENT_OLD", f'listing={it.listing_id} reason="partial_collection_uncertain" '
-                                       f'new={len(cls.new)} count_delta={delta}')
-                cls.silent += [(it, "partial_collection_uncertain") for it in cls.new]
-                cls.new = []
+                                       f'new={len(cls.new)} kept={keep} count_delta={delta}')
+                cls.silent += [(it, "partial_collection_uncertain") for it in extra]
+                cls.new = cls.new[:keep]
         if count is not None:
             st.last_count = count
 

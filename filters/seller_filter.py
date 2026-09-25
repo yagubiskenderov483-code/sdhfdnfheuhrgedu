@@ -30,7 +30,10 @@ from config import settings
 from database.models import Listing
 
 _CYR = re.compile(r"[Ѐ-ӿ]", re.IGNORECASE)        # любая кириллица
-_NON_SLAVIC = re.compile(r"[әғқңөұүһ]", re.IGNORECASE)      # казахские/центральноазиатские буквы
+# Буквы, которых НЕТ в русском/украинском/белорусском (казахский, таджикский, башкирский,
+# чувашский, осетинский, сербский, македонский и др.). Их наличие → текст не наш.
+# ў/і/ї/є/ґ/ъ (бел/укр/рус) НЕ включены — их не режем.
+_NON_SLAVIC = re.compile(r"[әғқңөұүһҳҷҙӣӯҫӑӕҝҕӧҭҡӳӗђћџњљјѓќѕ]", re.IGNORECASE)
 
 
 def is_russian_text(text: str | None) -> bool:

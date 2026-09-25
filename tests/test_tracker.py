@@ -305,11 +305,16 @@ async def test_10_no_anchor():
     await e.poll()                                    # тихая полная ре-синхронизация
     st = e.coord.states[GID]
     assert st.complete and not st.needs_full_sync and e.pipe.stats["new"] == 0
+    # первый опрос после ЛЮБОЙ полной синхронизации (в т.ч. ре-синка) — тихий baseline
+    e.market.list_new(e.market.item(9000))
+    await e.poll()
+    assert e.pipe.stats["new"] == 0, "baseline после ре-синка — тихий"
+    # после базового опроса по-настоящему новый лот уходит
     e.market.list_new(e.market.item(9000))
     await e.poll()
     assert e.pipe.stats["new"] == 1
     await e.shutdown(); shutil.rmtree(tmp)
-    print("✔ TEST 10 anchor не найден → 0 отправлено, RESYNC + WARNING, потом снова LIVE")
+    print("✔ TEST 10 anchor не найден → 0 отправлено, RESYNC + тихий baseline, потом LIVE")
 
 
 async def test_11_filters_and_repeats():
@@ -782,13 +787,17 @@ async def test_27_reinclude_after_skip_no_burst():
     market.floors[GID] = 6000
     await e.coord.refresh_catalog()
     assert GID not in e.coord.skipped and st.needs_full_sync, "повторное включение должно требовать ре-синк"
+    assert not st.complete, "повторное включение сбрасывает complete (переживёт рестарт)"
     await e.poll()                                   # тихая полная ре-синхронизация, НИЧЕГО не слать
     assert e.pipe.stats["new"] == 0 and not e.sender.sent, "накопившееся за простой — не новое"
+    market.list_new(market.item(9000))               # первый опрос после ре-синка — тихий baseline
+    await e.poll()
+    assert e.pipe.stats["new"] == 0, "baseline после ре-синка — тихий"
     market.list_new(market.item(9000))               # вот теперь по-настоящему новый
     await e.poll()
     assert e.pipe.stats["new"] == 1 and len(e.sender.sent) == 1
     await e.shutdown(); shutil.rmtree(tmp)
-    print("✔ TEST 27 повторное включение после пропуска: тихий ре-синк, старое не улетает как новое")
+    print("✔ TEST 27 повторное включение после пропуска: complete сброшен, тихий ре-синк+baseline, старое не улетает")
 
 
 def test_29_price_routes():
@@ -827,6 +836,34 @@ def test_28_russian_detection_softened():
     print("✔ TEST 28 язык: рус/укр/бел проходят, казахский и латиница — нет")
 
 
+def test_30_hardening():
+    """Регрессии из аудита: валидация /set, парсинг прокси, отсев не-славянской кириллицы."""
+    import config
+    from filters.seller_filter import is_russian_text as r
+    from utils.proxy import parse_proxy, split_lines
+    # /set-валидация: мусор → ValueError (ловится в боте), а не тихая порча
+    for key, bad in [("RUSSIAN_ONLY", "ture"), ("UNKNOWN_SELLER_POLICY", "alow"),
+                     ("COLLECTION_FLOOR_MODE", "xxx")]:
+        try:
+            config.RUNTIME_KEYS[key][1](bad); raise AssertionError(f"{key} принял мусор")
+        except ValueError:
+            pass
+    assert config.RUNTIME_KEYS["MIN_STARS"][1]("-5") == 0          # клампится, не отрицательный
+    assert config.RUNTIME_KEYS["RUSSIAN_ONLY"][1]("false") is False
+    # backdrop без двоеточия — ошибка, а не молча пусто
+    try:
+        config._backdrop_routes("Black-100/67"); raise AssertionError("backdrop принял кривой ввод")
+    except ValueError:
+        pass
+    # прокси с нечисловым портом → None и не роняет разбор списка
+    assert parse_proxy("http://1.2.3.4:port") is None
+    assert len(split_lines("http://1.2.3.4:port\nsocks5://1.2.3.4:1080")) == 1
+    # язык: не-славянская кириллица (казах/таджик/серб) не считается русской
+    assert not r("Сатылады жазыңыз") and not r("ҳарорати ҷумҳурӣ") and not r("продају")
+    assert r("Продаю") and r("Продаю подарунки")                  # рус/укр — да
+    print("✔ TEST 30 аудит-регрессии: /set-валидация, прокси-порт, отсев чужой кириллицы")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
@@ -842,6 +879,7 @@ async def run() -> None:
     test_20_proxies()
     test_28_russian_detection_softened()
     test_29_price_routes()
+    test_30_hardening()
     print("\nALL TESTS PASSED")
 
 

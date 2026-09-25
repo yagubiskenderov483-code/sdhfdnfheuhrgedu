@@ -30,6 +30,28 @@ def _bool(v: str | None, default: bool) -> bool:
     return v.strip().lower() in ("1", "true", "yes", "on", "да")
 
 
+_TRUE = {"1", "true", "yes", "on", "да", "y", "t"}
+_FALSE = {"0", "false", "no", "off", "нет", "n", "f"}
+
+
+def _bool_strict(v: str) -> bool:
+    """Для /set: явный булев ввод, иначе ValueError (чтобы опечатка не отключала фильтр молча)."""
+    s = (v or "").strip().lower()
+    if s in _TRUE:
+        return True
+    if s in _FALSE:
+        return False
+    raise ValueError(f"ожидается true/false, а не {v!r}")
+
+
+def _choice(v: str, allowed: set[str]) -> str:
+    """Для /set: значение из набора, иначе ValueError (чтобы мусор не принимался молча)."""
+    s = (v or "").strip().lower()
+    if s not in allowed:
+        raise ValueError(f"ожидается одно из {sorted(allowed)}, а не {v!r}")
+    return s
+
+
 def _int(v: str | None, default: int) -> int:
     try:
         return int(str(v).strip()) if v not in (None, "") else default
@@ -89,10 +111,11 @@ def _backdrop_routes(v: str | None) -> list[tuple[str, int, int | None]]:
         part = part.strip()
         if not part:
             continue
-        name, _, dest = part.rpartition(":")
-        if name.strip():
-            chat, thread = _chat_thread(dest)
-            routes.append((name.strip(), chat, thread))
+        name, sep, dest = part.rpartition(":")
+        if not sep or not name.strip() or not dest.strip():
+            raise ValueError(f"нужен формат Название:ID[/тема], а не {part!r}")
+        chat, thread = _chat_thread(dest)
+        routes.append((name.strip(), chat, thread))
     return routes
 
 
@@ -213,34 +236,34 @@ class Settings:
 
 # Ключи, которые можно менять из бота командой /set KEY VALUE
 RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
-    "MIN_STARS": ("min_stars", lambda v: int(v)),
+    "MIN_STARS": ("min_stars", lambda v: max(0, int(v))),
     "PRICE_ROUTES": ("price_routes", _price_routes),
     "BACKDROP_ROUTES": ("backdrop_routes", _backdrop_routes),
     "COLLECTION_MIN_FLOOR": ("collection_min_floor", lambda v: max(0, int(v))),
-    "COLLECTION_FLOOR_MODE": ("collection_floor_mode", lambda v: v.strip().lower()),
+    "COLLECTION_FLOOR_MODE": ("collection_floor_mode", lambda v: _choice(v, {"skip", "slow"})),
     "LOW_PRIORITY_POLL_INTERVAL": ("low_priority_poll_interval", lambda v: max(5.0, float(v))),
     "MIN_TON": ("min_ton", lambda v: float(v.replace(",", "."))),
-    "ALLOW_TON_ONLY": ("allow_ton_only", lambda v: _bool(v, False)),
-    "RUSSIAN_ONLY": ("russian_only", lambda v: _bool(v, True)),
-    "UNKNOWN_SELLER_POLICY": ("unknown_seller_policy", lambda v: v.strip().lower()),
+    "ALLOW_TON_ONLY": ("allow_ton_only", _bool_strict),
+    "RUSSIAN_ONLY": ("russian_only", _bool_strict),
+    "UNKNOWN_SELLER_POLICY": ("unknown_seller_policy", lambda v: _choice(v, {"allow", "block"})),
     "SELLER_PHONE_PREFIXES": ("seller_phone_prefixes", _str_list),
     "TRACKER_INTERVAL": ("tracker_interval", lambda v: max(0.2, float(v))),
     "PAGE_LIMIT": ("page_limit", lambda v: max(1, min(100, int(v)))),
     "SESSION_RPS": ("session_rps", lambda v: max(0.05, float(v))),
     "GLOBAL_RPS": ("global_rps", lambda v: max(0.0, float(v))),
     "MAX_CONCURRENT_SESSIONS": ("max_concurrent_sessions", lambda v: max(1, int(v))),
-    "TEST_MODE": ("test_mode", lambda v: _bool(v, False)),
-    "UNIQUE_GIFTS": ("unique_gifts", lambda v: _bool(v, True)),
-    "REQUIRE_FREE_MESSAGES": ("require_free_messages", lambda v: _bool(v, True)),
+    "TEST_MODE": ("test_mode", _bool_strict),
+    "UNIQUE_GIFTS": ("unique_gifts", _bool_strict),
+    "REQUIRE_FREE_MESSAGES": ("require_free_messages", _bool_strict),
     "MAX_SELLER_NFTS": ("max_seller_nfts", lambda v: max(0, int(v))),
     "MAX_SELLER_LEVEL": ("max_seller_level", lambda v: max(0, int(v))),
     "COLD_POLL_INTERVAL": ("cold_poll_interval", lambda v: max(1.0, float(v))),
     "CATALOG_INTERVAL": ("catalog_interval", lambda v: max(0.3, float(v))),
     "MAX_SAME_COLLECTION_STREAK": ("max_same_collection_streak", lambda v: max(0, int(v))),
-    "UNIQUE_SELLERS": ("unique_sellers", lambda v: _bool(v, True)),
+    "UNIQUE_SELLERS": ("unique_sellers", _bool_strict),
     "SELLER_REPEAT_HOURS": ("seller_repeat_hours", lambda v: max(0.0, float(v))),
-    "ALLOW_ALL_USERS": ("allow_all_users", lambda v: _bool(v, True)),
-    "FETCH_FULL_SELLER": ("fetch_full_seller", lambda v: _bool(v, True)),
+    "ALLOW_ALL_USERS": ("allow_all_users", _bool_strict),
+    "FETCH_FULL_SELLER": ("fetch_full_seller", _bool_strict),
 }
 
 

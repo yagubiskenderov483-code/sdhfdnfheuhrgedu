@@ -32,12 +32,16 @@ def parse_proxy(line: str | None) -> dict | None:
         else:
             return None
     u = urlparse(s)
-    if u.scheme.lower() not in _SCHEMES or not u.hostname or not u.port:
+    try:
+        port = u.port           # бросает ValueError на нечисловом порту (напр. host:abc)
+    except ValueError:
+        return None
+    if u.scheme.lower() not in _SCHEMES or not u.hostname or not port:
         return None
     return {
         "proxy_type": u.scheme.lower(),
         "addr": u.hostname,
-        "port": int(u.port),
+        "port": int(port),
         "username": unquote(u.username) if u.username else None,
         "password": unquote(u.password) if u.password else None,
         "rdns": True,

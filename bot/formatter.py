@@ -107,7 +107,7 @@ class MessageFormatter:
         self.template = self.template_path.read_text(encoding="utf-8").strip()
 
     def variables(self, l: Listing) -> dict[str, str]:
-        gift_name = l.gift_name
+        gift_name = l.gift_name or DASH        # None бы уронил html.escape → лот не отправился бы
         if l.gift_link:
             gift_title_link = f'<a href="{html.escape(l.gift_link)}">{html.escape(gift_name)}</a>'
         else:

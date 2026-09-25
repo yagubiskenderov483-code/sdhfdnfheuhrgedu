@@ -196,7 +196,8 @@ class Database:
                      last_seen_timestamp=excluded.last_seen_timestamp,
                      availability_resale=excluded.availability_resale,
                      last_poll=excluded.last_poll, last_session=excluded.last_session,
-                     partial=excluded.partial, last_count=excluded.last_count""",
+                     partial=excluded.partial,
+                     last_count=COALESCE(excluded.last_count, collection_state.last_count)""",
                 {"partial": 0, "last_count": None, **s})
             await self.conn.commit()
 
@@ -269,7 +270,7 @@ class Database:
                 "SELECT 1 FROM listings WHERE seller_key=? AND sent=1 LIMIT 1", (seller_key,))
         return (await cur.fetchone()) is not None
 
-    async def export_sent_history(self, limit: int = 20000) -> list[list]:
+    async def export_sent_history(self, limit: int = 200000) -> list[list]:
         """Отправленные листинги для переноса через деплой: [listing_id, gift_unique_id, gift_id, seller_key, sent_at]."""
         assert self.conn
         cur = await self.conn.execute(

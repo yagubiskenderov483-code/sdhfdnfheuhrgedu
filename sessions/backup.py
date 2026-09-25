@@ -102,6 +102,7 @@ class SessionBackup:
         self._last_msg: int | None = None
         self.last_error: str | None = None
         self._ptr: dict | None = None
+        self._ptr_lock = asyncio.Lock()  # read-modify-write указателя без гонки s/m ключей
         self.restore_done = False       # пока восстановление не завершено, копию НЕ перезаписываем
         self.restored_count = 0
         self.market_export: Callable[[], Awaitable[dict]] | None = None
@@ -140,11 +141,14 @@ class SessionBackup:
         return ptr
 
     async def _write_pointer(self, key: str, value: list) -> None:
-        ptr = dict(await self._read_pointer())      # BackupUnavailable → не затираем чужие ключи
-        ptr[key] = value
-        await self.bot.set_my_description(description=POINTER_PREFIX2 + json.dumps(ptr, separators=(",", ":")),
-                                          language_code=POINTER_LANG)
-        self._ptr = ptr
+        # Лок на весь read-modify-write: без него параллельные save() (ключ "s") и save_market()
+        # ("m") на точке await внутри set_my_description теряют один из ключей.
+        async with self._ptr_lock:
+            ptr = dict(await self._read_pointer())  # BackupUnavailable → не затираем чужие ключи
+            ptr[key] = value
+            await self.bot.set_my_description(description=POINTER_PREFIX2 + json.dumps(ptr, separators=(",", ":")),
+                                              language_code=POINTER_LANG)
+            self._ptr = ptr
 
     # ------------------------------------------------------------------ save
     def candidate_chats(self, hint: int | None = None) -> list[int]:
@@ -258,9 +262,12 @@ class SessionBackup:
             buf = io.BytesIO()
             await self.bot.download(file_id, destination=buf)
             data = json.loads(f.decrypt(buf.getvalue()))
-        except InvalidToken:
-            log.error("Backup: wrong key (BOT_TOKEN or SESSION_BACKUP_KEY changed?)")
-            return 0
+        except InvalidToken as e:
+            # InvalidToken = либо неверный ключ, либо ОБОРВАННАЯ/битая закачка (частый транзиент).
+            # Различить нельзя, поэтому НЕ считаем restore выполненным (иначе save() снимет защиту и
+            # затрёт хорошую копию пустой). Отдаём как временную недоступность → ретрай; если ключ
+            # реально сменился, после ретраев сохранение останется заблокированным и старая копия цела.
+            raise BackupUnavailable(f"decrypt failed (wrong key or truncated download): {e}") from e
         except Exception as e:
             raise BackupUnavailable(f"backup download failed: {e}") from e
 
