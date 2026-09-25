@@ -37,7 +37,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from telethon.crypto import AuthKey
 from telethon.sessions import SQLiteSession, StringSession
 
-from config import settings
+from config import export_runtime_overrides, import_runtime_overrides, settings
 from sessions.storage import SessionStorage
 from utils.logger import get_logger
 
@@ -186,6 +186,7 @@ class SessionBackup:
                 log.warning("Sent history export failed: %s", e)
         payload = {"v": 2, "sessions": items, "admins": sorted(self._admins()), "sent": history,
                    "proxies": self.storage.load_pool(),
+                   "settings": export_runtime_overrides(),
                    "paused": bool(self.paused_getter()) if self.paused_getter else False}
         blob = f.encrypt(json.dumps(payload).encode())
 
@@ -273,6 +274,9 @@ class SessionBackup:
             except Exception as e:
                 log.warning("Sent history import failed: %s", e)
 
+        if data.get("settings"):
+            import_runtime_overrides(data["settings"])     # /set-настройки переживают деплой
+            log.info("Restored settings changed via /set: %s", ", ".join(sorted(data["settings"])))
         if data.get("proxies") and not self.storage.load_pool():
             self.storage.save_pool(list(data["proxies"]))
         restored = 0

@@ -124,7 +124,7 @@ def reset_settings():
     settings.max_seller_nfts = 0
     settings.max_seller_level = 0
     settings.collection_min_floor = 0
-    settings.collection_floor_mode = "slow"
+    settings.collection_floor_mode = "skip"
     settings.low_priority_poll_interval, settings.low_priority_hot_min = 60.0, 10.0
     settings.fetch_full_seller = False
     settings.test_mode = False
@@ -395,6 +395,9 @@ async def test_13_backup_survives_deploy():
     sent = [["1:u9", 1, 5, "u9", "2026-01-01T00:00:00+00:00"]]
     async def exp():
         return sent
+    import config as cfg
+    cfg.RUNTIME_SETTINGS_PATH = Path(tempfile.mkdtemp()) / "rs.json"
+    cfg.set_runtime_value("COLLECTION_MIN_FLOOR", "3000")
     b1 = SessionBackup(bot, st1, lambda: admins, history_export=exp)
     assert not await b1.save(chat_hint=777), "до восстановления копию не перезаписываем"
     assert await b1.restore() == 0 and b1.restore_done
@@ -404,6 +407,8 @@ async def test_13_backup_survives_deploy():
     # «деплой»: пустая папка, пустая база
     d2 = Path(tempfile.mkdtemp())
     st2 = SessionStorage(d2, 1, "h" * 32)
+    cfg.RUNTIME_SETTINGS_PATH.unlink()                       # «деплой» стёр настройки
+    settings.collection_min_floor = 4500
     got_admins, got_hist = set(), []
     async def imp(rows):
         got_hist.extend(rows); return len(rows)
@@ -412,6 +417,8 @@ async def test_13_backup_survives_deploy():
     recs = st2.list_sessions()
     assert [r.name for r in recs] == ["session_001", "session_002"] and recs[0].owner_id == 777
     assert got_admins == {777} and got_hist == sent
+    from config import RUNTIME_SETTINGS_PATH
+    assert "COLLECTION_MIN_FLOOR" in RUNTIME_SETTINGS_PATH.read_text() and settings.collection_min_floor == 3000
     # защита: если аккаунтов стало меньше (файл не готов / не восстановился) — старая копия не затирается
     (d2 / "session_002.session").unlink()
     assert not await b2.save() and "старая копия" in b2.last_error
@@ -649,6 +656,7 @@ async def test_23_cheap_collections_slow():
     import time as _t
     reset_settings()
     settings.collection_min_floor = 4500
+    settings.collection_floor_mode = "slow"
     tmp = Path(tempfile.mkdtemp())
     market = FakeMarket()
     market.lots[2] = []

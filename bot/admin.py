@@ -571,6 +571,12 @@ def build_routers(app: "App") -> list[Router]:
             return
         if parts[0].upper() == "GLOBAL_RPS":
             app.sessions.limiter.set_rate(settings.global_rps)
+        if parts[0].upper() in ("COLLECTION_MIN_FLOOR", "COLLECTION_FLOOR_MODE"):
+            try:
+                await app.coordinator.refresh_catalog()   # применить порог сразу, а не через цикл
+            except Exception:
+                pass
+        await app.backup.save()                           # чтобы настройка пережила деплой
         await m.answer(f"✅ {parts[0].upper()} = {html.escape(str(value))} (сохранено)")
 
     @users.message(Command("test"))

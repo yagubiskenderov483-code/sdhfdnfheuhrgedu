@@ -69,7 +69,7 @@ class Settings:
 
     # --- фильтр цены ---
     min_stars: int = 5000
-    collection_floor_mode: str = "slow"      # slow — дешёвые коллекции реже; skip — не отслеживать вовсе
+    collection_floor_mode: str = "skip"      # slow — дешёвые коллекции реже; skip — не отслеживать вовсе
     low_priority_poll_interval: float = 60.0 # страховочный обход дешёвых коллекций
     low_priority_hot_min: float = 10.0       # дешёвая коллекция опрашивается по изменению не чаще раза в N сек
     collection_min_floor: int = 4500         # отслеживать только коллекции с флором на маркете от N Stars (0 = все)
@@ -98,7 +98,7 @@ class Settings:
     live_max_pages: int = 5
     recovery_max_pages: int = 20
     catalog_interval: float = 2.0            # как часто смотреть счётчики лотов всех коллекций (1 запрос)
-    cold_poll_interval: float = 6.0         # коллекция без изменений счётчика — страховочный опрос раз в N сек
+    cold_poll_interval: float = 5.0         # коллекция без изменений счётчика — страховочный опрос раз в N сек
     market_backup_minutes: float = 30.0      # как часто сохранять снимок рынка в Telegram
     market_snapshot_max_age_hours: float = 6.0
     collections: list[str] = field(default_factory=list)   # пусто = все коллекции
@@ -200,7 +200,7 @@ def _from_env() -> Settings:
         allow_all_users=_bool(e("ALLOW_ALL_USERS"), True),
         min_stars=_int(e("MIN_STARS"), 5000),
         collection_min_floor=max(0, _int(e("COLLECTION_MIN_FLOOR"), 4500)),
-        collection_floor_mode=(e("COLLECTION_FLOOR_MODE") or "slow").strip().lower(),
+        collection_floor_mode=(e("COLLECTION_FLOOR_MODE") or "skip").strip().lower(),
         low_priority_poll_interval=max(5.0, _float(e("LOW_PRIORITY_POLL_INTERVAL"), 60.0)),
         low_priority_hot_min=max(1.0, _float(e("LOW_PRIORITY_HOT_MIN"), 10.0)),
         min_ton=_float(e("MIN_TON"), 0.0),
@@ -211,7 +211,7 @@ def _from_env() -> Settings:
         require_free_messages=_bool(e("REQUIRE_FREE_MESSAGES"), True),
         max_seller_nfts=max(0, _int(e("MAX_SELLER_NFTS"), 12)),
         max_seller_level=max(0, _int(e("MAX_SELLER_LEVEL"), 5)),
-        cold_poll_interval=max(1.0, _float(e("COLD_POLL_INTERVAL"), 6.0)),
+        cold_poll_interval=max(1.0, _float(e("COLD_POLL_INTERVAL"), 5.0)),
         market_backup_minutes=max(5.0, _float(e("MARKET_BACKUP_MINUTES"), 30.0)),
         market_snapshot_max_age_hours=max(0.5, _float(e("MARKET_SNAPSHOT_MAX_AGE_HOURS"), 6.0)),
         unique_sellers=_bool(e("UNIQUE_SELLERS"), True),
@@ -269,6 +269,22 @@ def load_settings() -> Settings:
             except (ValueError, TypeError):
                 pass
     return s
+
+
+def export_runtime_overrides() -> dict[str, str]:
+    """Настройки, изменённые командой /set, — сохраняются в копию в Telegram и переживают деплой."""
+    return _load_runtime_overrides()
+
+
+def import_runtime_overrides(data: dict) -> None:
+    clean = {k: str(v) for k, v in (data or {}).items() if k in RUNTIME_KEYS}
+    if not clean:
+        return
+    current = _load_runtime_overrides()
+    current.update(clean)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    RUNTIME_SETTINGS_PATH.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    reload_settings()
 
 
 def set_runtime_value(key: str, raw: str) -> Any:
