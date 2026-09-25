@@ -580,13 +580,35 @@ def test_20_proxies():
     print("✔ TEST 20 прокси: разбор форматов, раздача по 2 на прокси, метаданные сохраняются")
 
 
+async def test_21_ton_priced_lots():
+    """Лоты с ценой в TON: Stars-эквивалент плавает с курсом — это не смена цены."""
+    reset_settings()
+    tmp = Path(tempfile.mkdtemp())
+    market = FakeMarket()
+    for _ in range(40):
+        it = market.item(9476)
+        market.list_new(ResaleItem(**{**it.__dict__, "ton_nano": 100_000_000_000}))
+    patch_market(market)
+    e = await Env(tmp, market).boot()
+    market.lots[GID] = [ResaleItem(**{**x.__dict__, "stars": x.stars + 3}) for x in market.lots[GID]]
+    real = market.lots[GID][10]
+    market.change_price(real.unique_id, 12000)
+    market.lots[GID][0] = ResaleItem(**{**market.lots[GID][0].__dict__, "ton_nano": 126_000_000_000})
+    market.list_new(market.item(9000))
+    await e.poll()
+    assert e.coord.stats["price_moves"] == 1, e.coord.stats
+    assert e.pipe.stats["new"] == 1
+    await e.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 21 лот за TON: Stars плавают по курсу — не смена цены; настоящая смена — 1 PRICE_MOVE")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
               test_8_seller_change, test_9_burst_500, test_10_no_anchor, test_11_filters_and_repeats,
               test_12_count_mismatch_and_backup_fallback, test_13_backup_survives_deploy,
               test_14_ton_rate_changes, test_16_market_snapshot_redeploy, test_17_hot_cold_schedule,
-              test_18_pause, test_19_floor_filter):
+              test_18_pause, test_19_floor_filter, test_21_ton_priced_lots):
         await t()
     test_15_seller_rules()
     test_20_proxies()

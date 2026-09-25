@@ -116,13 +116,17 @@ def item_status(it: ResaleItem, known: dict[int, KnownItem]) -> tuple[str, Known
 
 
 def same_price(old_stars: int | None, old_ton: int | None, new_stars: int | None, new_ton: int | None) -> bool:
-    """Сравниваем ОСНОВНУЮ цену лота.
-    Если лот выставлен за Stars, Telegram дописывает в resell_amount ещё и TON-эквивалент,
-    который плавает вместе с курсом — его сравнивать нельзя (иначе каждый известный лот
-    выглядит как «смена цены» и anchor не находится). TON сравниваем только у TON-лотов."""
-    if old_stars is not None or new_stars is not None:
-        return old_stars == new_stars
-    return old_ton == new_ton
+    """Изменилась ли цена лота по-настоящему, а не из-за курса.
+    Продавец задаёт цену в ОДНОЙ валюте, вторую Telegram пересчитывает по текущему курсу:
+      • лот за Stars (9476⭐) — TON-эквивалент плавает;
+      • лот за TON (100 TON)  — Stars-эквивалент плавает.
+    Какая валюта основная, API не говорит. Но при настоящей смене цены меняются ОБЕ суммы,
+    а при смене курса — только пересчитанная. Поэтому цена та же, если совпала хотя бы одна."""
+    if old_stars is not None and old_stars == new_stars:
+        return True
+    if old_ton is not None and old_ton == new_ton:
+        return True
+    return old_stars == new_stars and old_ton == new_ton
 
 
 def classify(state: CollectionState, items: list[ResaleItem], known: dict[int, KnownItem],
