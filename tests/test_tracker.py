@@ -120,6 +120,8 @@ def reset_settings():
     settings.min_ton = 0
     settings.allow_ton_only = False
     settings.russian_only = False
+    settings.require_free_messages = False
+    settings.max_seller_nfts = 0
     settings.fetch_full_seller = False
     settings.test_mode = False
     settings.unique_gifts = False
@@ -406,12 +408,55 @@ async def test_13_backup_survives_deploy():
     print("✔ TEST 13 копия без ADMIN_IDS и закрепов: после «деплоя» восстановлены аккаунты, админ, история")
 
 
+async def test_14_ton_rate_changes():
+    # у лотов за Stars Telegram дописывает TON-эквивалент, который плавает с курсом
+    reset_settings()
+    tmp = Path(tempfile.mkdtemp())
+    market = FakeMarket()
+    for _ in range(60):
+        it = market.item(9000)
+        market.list_new(ResaleItem(**{**it.__dict__, "ton_nano": 95_000_000_000}))
+    patch_market(market)
+    e = await Env(tmp, market).boot()
+    before = e.coord.stats["scanned"]
+    e.market.lots[GID] = [ResaleItem(**{**x.__dict__, "ton_nano": 97_300_000_000}) for x in e.market.lots[GID]]
+    e.market.list_new(e.market.item(9000))
+    await e.poll()
+    assert e.pipe.stats["new"] == 1 and e.coord.stats["price_moves"] == 0, (e.pipe.stats, e.coord.stats)
+    assert e.coord.stats["scanned"] - before <= settings.page_limit, "должен хватить один короткий запрос"
+    await e.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 14 курс TON изменился → это не смена цены, anchor находится сразу, 1 NEW")
+
+
+def test_15_seller_rules():
+    from database.models import Listing
+    from filters.seller_filter import SellerFilter
+    reset_settings()
+    settings.require_free_messages, settings.max_seller_nfts = True, 12
+    settings.russian_only, settings.unknown_seller_policy = True, "block"
+    f = SellerFilter(Path(tempfile.mkdtemp()))
+    base = dict(listing_id="1:u1", gift_unique_id=1, gift_id=1, gift_name="X", seller_type="user", seller_id=1)
+    ok = Listing(**base, messages="бесплатно", seller_nfts=3, seller_about="Продаю подарки, пишите в лс")
+    assert f.check(ok).passed
+    assert f.check(Listing(**{**base}, messages="платно (50 ⭐)", seller_nfts=3,
+                           seller_about="Продаю подарки")).code == "PAID_MESSAGES"
+    assert f.check(Listing(**base, messages="только Premium", seller_about="Продаю подарки")).code == "PAID_MESSAGES"
+    assert f.check(Listing(**base, messages="бесплатно", seller_nfts=40,
+                           seller_about="Продаю подарки")).code == "TOO_MANY_NFTS"
+    assert f.check(Listing(**base, messages="бесплатно", seller_nfts=2, seller_about=None,
+                           seller_channel="Мой канал про подарки")).code == "CHANNEL_RU"
+    assert f.check(Listing(**base, messages="бесплатно", seller_nfts=2)).code == "UNKNOWN_BLOCKED"
+    print("✔ TEST 15 продавец: платные сообщения / >12 NFT отсеяны, русский bio или канал проходят")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
               test_8_seller_change, test_9_burst_500, test_10_no_anchor, test_11_filters_and_repeats,
-              test_12_count_mismatch_and_backup_fallback, test_13_backup_survives_deploy):
+              test_12_count_mismatch_and_backup_fallback, test_13_backup_survives_deploy,
+              test_14_ton_rate_changes):
         await t()
+    test_15_seller_rules()
     print("\nALL TESTS PASSED")
 
 

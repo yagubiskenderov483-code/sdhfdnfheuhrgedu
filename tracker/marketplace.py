@@ -33,7 +33,8 @@ from typing import Any
 
 from telethon import TelegramClient
 from telethon.tl import types
-from telethon.tl.functions.payments import GetResaleStarGiftsRequest, GetStarGiftsRequest
+from telethon.tl.functions.payments import (GetResaleStarGiftsRequest, GetSavedStarGiftsRequest,
+                                            GetStarGiftsRequest)
 from telethon.tl.functions.users import GetFullUserRequest
 
 
@@ -186,6 +187,7 @@ class SellerFull:
     contact_require_premium: bool | None
     phone: str | None
     about: str | None = None
+    channel_title: str | None = None     # название личного канала профиля (UserFull.personal_channel_id)
 
 
 async def fetch_full_user(client: TelegramClient, user_id: int) -> SellerFull:
@@ -206,4 +208,16 @@ async def fetch_full_user(client: TelegramClient, user_id: int) -> SellerFull:
                                  or (getattr(user, "contact_require_premium", None) if user else None)),
         phone=getattr(user, "phone", None) if user else None,
         about=getattr(full, "about", None),
+        channel_title=next((getattr(c, "title", None) for c in (res.chats or [])
+                            if getattr(c, "id", None) == getattr(full, "personal_channel_id", None)), None),
     )
+
+
+async def fetch_nft_count(client: TelegramClient, user_id: int) -> int:
+    """Сколько коллекционных (NFT) подарков видно в профиле продавца.
+    payments.getSavedStarGifts без обычных подарков: exclude_unlimited + exclude_upgradable +
+    exclude_unupgradable оставляют только коллекционные. Скрытые продавцом подарки Telegram не показывает."""
+    entity = await client.get_input_entity(types.PeerUser(user_id))
+    res = await client(GetSavedStarGiftsRequest(peer=entity, offset="", limit=1, exclude_unlimited=True,
+                                                exclude_upgradable=True, exclude_unupgradable=True))
+    return int(res.count)

@@ -44,6 +44,8 @@ class Listing:
     seller_phone: str | None = None    # НЕ сохраняется в БД, только для фильтра
     seller_about: str | None = None    # bio продавца — НЕ сохраняется в БД, только для фильтра
     floor_stars: int | None = None     # флор коллекции на момент обнаружения (для поста)
+    seller_nfts: int | None = None     # сколько NFT видно в профиле продавца
+    seller_channel: str | None = None  # название личного канала продавца (для фильтра языка)
 
     stars_price: int | None = None
     ton_nano: int | None = None

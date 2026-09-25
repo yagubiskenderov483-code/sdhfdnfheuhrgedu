@@ -75,6 +75,8 @@ class Settings:
     # --- фильтр продавца ---
     russian_only: bool = True
     unknown_seller_policy: str = "block"      # allow | block
+    require_free_messages: bool = True        # продавцу можно написать бесплатно (без платных сообщений / Premium-only)
+    max_seller_nfts: int = 12                 # не больше N NFT в профиле продавца (0 = не проверять)
     unique_gifts: bool = True                 # один и тот же NFT не отправлять повторно
     unique_sellers: bool = True               # одного и того же продавца не отправлять повторно
     seller_repeat_hours: float = 0.0          # 0 = никогда не повторять продавца
@@ -160,6 +162,8 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "MAX_CONCURRENT_SESSIONS": ("max_concurrent_sessions", lambda v: max(1, int(v))),
     "TEST_MODE": ("test_mode", lambda v: _bool(v, False)),
     "UNIQUE_GIFTS": ("unique_gifts", lambda v: _bool(v, True)),
+    "REQUIRE_FREE_MESSAGES": ("require_free_messages", lambda v: _bool(v, True)),
+    "MAX_SELLER_NFTS": ("max_seller_nfts", lambda v: max(0, int(v))),
     "MAX_SAME_COLLECTION_STREAK": ("max_same_collection_streak", lambda v: max(0, int(v))),
     "UNIQUE_SELLERS": ("unique_sellers", lambda v: _bool(v, True)),
     "SELLER_REPEAT_HOURS": ("seller_repeat_hours", lambda v: max(0.0, float(v))),
@@ -184,6 +188,8 @@ def _from_env() -> Settings:
         russian_only=_bool(e("RUSSIAN_ONLY"), True),
         unknown_seller_policy=(e("UNKNOWN_SELLER_POLICY") or "block").strip().lower(),
         unique_gifts=_bool(e("UNIQUE_GIFTS"), True),
+        require_free_messages=_bool(e("REQUIRE_FREE_MESSAGES"), True),
+        max_seller_nfts=max(0, _int(e("MAX_SELLER_NFTS"), 12)),
         unique_sellers=_bool(e("UNIQUE_SELLERS"), True),
         seller_repeat_hours=max(0.0, _float(e("SELLER_REPEAT_HOURS"), 0.0)),
         seller_phone_prefixes=_str_list(e("SELLER_PHONE_PREFIXES") or "7"),

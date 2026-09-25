@@ -346,6 +346,13 @@ def build_routers(app: "App") -> list[Router]:
                  f"Ошибок отправки: {p['failed']}", "",
                  "<b>Всего в БД:</b>"]
         lines += [f"{k}: {v}" for k, v in sorted(counts.items())] or ["—"]
+        rej = await app.db.seller_reject_counts()
+        if rej:
+            names = {"PAID_MESSAGES": "платные сообщения / только Premium", "TOO_MANY_NFTS": "много NFT",
+                     "UNKNOWN_BLOCKED": "не русский (нет данных)", "PHONE_MISMATCH": "номер не +7",
+                     "BLACKLIST": "blacklist"}
+            lines += ["", "<b>Почему отсеяны продавцы:</b>"]
+            lines += [f"{names.get(k, k)}: {v}" for k, v in sorted(rej.items(), key=lambda x: -x[1])]
         lines += ["", "<b>За 24 часа:</b>"]
         lines += [f"{k}: {v}" for k, v in sorted(day.items())] or ["—"]
         await m.answer("\n".join(lines))

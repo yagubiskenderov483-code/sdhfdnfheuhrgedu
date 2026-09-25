@@ -284,6 +284,13 @@ class Database:
             await self.conn.commit()
         return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 
+    async def seller_reject_counts(self) -> dict[str, int]:
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT seller_filter_result, COUNT(*) FROM listings WHERE status='FILTERED_SELLER' "
+            "GROUP BY seller_filter_result")
+        return {str(r[0]): r[1] for r in await cur.fetchall()}
+
     async def status_counts(self) -> dict[str, int]:
         assert self.conn
         cur = await self.conn.execute("SELECT status, COUNT(*) FROM listings GROUP BY status")

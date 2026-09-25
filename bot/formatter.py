@@ -6,7 +6,7 @@
   model, backdrop, symbol,
   price_line, floor_line, stars_price, ton_price, currency,
   seller_line, seller_username, seller_id, seller_name, seller_profile, seller_check,
-  level, messages, premium_status, listing_id, first_seen, session_source
+  level, messages, premium_status, seller_nfts, listing_id, first_seen, session_source
 Все значения уже экранированы для HTML. Неизвестная переменная → пустая строка.
 """
 from __future__ import annotations
@@ -161,6 +161,7 @@ class MessageFormatter:
             seller_profile=seller_profile,
             seller_check=_e(l.seller_filter_result),
             level=_e(l.level),
+            seller_nfts=_e(l.seller_nfts),
             messages=_e(l.messages),
             premium_status=premium_status,
             listing_id=_e(l.listing_id),

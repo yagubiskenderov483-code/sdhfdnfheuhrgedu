@@ -33,7 +33,7 @@ from database.models import Listing, ListingStatus
 from filters.price_filter import PriceFilter
 from filters.seller_filter import SellerFilter
 from sessions.manager import SessionManager
-from tracker.marketplace import ResaleItem, SellerFull, fetch_full_user
+from tracker.marketplace import ResaleItem, SellerFull, fetch_full_user, fetch_nft_count
 from utils.links import gift_link, username_link
 from utils.logger import get_logger, llog
 
@@ -138,6 +138,7 @@ class ListingPipeline:
         self.queue: asyncio.Queue[ListingEvent] = asyncio.Queue()
         self._workers: list[asyncio.Task] = []
         self._seller_cache: dict[int, tuple[float, SellerFull]] = {}
+        self._nft_cache: dict[int, tuple[float, int | None]] = {}
         self.stats = {"new": 0, "sent": 0, "filtered_price": 0, "filtered_seller": 0,
                       "filtered_repeat": 0, "duplicates": 0, "failed": 0}
         # защита от повторов NFT / продавца между параллельными обработчиками
@@ -228,7 +229,7 @@ class ListingPipeline:
             try:
                 # access_hash продавца есть только у той session, которая получила лот → строго на ней
                 full, _ = await self.sessions.run(lambda c: fetch_full_user(c, uid),
-                                                  only=l.session_source, attempts=1, timeout=15)
+                                                  only=l.session_source, attempts=2, timeout=45)
             except Exception as e:
                 log.debug("getFullUser %s failed: %s", uid, e)
                 return
@@ -244,7 +245,26 @@ class ListingPipeline:
         if full.phone and not l.seller_phone:
             l.seller_phone = full.phone
         l.seller_about = full.about
+        l.seller_channel = full.channel_title
         l.messages = _messages_status(full.paid_message_stars, full.contact_require_premium)
+        if settings.max_seller_nfts > 0:
+            l.seller_nfts = await self._nft_count(l)
+
+    async def _nft_count(self, l: Listing) -> int | None:
+        uid = l.seller_id
+        cached = self._nft_cache.get(uid)
+        if cached and time.monotonic() - cached[0] < settings.seller_cache_ttl:
+            return cached[1]
+        try:
+            n, _ = await self.sessions.run(lambda c: fetch_nft_count(c, uid),
+                                           only=l.session_source, attempts=2, timeout=45)
+        except Exception as e:
+            log.debug("getSavedStarGifts %s failed: %s", uid, e)
+            n = None
+        self._nft_cache[uid] = (time.monotonic(), n)
+        if len(self._nft_cache) > 50_000:
+            self._nft_cache.clear()
+        return n
 
     def _streak_reason(self, l: Listing) -> str | None:
         """Не отправлять одну и ту же коллекцию подряд больше MAX_SAME_COLLECTION_STREAK раз."""

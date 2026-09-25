@@ -9,12 +9,17 @@ RUSSIAN_ONLY=true пропускает продавца, только если �
   2. data/seller_whitelist.txt                                          → пропустить
   3. телефон виден (Telegram отдал User.phone) и начинается с
      SELLER_PHONE_PREFIXES (по умолчанию 7)                             → пропустить, иначе отсеять
-  4. описание профиля (bio, UserFull.about) написано по-русски:
+  4. описание профиля (bio, UserFull.about) или название личного канала написано по-русски:
      есть русские буквы (ы э ъ ё) / кириллица и нет украинских/белорусских/
      казахских букв (і ї є ґ ў ә ғ қ ң ө ұ ү һ)                         → пропустить
   5. ничего из этого нет → UNKNOWN_SELLER_POLICY: block (отсеять, по умолчанию) | allow
 
 RUSSIAN_ONLY=false → пропускаются все (кроме blacklist).
+
+До проверки языка применяются ещё два фильтра:
+  • REQUIRE_FREE_MESSAGES=true — продавцу можно написать бесплатно (нет платных сообщений
+    и нет ограничения «только Premium»);
+  • MAX_SELLER_NFTS=12 — в профиле продавца видно не больше 12 NFT (payments.getSavedStarGifts).
 """
 from __future__ import annotations
 
@@ -91,6 +96,16 @@ class SellerFilter:
         if self._match(l, self.black_ids, self.black_names):
             return SellerResult(False, "BLACKLIST", "seller in blacklist")
 
+        # продавцу должно быть можно написать бесплатно
+        if settings.require_free_messages and l.seller_type == "user" and l.messages != "бесплатно":
+            return SellerResult(False, "PAID_MESSAGES",
+                                f"messages: {l.messages or 'unknown'} (REQUIRE_FREE_MESSAGES=true)")
+
+        # у продавца не слишком много NFT
+        if settings.max_seller_nfts > 0 and l.seller_nfts is not None and l.seller_nfts > settings.max_seller_nfts:
+            return SellerResult(False, "TOO_MANY_NFTS",
+                                f"{l.seller_nfts} NFT > MAX_SELLER_NFTS={settings.max_seller_nfts}")
+
         if not settings.russian_only:
             return SellerResult(True, "DISABLED", "RUSSIAN_ONLY=false")
 
@@ -105,6 +120,9 @@ class SellerFilter:
 
         if is_russian_text(l.seller_about):
             return SellerResult(True, "BIO_RU", "profile bio is written in Russian")
+
+        if is_russian_text(l.seller_channel):
+            return SellerResult(True, "CHANNEL_RU", "personal channel title is in Russian")
 
         if settings.unknown_seller_policy == "allow":
             return SellerResult(True, "UNKNOWN_ALLOWED", "no objective data (policy=allow)")
