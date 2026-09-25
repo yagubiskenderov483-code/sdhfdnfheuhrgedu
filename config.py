@@ -98,7 +98,7 @@ class Settings:
     live_max_pages: int = 5
     recovery_max_pages: int = 20
     catalog_interval: float = 2.0            # как часто смотреть счётчики лотов всех коллекций (1 запрос)
-    cold_poll_interval: float = 5.0         # коллекция без изменений счётчика — страховочный опрос раз в N сек
+    cold_poll_interval: float = 15.0        # страховочный опрос без изменений счётчика; новые лоты и так ловит каталог за 2с
     market_backup_minutes: float = 30.0      # как часто сохранять снимок рынка в Telegram
     market_snapshot_max_age_hours: float = 6.0
     collections: list[str] = field(default_factory=list)   # пусто = все коллекции
@@ -106,13 +106,13 @@ class Settings:
     # --- sessions / rate limits ---
     max_concurrent_sessions: int = 20
     session_rps: float = 1.0
-    global_rps: float = 30.0
+    global_rps: float = 100.0
     connect_concurrency: int = 5
     accounts_per_proxy: int = 3              # сколько аккаунтов можно посадить на один прокси
     startup_delay: float = 25.0              # пауза перед подключением аккаунтов при запуске (защита при деплое)
 
     # --- обработка ---
-    processor_workers: int = 4
+    processor_workers: int = 8
     fetch_full_seller: bool = True
     seller_cache_ttl: int = 3600
     send_interval: float = 1.1
@@ -211,7 +211,7 @@ def _from_env() -> Settings:
         require_free_messages=_bool(e("REQUIRE_FREE_MESSAGES"), True),
         max_seller_nfts=max(0, _int(e("MAX_SELLER_NFTS"), 12)),
         max_seller_level=max(0, _int(e("MAX_SELLER_LEVEL"), 5)),
-        cold_poll_interval=max(1.0, _float(e("COLD_POLL_INTERVAL"), 5.0)),
+        cold_poll_interval=max(1.0, _float(e("COLD_POLL_INTERVAL"), 15.0)),
         market_backup_minutes=max(5.0, _float(e("MARKET_BACKUP_MINUTES"), 30.0)),
         market_snapshot_max_age_hours=max(0.5, _float(e("MARKET_SNAPSHOT_MAX_AGE_HOURS"), 6.0)),
         unique_sellers=_bool(e("UNIQUE_SELLERS"), True),
@@ -230,11 +230,11 @@ def _from_env() -> Settings:
         collections=_str_list(e("COLLECTIONS")),
         max_concurrent_sessions=max(1, _int(e("MAX_CONCURRENT_SESSIONS"), 20)),
         session_rps=max(0.05, _float(e("SESSION_RPS"), 1.0)),
-        global_rps=max(0.0, _float(e("GLOBAL_RPS"), 30.0)),
+        global_rps=max(0.0, _float(e("GLOBAL_RPS"), 100.0)),
         connect_concurrency=max(1, _int(e("CONNECT_CONCURRENCY"), 5)),
         accounts_per_proxy=max(1, _int(e("ACCOUNTS_PER_PROXY"), 3)),
         startup_delay=max(0.0, _float(e("STARTUP_DELAY"), 25.0)),
-        processor_workers=max(1, _int(e("PROCESSOR_WORKERS"), 4)),
+        processor_workers=max(1, _int(e("PROCESSOR_WORKERS"), 8)),
         fetch_full_seller=_bool(e("FETCH_FULL_SELLER"), True),
         seller_cache_ttl=max(0, _int(e("SELLER_CACHE_TTL"), 3600)),
         send_interval=max(0.0, _float(e("SEND_INTERVAL"), 1.1)),
