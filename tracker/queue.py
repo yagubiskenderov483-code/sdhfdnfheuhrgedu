@@ -272,7 +272,7 @@ class ListingPipeline:
             return cached[1]
         try:
             txt, _ = await self.sessions.run(lambda c: fetch_gift_texts(c, uid),
-                                             only=l.session_source, attempts=2, timeout=45)
+                                             only=l.session_source, attempts=1, timeout=20)
         except Exception as e:
             log.debug("getSavedStarGifts(texts) %s failed: %s", uid, e)
             txt = None

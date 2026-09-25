@@ -213,7 +213,7 @@ async def fetch_full_user(client: TelegramClient, user_id: int) -> SellerFull:
     )
 
 
-async def fetch_gift_texts(client: TelegramClient, user_id: int, limit: int = 30) -> str:
+async def fetch_gift_texts(client: TelegramClient, user_id: int, limit: int = 20) -> str:
     """Тексты, приложенные к подаркам продавца (например поздравление от дарившего).
     Объективный признак языка — как bio, но из сообщений к подаркам. Скрытые подарки Telegram не отдаёт."""
     entity = await client.get_input_entity(types.PeerUser(user_id))
