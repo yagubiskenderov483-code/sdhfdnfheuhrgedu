@@ -89,7 +89,7 @@ class Env:
     def __init__(self, tmp: Path, market: FakeMarket):
         self.tmp, self.market = tmp, market
 
-    async def boot(self):
+    async def boot(self, warmup=True):
         self.db = Database(self.tmp / "t.db")
         await self.db.connect()
         self.sender = FakeSender()
@@ -102,6 +102,13 @@ class Env:
             t.cancel()
         await self.coord.sync_pending()       # тихая полная синхронизация (в проде — в фоне)
         await self.pipe.queue.join()
+        if warmup:
+            # первый live-опрос после initial sync — тихий (закрепляет базу); в проде это делает
+            # живой цикл. Тесты стационарного поведения его пропускают через этот прогрев.
+            for st in list(self.coord.states.values()):
+                if st.gift_id in self.coord._baseline_pending:
+                    await self.coord.poll_collection(st, "live")
+            await self.pipe.queue.join()
         return self
 
     async def poll(self, gid=GID):
@@ -147,14 +154,14 @@ def patch_market(market: FakeMarket):
     coord_mod.fetch_resale_page = lambda c, g, o, l: market.page(g, o, l)
 
 
-async def fresh(n_existing=100) -> tuple[Env, Path]:
+async def fresh(n_existing=100, warmup=True) -> tuple[Env, Path]:
     reset_settings()
     tmp = Path(tempfile.mkdtemp())
     market = FakeMarket()
     for _ in range(n_existing):
         market.list_new(market.item())
     patch_market(market)
-    return await Env(tmp, market).boot(), tmp
+    return await Env(tmp, market).boot(warmup=warmup), tmp
 
 
 # ---------------------------------------------------------------------------- tests
@@ -715,6 +722,22 @@ async def test_24_partial_collection():
     print("✔ TEST 24 неполная коллекция: всплывший старый лот не уходит, новый (count +1) уходит")
 
 
+async def test_25_post_deploy_baseline():
+    """Первый live-опрос сразу после initial sync — тихий: churn рынка за время синхронизации
+    не уходит в канал как «новый». Только следующие опросы шлют по-настоящему новые лоты."""
+    e, tmp = await fresh(30, warmup=False)
+    assert e.coord.states[GID].gift_id in e.coord._baseline_pending
+    e.market.list_new(e.market.item(9000))
+    await e.poll()
+    assert e.pipe.stats["new"] == 0 and not e.sender.sent, "базовый опрос не шлёт new"
+    assert GID not in e.coord._baseline_pending
+    e.market.list_new(e.market.item(9000))
+    await e.poll()
+    assert e.pipe.stats["new"] == 1 and len(e.sender.sent) == 1, "после базы новый лот уходит"
+    await e.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 25 после деплоя: первый опрос тихий, затем по-настоящему новые лоты уходят")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
@@ -722,7 +745,8 @@ async def run() -> None:
               test_12_count_mismatch_and_backup_fallback, test_13_backup_survives_deploy,
               test_14_ton_rate_changes, test_16_market_snapshot_redeploy, test_17_hot_cold_schedule,
               test_18_pause, test_19_floor_filter, test_21_ton_priced_lots,
-              test_22_log_regressions, test_23_cheap_collections_slow, test_24_partial_collection):
+              test_22_log_regressions, test_23_cheap_collections_slow, test_24_partial_collection,
+              test_25_post_deploy_baseline):
         await t()
     test_15_seller_rules()
     test_20_proxies()

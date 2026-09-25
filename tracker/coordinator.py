@@ -78,6 +78,7 @@ class MarketplaceCoordinator:
         self._hot_since: dict[int, float] = {}
         self.paused = False
         self.skipped: set[int] = set()
+        self._baseline_pending: set[int] = set()  # коллекции, чей первый live-опрос после initial sync — тихий
         self.low_prio: set[int] = set()           # флор ниже порога, режим slow: отслеживаются реже            # коллекции с флором ниже COLLECTION_MIN_FLOOR
         self.hot_latency: float | None = None     # сек от изменения счётчика в каталоге до опроса коллекции
         self._stop = asyncio.Event()
@@ -298,6 +299,11 @@ class MarketplaceCoordinator:
         # ничего не добавляют. Такую коллекцию читаем дальше, но помечаем partial — для неё
         # «незнакомый лот наверху» ещё не значит «новый» (см. _apply: сверка с изменением count).
         partial = complete and gap > max(1, count // 100)
+        if reason == "initial" and complete:
+            # первый опрос сразу после initial sync — тихий: пока мы листали, рынок менялся,
+            # и «незнакомый лот наверху» на первом live-опросе не отличить от старого. Один опрос
+            # закрепляет базу, после него уходят только по-настоящему новые лоты.
+            self._baseline_pending.add(gid)
         st.synced = True
         st.complete = complete
         st.partial = partial
@@ -392,6 +398,14 @@ class MarketplaceCoordinator:
         # 2b) Коллекция, которую Telegram отдаёт не целиком: незнакомый лот наверху может быть
         #     старым лотом, которого мы не видели, со сменённой ценой. Новый листинг увеличивает
         #     count, смена цены — нет. Пропускаем как NEW не больше, чем вырос count; иначе — тихо.
+        if cls.new and gid in self._baseline_pending:
+            for it in cls.new:
+                self.stats["silent"] += 1
+                llog("SILENT_OLD", f'listing={it.listing_id} reason="post_initial_baseline"')
+            cls.silent += [(it, "post_initial_baseline") for it in cls.new]
+            cls.new = []
+        self._baseline_pending.discard(gid)
+
         if cls.new and st.partial:
             delta = (count - st.last_count) if (count is not None and st.last_count is not None) else 0
             if len(cls.new) > max(delta, 0):
