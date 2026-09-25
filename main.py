@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import html
+import re
 import signal
 import time
 import sys
@@ -18,6 +19,7 @@ import sys
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import BotCommand
 
 from bot.admin import all_admins, build_routers, init_claim_code, save_admins
@@ -38,12 +40,30 @@ from utils.logger import get_logger, register_secret, setup_logging
 log = get_logger("main")
 
 
+_TAG_RE = re.compile(r"<[^>]+>")
+
+
+async def _html_fallback(make_request, bot, method):
+    """Если Telegram не принял HTML-разметку сообщения (can't parse entities), повторяем без неё,
+    чтобы команда всё равно получила ответ, а не падала молча."""
+    try:
+        return await make_request(bot, method)
+    except TelegramBadRequest as e:
+        if "can't parse entities" not in str(e) or not isinstance(getattr(method, "text", None), str):
+            raise
+        log.warning("HTML parse error, resending as plain text: %s", e)
+        method.text = html.unescape(_TAG_RE.sub("", method.text))
+        method.parse_mode = None
+        return await make_request(bot, method)
+
+
 class App:
     def __init__(self) -> None:
         self.db = Database(settings.path(settings.database_path))
         self.storage = SessionStorage(settings.path(settings.sessions_dir), settings.api_id, settings.api_hash)
         self.sessions = SessionManager(self.storage)
         self.bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode="HTML"))
+        self.bot.session.middleware(_html_fallback)   # битая HTML-разметка → отправить текстом, а не молчать
         self.sender = TelegramSender(self.bot)
         self.backup = SessionBackup(self.bot, self.storage, all_admins, save_admins,
                                     history_export=lambda: self.db.export_sent_history(),
