@@ -9,9 +9,8 @@ RUSSIAN_ONLY=true пропускает продавца, только если �
   2. data/seller_whitelist.txt                                          → пропустить
   3. телефон виден (Telegram отдал User.phone) и начинается с
      SELLER_PHONE_PREFIXES (по умолчанию 7)                             → пропустить, иначе отсеять
-  4. описание профиля (bio, UserFull.about) или название личного канала написано по-русски:
-     есть русские буквы (ы э ъ ё) / кириллица и нет украинских/белорусских/
-     казахских букв (і ї є ґ ў ә ғ қ ң ө ұ ү һ)                         → пропустить
+  4. описание профиля (bio), название личного канала или тексты к подаркам на славянской
+     кириллице (русский/украинский/белорусский), без казахских букв (ә ғ қ ...) → пропустить
   5. ничего из этого нет → UNKNOWN_SELLER_POLICY: block (отсеять, по умолчанию) | allow
 
 RUSSIAN_ONLY=false → пропускаются все (кроме blacklist).
@@ -30,27 +29,20 @@ from pathlib import Path
 from config import settings
 from database.models import Listing
 
-_CYR = re.compile(r"[а-яё]", re.IGNORECASE)
-_RU_ONLY = re.compile(r"[ыэъё]", re.IGNORECASE)
-_NOT_RU = re.compile(r"[іїєґўәғқңөұүһ]", re.IGNORECASE)
-_LAT_WORD = re.compile(r"[a-z]{3,}", re.IGNORECASE)
+_CYR = re.compile(r"[Ѐ-ӿ]", re.IGNORECASE)        # любая кириллица
+_NON_SLAVIC = re.compile(r"[әғқңөұүһ]", re.IGNORECASE)      # казахские/центральноазиатские буквы
 
 
 def is_russian_text(text: str | None) -> bool:
-    """Текст написан по-русски (а не на другом кириллическом языке).
-    Смягчено: русских не режем из-за латиницы (бренды/ссылки) или короткого текста.
-    Отсекаем только явно НЕ русскую кириллицу (украинские/белорусские/казахские буквы)."""
+    """Текст на славянской кириллице (русский / украинский / белорусский).
+    Смягчено: латиница (бренды/ссылки) и короткий текст не мешают.
+    Отсекаем только НЕ славянскую кириллицу (казахский и т.п.) и чистую латиницу."""
     if not text:
         return False
     t = text.strip()
-    if _NOT_RU.search(t):                 # і ї є ґ ў ә ғ қ ... → это не русский
+    if _NON_SLAVIC.search(t):             # ә ғ қ ң ... → казахский и др., не наш
         return False
-    cyr = len(_CYR.findall(t))
-    if cyr == 0:
-        return False
-    if _RU_ONLY.search(t):                # ы э ъ ё — этих букв нет в укр/бел, достаточно пары
-        return cyr >= 2
-    return cyr >= 4                       # достаточно кириллицы и нет чужих букв (латиница не мешает)
+    return len(_CYR.findall(t)) >= 3      # достаточно кириллицы; латиница рядом не мешает
 
 
 @dataclass
