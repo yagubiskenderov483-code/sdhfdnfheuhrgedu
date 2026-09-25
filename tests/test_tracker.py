@@ -617,7 +617,6 @@ async def test_21_ton_priced_lots():
 
 async def test_22_log_regressions():
     """Ошибки из логов прода: shard_owner у пропущенной коллекции, сбои Telegram, дрожание цены."""
-    from types import SimpleNamespace as NS
     from telethon import errors
     from tracker.state import same_price
     from tracker.worker import SessionWorker, WorkerUnavailable
