@@ -559,6 +559,27 @@ async def test_19_floor_filter():
     print("✔ TEST 19 коллекции с флором < 4500⭐ пропускаются; подорожала — тихо подключается")
 
 
+def test_20_proxies():
+    from sessions.storage import SessionStorage
+    from utils.proxy import parse_proxy, split_lines
+    d = Path(tempfile.mkdtemp())
+    st = SessionStorage(d, 1, "h" * 32)
+    for n in ("session_001", "session_002", "session_003", "session_004"):
+        (d / f"{n}.session").write_bytes(b"")
+    pool = split_lines("socks5://u:p@1.1.1.1:1080\n2.2.2.2:1080:user:pw\nмусор")
+    assert pool == ["socks5://u:p@1.1.1.1:1080", "socks5://user:pw@2.2.2.2:1080"]
+    st.save_pool(pool)
+    for n in ("session_001", "session_002", "session_003", "session_004"):
+        st.set_proxy(n, st.pick_proxy(2))
+    used = [r.proxy for r in st.list_sessions()]
+    assert used.count(pool[0]) == 2 and used.count(pool[1]) == 2, used
+    assert st.pick_proxy(2) is None, "все прокси заняты по лимиту"
+    st.save_meta("session_001", 1, "h" * 32, owner_id=5)       # метаданные не затирают прокси
+    assert st.list_sessions()[0].proxy == pool[0] and st.list_sessions()[0].owner_id == 5
+    assert parse_proxy(pool[1])["username"] == "user"
+    print("✔ TEST 20 прокси: разбор форматов, раздача по 2 на прокси, метаданные сохраняются")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
@@ -568,6 +589,7 @@ async def run() -> None:
               test_18_pause, test_19_floor_filter):
         await t()
     test_15_seller_rules()
+    test_20_proxies()
     print("\nALL TESTS PASSED")
 
 

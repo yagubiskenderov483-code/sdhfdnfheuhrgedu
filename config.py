@@ -105,6 +105,7 @@ class Settings:
     session_rps: float = 1.0
     global_rps: float = 30.0
     connect_concurrency: int = 5
+    accounts_per_proxy: int = 3              # сколько аккаунтов можно посадить на один прокси
     startup_delay: float = 25.0              # пауза перед подключением аккаунтов при запуске (защита при деплое)
 
     # --- обработка ---
@@ -223,6 +224,7 @@ def _from_env() -> Settings:
         session_rps=max(0.05, _float(e("SESSION_RPS"), 1.0)),
         global_rps=max(0.0, _float(e("GLOBAL_RPS"), 30.0)),
         connect_concurrency=max(1, _int(e("CONNECT_CONCURRENCY"), 5)),
+        accounts_per_proxy=max(1, _int(e("ACCOUNTS_PER_PROXY"), 3)),
         startup_delay=max(0.0, _float(e("STARTUP_DELAY"), 25.0)),
         processor_workers=max(1, _int(e("PROCESSOR_WORKERS"), 4)),
         fetch_full_seller=_bool(e("FETCH_FULL_SELLER"), True),

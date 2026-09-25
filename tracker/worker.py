@@ -18,6 +18,7 @@ from typing import Any, Awaitable, Callable
 from telethon import TelegramClient, errors
 
 from tracker.ratelimit import TokenBucket, backoff_delay
+from utils.proxy import mask_proxy, parse_proxy
 from utils.logger import get_logger
 
 log = get_logger("worker")
@@ -31,6 +32,12 @@ class WorkerStatus(str, Enum):
     AUTH_ERROR = "AUTH_ERROR"
     STOPPED = "STOPPED"
 
+
+try:  # ошибки прокси (python-socks) — это проблемы соединения, а не авторизации
+    from python_socks import ProxyConnectionError, ProxyError, ProxyTimeoutError
+    _PROXY_ERRORS: tuple = (ProxyError, ProxyConnectionError, ProxyTimeoutError)
+except ImportError:  # pragma: no cover
+    _PROXY_ERRORS = ()
 
 # Почему Telegram «выкинул» аккаунт — понятным языком
 AUTH_REASONS = {
@@ -52,7 +59,7 @@ class WorkerUnavailable(Exception):
 
 class SessionWorker:
     def __init__(self, name: str, session_path: Path, api_id: int, api_hash: str,
-                 limiter: TokenBucket, rps_getter: Callable[[], float]):
+                 limiter: TokenBucket, rps_getter: Callable[[], float], proxy: str | None = None):
         self.name = name
         self.session_path = session_path
         self._api_id = api_id
@@ -60,6 +67,7 @@ class SessionWorker:
         self.limiter = limiter
         self._rps = rps_getter
         self.client: TelegramClient | None = None
+        self.proxy = proxy
 
         self.status = WorkerStatus.CONNECTING
         self.reason: str | None = None
@@ -81,6 +89,7 @@ class SessionWorker:
         base = str(self.session_path.with_suffix(""))
         return TelegramClient(
             base, self._api_id, self._api_hash,
+            proxy=parse_proxy(self.proxy),
             flood_sleep_threshold=0,      # FloodWait обрабатываем сами, чтобы переключать session
             connection_retries=3,
             retry_delay=2,
@@ -157,6 +166,15 @@ class SessionWorker:
                 log.exception("Session %s health loop error", self.name)
             await asyncio.sleep(2)
 
+    async def change_proxy(self, proxy: str | None) -> bool:
+        """Переподключить аккаунт через другой прокси (или без него)."""
+        self.proxy = proxy
+        await self._safe_disconnect()
+        self.client = None
+        ok = await self.connect()
+        log.info("Session %s now via %s: %s", self.name, mask_proxy(proxy), "OK" if ok else self.reason)
+        return ok
+
     async def stop(self) -> None:
         self._running = False
         if self._health_task:
@@ -226,10 +244,10 @@ class SessionWorker:
             self.errors += 1
             self._auth_failed(e)
             raise WorkerUnavailable(self.reason) from e
-        except (ConnectionError, OSError, asyncio.TimeoutError) as e:
+        except (ConnectionError, OSError, asyncio.TimeoutError, *_PROXY_ERRORS) as e:
             self.errors += 1
             self.status = WorkerStatus.ERROR
-            self.reason = f"connection: {type(e).__name__}"
+            self.reason = f"connection{' (proxy ' + mask_proxy(self.proxy) + ')' if self.proxy else ''}: {type(e).__name__}"
             raise WorkerUnavailable(self.reason) from e
         except errors.RPCError:
             self.errors += 1

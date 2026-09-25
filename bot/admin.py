@@ -29,6 +29,7 @@ from telethon import TelegramClient, errors
 
 from config import DATA_DIR, RUNTIME_KEYS, reload_settings, set_runtime_value, settings
 from sessions.storage import SessionRecord
+from utils.proxy import mask_proxy, normalize_proxy, parse_proxy, split_lines
 from utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -154,6 +155,7 @@ HELP = (
     "/settings — текущие настройки\n"
     "/set &lt;KEY&gt; &lt;VALUE&gt; — изменить настройку на лету\n"
     "/pause — остановить парсинг (аккаунты не делают запросов)\n"
+    "/proxies — прокси для аккаунтов (свой IP каждому)\n"
     "/resume — продолжить парсинг\n"
     "/reload — перечитать .env, шаблон, списки продавцов, новые *.session\n"
     "/test — проверка API/фильтров/БД/формата (без рассылки); /test channel — тестовый пост в канал\n"
@@ -255,7 +257,7 @@ def build_routers(app: "App") -> list[Router]:
                 pass
             app.storage.discard(p["name"])
 
-    @users.message(or_f(Command("pause", "resume", "reload", "set"), F.text.in_({BTN_PAUSE, BTN_RESUME})))
+    @users.message(or_f(Command("pause", "resume", "reload", "set", "proxies", "proxy"), F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
                        f"Ваш Telegram ID: <code>{m.from_user.id}</code> — его можно вписать в ADMIN_IDS.")
@@ -305,7 +307,7 @@ def build_routers(app: "App") -> list[Router]:
         icons = {"ACTIVE": "🟢", "FLOOD_WAIT": "⏳", "CONNECTING": "🟡"}
         for name, w in sorted(app.sessions.workers.items())[:60]:
             line = (f"{icons.get(w.status.value, '🔴')} <b>{html.escape(name)}</b> — {w.status.value}, "
-                    f"коллекций: {shards.get(name, 0)}")
+                    f"коллекций: {shards.get(name, 0)}, 🌐 {html.escape(mask_proxy(getattr(w, 'proxy', None)))}")
             if w.status.value not in ("ACTIVE", "CONNECTING"):
                 line += f"\n    Reason: {html.escape(w.reason or '—')}"
             lines.append(line)
@@ -373,6 +375,73 @@ def build_routers(app: "App") -> list[Router]:
         await app.coordinator.set_paused(False)
         await app.backup.save()
         await m.answer("▶️ Парсинг продолжен.")
+
+    @admin.message(Command("proxies"))
+    async def cmd_proxies(m: Message, command: CommandObject) -> None:
+        """/proxies — список; /proxies + прокси с новой строки — заменить пул и раздать аккаунтам."""
+        new = split_lines(command.args or "")
+        if command.args and not new:
+            await m.answer("Не распознал ни одного прокси. Формат: socks5://user:pass@host:port "
+                           "или host:port:user:pass — по одному на строку.")
+            return
+        if new:
+            await _delete(m)                       # в сообщении логины/пароли прокси
+            app.storage.save_pool(new)
+            moved = await _assign_proxies()
+            await app.backup.save()
+            await m.answer(f"✅ Пул прокси: {len(new)} шт. Аккаунтов переведено на прокси: {moved}.\n"
+                           f"Лимит: {settings.accounts_per_proxy} аккаунта на один прокси.")
+            return
+        pool = app.storage.load_pool()
+        usage: dict[str, list[str]] = {p: [] for p in pool}
+        for r in app.storage.list_sessions():
+            if r.proxy in usage:
+                usage[r.proxy].append(r.name)
+        lines = [f"<b>🌐 Прокси: {len(pool)}</b> (до {settings.accounts_per_proxy} аккаунтов на один)", ""]
+        lines += [f"{html.escape(mask_proxy(p))} — {', '.join(u) or 'свободен'}" for p, u in usage.items()]
+        no_proxy = [r.name for r in app.storage.list_sessions() if not r.proxy]
+        if no_proxy:
+            lines += ["", f"⚠️ Без прокси: {', '.join(no_proxy)}"]
+        lines += ["", "Задать пул: отправьте <code>/proxies</code> и с новой строки список, по одному на строку:",
+                  "<code>socks5://user:pass@1.2.3.4:1080</code> или <code>1.2.3.4:1080:user:pass</code>",
+                  "Отдельному аккаунту: <code>/proxy session_001 socks5://…</code> или <code>/proxy session_001 off</code>"]
+        await m.answer("\n".join(lines))
+
+    async def _assign_proxies() -> int:
+        """Аккаунтам без прокси (или с прокси, которого больше нет в пуле) выдать прокси из пула."""
+        pool = set(app.storage.load_pool())
+        moved = 0
+        for r in app.storage.list_sessions():
+            if r.proxy and r.proxy in pool:
+                continue
+            proxy = app.storage.pick_proxy(settings.accounts_per_proxy)
+            if not proxy:
+                break
+            app.storage.set_proxy(r.name, proxy)
+            w = app.sessions.workers.get(r.name)
+            if w is not None:
+                await w.change_proxy(proxy)
+            moved += 1
+        return moved
+
+    @admin.message(Command("proxy"))
+    async def cmd_proxy(m: Message, command: CommandObject) -> None:
+        parts = (command.args or "").split(maxsplit=1)
+        if len(parts) != 2 or parts[0] not in app.sessions.workers:
+            await m.answer("Использование: <code>/proxy session_001 socks5://user:pass@host:port</code> "
+                           "или <code>/proxy session_001 off</code>")
+            return
+        name, raw = parts
+        await _delete(m)
+        proxy = None if raw.strip().lower() in ("off", "none", "-", "нет") else normalize_proxy(raw)
+        if raw.strip().lower() not in ("off", "none", "-", "нет") and not proxy:
+            await m.answer("Не распознал прокси. Формат: socks5://user:pass@host:port")
+            return
+        app.storage.set_proxy(name, proxy)
+        ok = await app.sessions.workers[name].change_proxy(proxy)
+        await app.backup.save()
+        await m.answer(f"{'✅' if ok else '⚠️'} {html.escape(name)}: {html.escape(mask_proxy(proxy))}"
+                       + ("" if ok else f"\nНе подключился: {html.escape(app.sessions.workers[name].reason or '')}"))
 
     @admin.message(Command("reload"))
     async def cmd_reload(m: Message) -> None:
@@ -537,8 +606,9 @@ def build_routers(app: "App") -> list[Router]:
             return
         data = await state.get_data()
         name = app.storage.next_name()
+        proxy = app.storage.pick_proxy(settings.accounts_per_proxy)   # вход сразу через прокси аккаунта
         client = TelegramClient(str(app.storage.session_path(name).with_suffix("")),
-                                data["api_id"], data["api_hash"],
+                                data["api_id"], data["api_hash"], proxy=parse_proxy(proxy),
                                 device_model="GiftTracker", system_version="1.0", app_version="1.0")
         try:
             await client.connect()
@@ -564,7 +634,7 @@ def build_routers(app: "App") -> list[Router]:
             return
         pending[m.from_user.id] = {"client": client, "name": name, "phone": phone,
                                    "hash": sent.phone_code_hash, "api_id": data["api_id"],
-                                   "api_hash": data["api_hash"]}
+                                   "api_hash": data["api_hash"], "proxy": proxy}
         await state.set_state(AddSession.code)
         await m.answer("Шаг 2/3. Отправьте <b>код входа</b>, который пришёл в Telegram.\n\n"
                        "⚠️ Вводите код <b>с пробелами или дефисами</b>, например <code>1 2 3 4 5</code> — "
@@ -576,17 +646,21 @@ def build_routers(app: "App") -> list[Router]:
         me = await client.get_me()
         await client.disconnect()
         uid = m.from_user.id
-        app.storage.save_meta(p["name"], p["api_id"], p["api_hash"], p["phone"], owner_id=uid)
+        app.storage.save_meta(p["name"], p["api_id"], p["api_hash"], p["phone"], owner_id=uid,
+                              proxy=p.get("proxy") or "")
         await state.clear()
         if not all_admins():
             save_admins({uid})           # первый, кто добавил аккаунт, становится админом
-        rec = SessionRecord(p["name"], app.storage.session_path(p["name"]), p["api_id"], p["api_hash"], uid)
+        rec = SessionRecord(p["name"], app.storage.session_path(p["name"]), p["api_id"], p["api_hash"], uid,
+                            p.get("proxy"))
         w = await app.sessions.add_record(rec)
         log.info("Session %s added via bot (account id %s, by user %s)", p["name"], getattr(me, "id", "?"), uid)
         saved = await app.backup.save(chat_hint=m.chat.id)
         await m.answer(f"✅ Аккаунт <b>{p['name']}</b> добавлен\n"
                        f"Аккаунт ID: <code>{getattr(me, 'id', '?')}</code>\n"
                        f"Статус: {w.status.value}\n"
+                       f"🌐 Прокси: {html.escape(mask_proxy(p.get('proxy')))}"
+                       + ("" if p.get("proxy") else " (добавьте прокси: /proxies)") + "\n"
                        + ("💾 Сохранён — после деплоя восстановится сам, добавлять заново не нужно."
                           if saved else f"⚠️ Копию сохранить не удалось: {html.escape(app.backup.last_error or '')}"))
 

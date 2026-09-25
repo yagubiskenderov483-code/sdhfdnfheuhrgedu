@@ -153,7 +153,7 @@ class SessionBackup:
             s = session_file_to_string(rec.path)
             if s:
                 items.append({"name": rec.name, "string": s, "api_id": rec.api_id,
-                              "api_hash": rec.api_hash, "owner_id": rec.owner_id})
+                              "api_hash": rec.api_hash, "owner_id": rec.owner_id, "proxy": rec.proxy})
         history = []
         if self._history_export:
             try:
@@ -161,6 +161,7 @@ class SessionBackup:
             except Exception as e:
                 log.warning("Sent history export failed: %s", e)
         payload = {"v": 2, "sessions": items, "admins": sorted(self._admins()), "sent": history,
+                   "proxies": self.storage.load_pool(),
                    "paused": bool(self.paused_getter()) if self.paused_getter else False}
         blob = f.encrypt(json.dumps(payload).encode())
 
@@ -229,6 +230,8 @@ class SessionBackup:
             except Exception as e:
                 log.warning("Sent history import failed: %s", e)
 
+        if data.get("proxies") and not self.storage.load_pool():
+            self.storage.save_pool(list(data["proxies"]))
         restored = 0
         self.backup_names = {it.get("name") for it in data.get("sessions", [])}
         for it in data.get("sessions", []):
@@ -238,7 +241,7 @@ class SessionBackup:
             try:
                 string_to_session_file(it["string"], path)
                 self.storage.save_meta(it["name"], int(it["api_id"]), it["api_hash"],
-                                       owner_id=it.get("owner_id"))
+                                       owner_id=it.get("owner_id"), proxy=it.get("proxy") or "")
                 restored += 1
             except Exception as e:
                 log.error("Restore %s failed: %s", it.get("name"), e)

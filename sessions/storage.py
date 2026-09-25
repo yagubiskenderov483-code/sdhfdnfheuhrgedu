@@ -27,6 +27,7 @@ class SessionRecord:
     api_id: int
     api_hash: str
     owner_id: int | None = None      # кто добавил session через бота (может её удалить)
+    proxy: str | None = None         # socks5://user:pass@host:port — свой IP для аккаунта
 
 
 def _secure(path: Path) -> None:
@@ -51,7 +52,7 @@ class SessionStorage:
         out = []
         for p in sorted(self.dir.glob("*.session")):
             name = p.stem
-            api_id, api_hash, owner = self.default_api_id, self.default_api_hash, None
+            api_id, api_hash, owner, proxy = self.default_api_id, self.default_api_hash, None, None
             meta = p.with_suffix(".json")
             if meta.exists():
                 try:
@@ -59,9 +60,10 @@ class SessionStorage:
                     api_id = int(data.get("api_id") or api_id)
                     api_hash = str(data.get("api_hash") or api_hash)
                     owner = int(data["owner_id"]) if data.get("owner_id") else None
+                    proxy = data.get("proxy") or None
                 except (ValueError, json.JSONDecodeError):
                     pass
-            out.append(SessionRecord(name, p, api_id, api_hash, owner))
+            out.append(SessionRecord(name, p, api_id, api_hash, owner, proxy))
         return out
 
     def next_name(self) -> str:
@@ -74,12 +76,21 @@ class SessionStorage:
     def session_path(self, name: str) -> Path:
         return self.dir / f"{name}.session"
 
+    def _read_meta(self, name: str) -> dict:
+        try:
+            return json.loads((self.dir / f"{name}.json").read_text(encoding="utf-8"))
+        except (FileNotFoundError, ValueError, json.JSONDecodeError):
+            return {}
+
     def save_meta(self, name: str, api_id: int, api_hash: str, phone: str | None = None,
-                  owner_id: int | None = None) -> None:
+                  owner_id: int | None = None, proxy: str | None = None) -> None:
         meta = self.dir / f"{name}.json"
-        data = {"api_id": api_id, "api_hash": api_hash}
+        data = self._read_meta(name)
+        data.update({"api_id": api_id, "api_hash": api_hash})
         if owner_id:
             data["owner_id"] = owner_id
+        if proxy is not None:
+            data["proxy"] = proxy or None
         if phone:
             data["phone_hint"] = phone[:4] + "****" + phone[-2:] if len(phone) > 6 else "****"
         meta.write_text(json.dumps(data), encoding="utf-8")
@@ -87,6 +98,41 @@ class SessionStorage:
         sp = self.session_path(name)
         if sp.exists():
             _secure(sp)
+
+    def set_proxy(self, name: str, proxy: str | None) -> None:
+        data = self._read_meta(name)
+        data["proxy"] = proxy or None
+        meta = self.dir / f"{name}.json"
+        meta.write_text(json.dumps(data), encoding="utf-8")
+        _secure(meta)
+
+    # ------------------------------------------------------------------ пул прокси
+    @property
+    def pool_path(self) -> Path:
+        return self.dir / "proxies.txt"
+
+    def load_pool(self) -> list[str]:
+        from utils.proxy import split_lines
+        try:
+            return split_lines(self.pool_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return []
+
+    def save_pool(self, proxies: list[str]) -> None:
+        self.pool_path.write_text("\n".join(proxies) + "\n", encoding="utf-8")
+        _secure(self.pool_path)
+
+    def pick_proxy(self, per_proxy: int) -> str | None:
+        """Наименее загруженный прокси из пула (не больше per_proxy аккаунтов на один)."""
+        pool = self.load_pool()
+        if not pool:
+            return None
+        used: dict[str, int] = {p: 0 for p in pool}
+        for rec in self.list_sessions():
+            if rec.proxy in used:
+                used[rec.proxy] += 1
+        best = min(pool, key=lambda p: used[p])
+        return best if used[best] < max(1, per_proxy) else None
 
     def remove(self, name: str) -> bool:
         target = self.dir / "removed"

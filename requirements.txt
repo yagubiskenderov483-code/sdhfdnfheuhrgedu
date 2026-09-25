@@ -1,4 +1,6 @@
 telethon==1.45.0
+# прокси для аккаунтов (socks5/http)
+python-socks[asyncio]>=2.4
 aiogram>=3.13,<4
 aiosqlite>=0.20
 python-dotenv>=1.0

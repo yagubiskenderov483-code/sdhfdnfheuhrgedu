@@ -176,6 +176,7 @@ class App:
             BotCommand(command="last", description="Последние лоты и почему не отправлены"),
             BotCommand(command="pause", description="Остановить парсинг"),
             BotCommand(command="resume", description="Продолжить парсинг"),
+            BotCommand(command="proxies", description="Прокси для аккаунтов"),
             BotCommand(command="settings", description="Настройки"),
             BotCommand(command="test", description="Проверка работы"),
             BotCommand(command="cancel", description="Отменить действие"),
