@@ -123,6 +123,7 @@ def reset_settings():
     settings.require_free_messages = False
     settings.max_seller_nfts = 0
     settings.max_seller_level = 0
+    settings.collection_min_floor = 0
     settings.fetch_full_seller = False
     settings.test_mode = False
     settings.unique_gifts = False
@@ -138,7 +139,8 @@ def reset_settings():
 
 def patch_market(market: FakeMarket):
     async def catalog(c):
-        return [CollectionInfo(g, f"C{g}", len(v), 100) for g, v in market.lots.items()]
+        floors = getattr(market, "floors", {})
+        return [CollectionInfo(g, f"C{g}", len(v), floors.get(g, 100)) for g, v in market.lots.items()]
     coord_mod.fetch_catalog = catalog
     coord_mod.fetch_resale_page = lambda c, g, o, l: market.page(g, o, l)
 
@@ -528,13 +530,42 @@ async def test_18_pause():
     print("✔ TEST 18 /pause — ни одного запроса к Telegram; /resume — продолжает с того же места")
 
 
+async def test_19_floor_filter():
+    reset_settings()
+    settings.collection_min_floor = 4500
+    tmp = Path(tempfile.mkdtemp())
+    market = FakeMarket()
+    market.lots[2] = []
+    market.floors = {GID: 4698, 2: 500}          # Sharp Tongue ~4700⭐ vs коллекция с флором 500⭐
+    for _ in range(30):
+        market.list_new(market.item())
+        market.list_new(market.item(gid=2), gid=2)
+    patch_market(market)
+    e = await Env(tmp, market).boot()
+    assert e.coord.skipped == {2} and e.coord.sync_progress() == (1, 1)
+    assert await e.db.count_market_items(2) == 0, "дешёвую коллекцию даже не читаем"
+    market.floors[GID] = 4300                    # флор чуть просел (<10%) — продолжаем
+    await e.coord.refresh_catalog()
+    assert GID not in e.coord.skipped
+    market.floors[GID] = 3000                    # сильно упал — выключаем
+    await e.coord.refresh_catalog()
+    assert GID in e.coord.skipped
+    market.floors[2] = 6000                      # дешёвая подорожала — начинаем отслеживать (с тихой синхр.)
+    await e.coord.refresh_catalog()
+    assert 2 not in e.coord.skipped
+    await e.coord.sync_pending()
+    assert await e.db.count_market_items(2) == 30 and e.pipe.stats["new"] == 0
+    await e.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 19 коллекции с флором < 4500⭐ пропускаются; подорожала — тихо подключается")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
               test_8_seller_change, test_9_burst_500, test_10_no_anchor, test_11_filters_and_repeats,
               test_12_count_mismatch_and_backup_fallback, test_13_backup_survives_deploy,
               test_14_ton_rate_changes, test_16_market_snapshot_redeploy, test_17_hot_cold_schedule,
-              test_18_pause):
+              test_18_pause, test_19_floor_filter):
         await t()
     test_15_seller_rules()
     print("\nALL TESTS PASSED")

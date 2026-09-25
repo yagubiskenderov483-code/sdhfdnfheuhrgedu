@@ -237,6 +237,7 @@ def build_routers(app: "App") -> list[Router]:
             f"🟡 Connecting: {c.get('CONNECTING', 0)}\n"
             f"📚 Collections LIVE: {coord.sync_progress()[0]}/{len(coord.states)} "
             f"(остальные в тихой синхронизации)\n"
+            f"🚫 Пропущено коллекций (флор < {settings.collection_min_floor}⭐): {len(coord.skipped)}\n"
             f"⚡ Реакция на новый лот: {f'{coord.hot_latency:.1f}s' if coord.hot_latency is not None else '—'} "
             f"(+ до {settings.catalog_interval:g}s на проверку каталога)\n"
             f"🔁 Страховочный обход: {f'{cycle:.0f}s' if cycle else '—'} (цель {settings.cold_poll_interval:g}s)\n"

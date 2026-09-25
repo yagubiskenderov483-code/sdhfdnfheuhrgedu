@@ -72,6 +72,7 @@ class MarketplaceCoordinator:
         self._sync_retry_at: dict[int, float] = {}
         self._hot_since: dict[int, float] = {}
         self.paused = False
+        self.skipped: set[int] = set()            # коллекции с флором ниже COLLECTION_MIN_FLOOR
         self.hot_latency: float | None = None     # сек от изменения счётчика в каталоге до опроса коллекции
         self._stop = asyncio.Event()
         self.stats = {"scanned": 0, "polls": 0, "poll_errors": 0, "silent": 0, "price_moves": 0,
@@ -124,6 +125,7 @@ class MarketplaceCoordinator:
         catalog, _ = await self.sessions.run(fetch_catalog)
         self.last_catalog_at = time.time()
         added, hot = 0, 0
+        skipped_before = set(self.skipped)
         for c in catalog:
             if not self._wanted(c.gift_id, c.title):
                 continue
@@ -135,6 +137,11 @@ class MarketplaceCoordinator:
                 self._due[c.gift_id] = 0.0
                 self._dirty.add(c.gift_id)
                 added += 1
+                self._apply_floor_rule(st, c.resell_min_stars, first=True)
+                continue
+            if self._apply_floor_rule(st, c.resell_min_stars):
+                st.floor_stars = c.resell_min_stars
+                st.availability_resale = c.availability_resale
                 continue
             if st.title != c.title:
                 st.title = c.title
@@ -147,8 +154,30 @@ class MarketplaceCoordinator:
                 self._dirty.add(c.gift_id)
                 hot += 1
             self._due.setdefault(c.gift_id, 0.0)
-        if added:
-            log.info("Catalog: %s collections tracked (+%s new, %s changed)", len(self.states), added, hot)
+        if added or self.skipped != skipped_before:
+            live, total = self.sync_progress()
+            log.info("Catalog: %s collections tracked, %s skipped by floor < %s Stars (+%s new)",
+                     total, len(self.skipped), settings.collection_min_floor, added)
+
+    def _apply_floor_rule(self, st: CollectionState, floor: int | None, first: bool = False) -> bool:
+        """Коллекции, где самый дешёвый лот на маркете (флор) ниже COLLECTION_MIN_FLOOR, не отслеживаются —
+        там почти все лоты дешевле нужного. Возвращает True, если коллекция пропущена.
+        Гистерезис 10%: уже отслеживаемая коллекция выключается, только если флор упал ниже порога на 10%+,
+        чтобы она не «мигала» от одной дешёвой продажи."""
+        th = settings.collection_min_floor
+        gid = st.gift_id
+        if th <= 0:
+            self.skipped.discard(gid)
+            return False
+        tracked = gid not in self.skipped and not first
+        limit = th * 0.9 if tracked else th
+        if floor is None or floor < limit:
+            self.skipped.add(gid)
+            return True
+        if gid in self.skipped:
+            self.skipped.discard(gid)
+            self._due[gid] = 0.0
+        return False
 
     # ------------------------------------------------------------------ polling one collection
     # ------------------------------------------------------------------ sharding
@@ -158,13 +187,15 @@ class MarketplaceCoordinator:
         names = sorted(w.name for w in self.sessions.usable())
         if not names:
             return None
-        order = sorted(self.states)
+        order = sorted(g for g in self.states if g not in self.skipped)
         idx = order.index(gid) if gid in self.states else gid
         return names[idx % len(names)]
 
     def shard_counts(self) -> dict[str, int]:
         out: dict[str, int] = {}
         for gid in self.states:
+            if gid in self.skipped:
+                continue
             n = self.shard_owner(gid)
             if n:
                 out[n] = out.get(n, 0) + 1
@@ -391,7 +422,7 @@ class MarketplaceCoordinator:
                 log.error("Catalog fetch failed: %s — retry in 10s", e)
                 await asyncio.sleep(10)
 
-        ready = [s for s in self.states.values() if s.synced and s.complete and not s.needs_full_sync]
+        ready = [s for s in self.states.values() if self._is_live(s)]
         pending = self._pending_sync()
         if ready:
             self.mode = TrackerMode.RECOVERY
@@ -421,18 +452,19 @@ class MarketplaceCoordinator:
         ]
 
     def _is_live(self, st: CollectionState) -> bool:
-        return st.synced and st.complete and not st.needs_full_sync
+        return st.synced and st.complete and not st.needs_full_sync and st.gift_id not in self.skipped
 
     def _pending_sync(self) -> list[CollectionState]:
         now = time.monotonic()
         out = [st for st in self.states.values()
-               if not self._is_live(st) and self._sync_retry_at.get(st.gift_id, 0.0) <= now
+               if st.gift_id not in self.skipped and not self._is_live(st) and self._sync_retry_at.get(st.gift_id, 0.0) <= now
                and st.gift_id not in self._running]
         return sorted(out, key=lambda st: st.availability_resale or 0)
 
     def sync_progress(self) -> tuple[int, int]:
         """(коллекций в LIVE, всего коллекций)"""
-        return sum(1 for st in self.states.values() if self._is_live(st)), len(self.states)
+        tracked = [st for st in self.states.values() if st.gift_id not in self.skipped]
+        return sum(1 for st in tracked if self._is_live(st)), len(tracked)
 
     async def sync_pending(self) -> None:
         """Тихо синхронизировать все коллекции, которые ещё не в LIVE (используется и тестами)."""

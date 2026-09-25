@@ -69,6 +69,7 @@ class Settings:
 
     # --- фильтр цены ---
     min_stars: int = 5000
+    collection_min_floor: int = 4500         # отслеживать только коллекции с флором на маркете от N Stars (0 = все)
     min_ton: float = 0.0
     allow_ton_only: bool = False
 
@@ -155,6 +156,7 @@ class Settings:
 # Ключи, которые можно менять из бота командой /set KEY VALUE
 RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "MIN_STARS": ("min_stars", lambda v: int(v)),
+    "COLLECTION_MIN_FLOOR": ("collection_min_floor", lambda v: max(0, int(v))),
     "MIN_TON": ("min_ton", lambda v: float(v.replace(",", "."))),
     "ALLOW_TON_ONLY": ("allow_ton_only", lambda v: _bool(v, False)),
     "RUSSIAN_ONLY": ("russian_only", lambda v: _bool(v, True)),
@@ -191,6 +193,7 @@ def _from_env() -> Settings:
         admin_ids=_int_set(e("ADMIN_IDS")),
         allow_all_users=_bool(e("ALLOW_ALL_USERS"), True),
         min_stars=_int(e("MIN_STARS"), 5000),
+        collection_min_floor=max(0, _int(e("COLLECTION_MIN_FLOOR"), 4500)),
         min_ton=_float(e("MIN_TON"), 0.0),
         allow_ton_only=_bool(e("ALLOW_TON_ONLY"), False),
         russian_only=_bool(e("RUSSIAN_ONLY"), True),
