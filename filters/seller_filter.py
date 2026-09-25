@@ -37,18 +37,20 @@ _LAT_WORD = re.compile(r"[a-z]{3,}", re.IGNORECASE)
 
 
 def is_russian_text(text: str | None) -> bool:
-    """Текст написан по-русски (а не на другом кириллическом языке / латиницей)."""
+    """Текст написан по-русски (а не на другом кириллическом языке).
+    Смягчено: русских не режем из-за латиницы (бренды/ссылки) или короткого текста.
+    Отсекаем только явно НЕ русскую кириллицу (украинские/белорусские/казахские буквы)."""
     if not text:
         return False
     t = text.strip()
+    if _NOT_RU.search(t):                 # і ї є ґ ў ә ғ қ ... → это не русский
+        return False
     cyr = len(_CYR.findall(t))
-    if cyr < 4 or _NOT_RU.search(t):
+    if cyr == 0:
         return False
-    # кириллица должна преобладать над латиницей
-    lat = sum(len(w) for w in _LAT_WORD.findall(t))
-    if cyr < lat:
-        return False
-    return bool(_RU_ONLY.search(t)) or cyr >= 6
+    if _RU_ONLY.search(t):                # ы э ъ ё — этих букв нет в укр/бел, достаточно пары
+        return cyr >= 2
+    return cyr >= 4                       # достаточно кириллицы и нет чужих букв (латиница не мешает)
 
 
 @dataclass

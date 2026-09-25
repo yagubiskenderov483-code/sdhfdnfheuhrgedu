@@ -791,6 +791,20 @@ async def test_27_reinclude_after_skip_no_burst():
     print("✔ TEST 27 повторное включение после пропуска: тихий ре-синк, старое не улетает как новое")
 
 
+def test_28_russian_detection_softened():
+    """Смягчённое распознавание русского: латиница/короткий текст не режут русских,
+    но украинский/казахский/чистая латиница по-прежнему отсеиваются."""
+    from filters.seller_filter import is_russian_text as r
+    assert r("NFT gifts на продажу, пишите")        # латиница рядом с русским — ок
+    assert r("продам") and r("Мой канал")            # короткие
+    assert r("Тут всё чётко")                        # буква ё
+    assert not r("for sale, dm me")                  # только латиница
+    assert not r("Продаю подарунки, пишіть")         # украинский (і/ї)
+    assert not r("Сатылады, жазыңыз")                # казахский
+    assert not r("") and not r(None)
+    print("✔ TEST 28 распознавание русского смягчено: латиница/короткое — ок, укр/каз/латиница — нет")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
@@ -804,6 +818,7 @@ async def run() -> None:
         await t()
     test_15_seller_rules()
     test_20_proxies()
+    test_28_russian_detection_softened()
     print("\nALL TESTS PASSED")
 
 
