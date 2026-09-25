@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -106,6 +106,11 @@ MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE collection_state ADD COLUMN partial INTEGER NOT NULL DEFAULT 0",
         "ALTER TABLE collection_state ADD COLUMN last_count INTEGER",
     ],
+    # v5: тихий первый опрос после синхронизации должен переживать рестарт (иначе RECOVERY
+    # после падения между initial sync и baseline выбросит накопленное как новое)
+    5: [
+        "ALTER TABLE collection_state ADD COLUMN baseline INTEGER NOT NULL DEFAULT 0",
+    ],
 }
 
 # Колонки, без которых новая логика работать не может (проверяются после миграций)
@@ -113,5 +118,5 @@ REQUIRED_COLUMNS: dict[str, set[str]] = {
     "listings": {"listing_id", "gift_unique_id", "gift_id", "seller_key", "status", "sent", "sent_at",
                  "first_seen"},
     "market_items": {"unique_id", "gift_id", "seller_key", "stars", "ton_nano", "listing_id", "state"},
-    "collection_state": {"gift_id", "synced", "complete", "last_cursor", "partial", "last_count"},
+    "collection_state": {"gift_id", "synced", "complete", "last_cursor", "partial", "last_count", "baseline"},
 }

@@ -78,7 +78,6 @@ class MarketplaceCoordinator:
         self._hot_since: dict[int, float] = {}
         self.paused = False
         self.skipped: set[int] = set()
-        self._baseline_pending: set[int] = set()  # коллекции, чей первый live-опрос после initial sync — тихий
         self.low_prio: set[int] = set()           # флор ниже порога, режим slow: отслеживаются реже            # коллекции с флором ниже COLLECTION_MIN_FLOOR
         self.hot_latency: float | None = None     # сек от изменения счётчика в каталоге до опроса коллекции
         self._stop = asyncio.Event()
@@ -110,7 +109,8 @@ class MarketplaceCoordinator:
                 last_seen_timestamp=row["last_seen_timestamp"],
                 availability_resale=row["availability_resale"], last_poll=row["last_poll"],
                 last_session=row["last_session"],
-                partial=bool(row.get("partial") or 0), last_count=row.get("last_count"))
+                partial=bool(row.get("partial") or 0), last_count=row.get("last_count"),
+                baseline_pending=bool(row.get("baseline") or 0))
             if st.synced and st.last_count is None:
                 # состояние от версии без проверки неполных коллекций → один раз тихо перечитать
                 st.needs_full_sync = True
@@ -184,7 +184,11 @@ class MarketplaceCoordinator:
         gid = st.gift_id
         if th <= 0:
             if (gid in self.skipped) and st.synced:
-                st.needs_full_sync = True   # включаем ранее пропущенную → сперва тихий ре-синк
+                # включаем ранее пропущенную → сперва тихий ре-синк; complete=False персистится,
+                # чтобы рестарт до ре-синка не выбросил накопленное через RECOVERY (как в ветке ниже)
+                st.needs_full_sync = True
+                st.complete = False
+                self._dirty.add(gid)
                 self._due[gid] = 0.0
             self.skipped.discard(gid)
             self.low_prio.discard(gid)
@@ -246,7 +250,9 @@ class MarketplaceCoordinator:
             await asyncio.sleep(1)
 
     async def set_paused(self, paused: bool) -> None:
-        """/pause и /resume: пока на паузе, трекер не делает ни одного запроса к Telegram."""
+        """/pause и /resume: пока на паузе, трекер не делает ни одного запроса к Telegram.
+        На resume НЕ глушим накопленное: лоты, появившиеся за паузу, по-настоящему новые и нужны —
+        дедуп по unique_id и так не даст повторить уже известные, а старьё отсекает anchor/partial."""
         self.paused = paused
         await self.db.kv_set("paused", int(paused))
         log.info("Tracker %s", "PAUSED ⏸ — no Telegram requests" if paused else "RESUMED ▶️")
@@ -316,7 +322,7 @@ class MarketplaceCoordinator:
             # менялся, и «незнакомый лот наверху» на первом live-опросе не отличить от старого. Один
             # опрос закрепляет базу, после него уходят только по-настоящему новые лоты. Это важно и
             # для ре-синка (не только initial): full_sync мог пропустить лот на границе страниц.
-            self._baseline_pending.add(gid)
+            st.baseline_pending = True
         st.synced = True
         st.complete = complete
         st.partial = partial
@@ -411,13 +417,14 @@ class MarketplaceCoordinator:
         # 2b) Коллекция, которую Telegram отдаёт не целиком: незнакомый лот наверху может быть
         #     старым лотом, которого мы не видели, со сменённой ценой. Новый листинг увеличивает
         #     count, смена цены — нет. Пропускаем как NEW не больше, чем вырос count; иначе — тихо.
-        if cls.new and gid in self._baseline_pending:
+        if st.baseline_pending:
             for it in cls.new:
                 self.stats["silent"] += 1
-                llog("SILENT_OLD", f'listing={it.listing_id} reason="post_initial_baseline"')
-            cls.silent += [(it, "post_initial_baseline") for it in cls.new]
+                llog("SILENT_OLD", f'listing={it.listing_id} reason="post_sync_baseline"')
+            cls.silent += [(it, "post_sync_baseline") for it in cls.new]
             cls.new = []
-        self._baseline_pending.discard(gid)
+            st.baseline_pending = False
+            self._dirty.add(gid)
 
         if cls.new and st.partial:
             delta = (count - st.last_count) if (count is not None and st.last_count is not None) else 0

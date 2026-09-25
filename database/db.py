@@ -186,19 +186,19 @@ class Database:
             await self.conn.execute(
                 """INSERT INTO collection_state(gift_id, title, synced, complete, last_cursor,
                        last_seen_listing_id, last_seen_timestamp, availability_resale, last_poll, last_session,
-                       partial, last_count)
+                       partial, last_count, baseline)
                    VALUES(:gift_id, :title, :synced, :complete, :last_cursor, :last_seen_listing_id,
                           :last_seen_timestamp, :availability_resale, :last_poll, :last_session,
-                          :partial, :last_count)
+                          :partial, :last_count, :baseline)
                    ON CONFLICT(gift_id) DO UPDATE SET
                      title=excluded.title, synced=excluded.synced, complete=excluded.complete,
                      last_cursor=excluded.last_cursor, last_seen_listing_id=excluded.last_seen_listing_id,
                      last_seen_timestamp=excluded.last_seen_timestamp,
                      availability_resale=excluded.availability_resale,
                      last_poll=excluded.last_poll, last_session=excluded.last_session,
-                     partial=excluded.partial,
+                     partial=excluded.partial, baseline=excluded.baseline,
                      last_count=COALESCE(excluded.last_count, collection_state.last_count)""",
-                {"partial": 0, "last_count": None, **s})
+                {"partial": 0, "last_count": None, "baseline": 0, **s})
             await self.conn.commit()
 
     # ------------------------------------------------------------------ listings

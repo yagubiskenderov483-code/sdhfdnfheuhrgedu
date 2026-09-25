@@ -290,6 +290,8 @@ def build_routers(app: "App") -> list[Router]:
             if key in claimed:
                 await q.answer("Лот уже занят", show_alert=True)
                 return
+            if len(claimed) > 5000:
+                claimed.clear()   # старые лоты и так защищены текстом кнопки «✅ Занял» (не «✓»)
             claimed.add(key)
         u = q.from_user
         who = f"@{u.username}" if u.username else (u.full_name or str(u.id))

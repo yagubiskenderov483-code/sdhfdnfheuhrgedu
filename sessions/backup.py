@@ -46,6 +46,11 @@ log = get_logger("backup")
 
 class BackupUnavailable(Exception):
     """Не удалось прочитать указатель на копию — нельзя ни восстанавливать, ни перезаписывать."""
+
+
+class BackupCorrupt(BackupUnavailable):
+    """Файл скачался, но не расшифровался (неверный ключ или битый шифротекст).
+    Ретрай переживёт транзиентный обрыв; если повторяется — ключ реально сменён/копия испорчена."""
 BACKUP_FILENAME = "sessions.backup"
 POINTER_LANG = "yo"
 POINTER_PREFIX = "gtb1|"
@@ -239,16 +244,31 @@ class SessionBackup:
 
     # ------------------------------------------------------------------ restore
     async def restore(self) -> int:
+        last_corrupt = False
         for attempt in range(10):
             try:
                 n = await self._restore_once()
                 self.restored_count = n
                 self.restore_done = True
                 return n
+            except BackupCorrupt as e:
+                # битая закачка резолвится ретраем; если нет — ключ реально сменён (см. ниже)
+                last_corrupt = True
+                log.warning("Backup decrypt failed: %s (retry %s/10)", e, attempt + 1)
+                await asyncio.sleep(10)
             except BackupUnavailable as e:
+                last_corrupt = False
                 log.warning("Backup restore delayed: %s (retry %s/10)", e, attempt + 1)
                 await asyncio.sleep(10)
-        log.error("Backup could not be read — saving is disabled this run to protect the old copy")
+        if last_corrupt:
+            # 10 попыток скачали файл, но расшифровать не смогли — это не транзиент, а сменённый
+            # ключ/испорченная копия. Старую копию мы всё равно не прочитаем, поэтому разрешаем
+            # старт «с чистого листа»: сохранение включаем, чтобы новые аккаунты попали в свежую копию.
+            log.error("Backup permanently undecryptable (key changed?) — starting fresh, saving ENABLED")
+            self.restore_done = True
+            self.backup_names = set()
+            return 0
+        log.error("Backup could not be read (download failing) — saving disabled this run to protect the old copy")
         return 0
 
     async def _restore_once(self) -> int:
@@ -263,11 +283,11 @@ class SessionBackup:
             await self.bot.download(file_id, destination=buf)
             data = json.loads(f.decrypt(buf.getvalue()))
         except InvalidToken as e:
-            # InvalidToken = либо неверный ключ, либо ОБОРВАННАЯ/битая закачка (частый транзиент).
-            # Различить нельзя, поэтому НЕ считаем restore выполненным (иначе save() снимет защиту и
-            # затрёт хорошую копию пустой). Отдаём как временную недоступность → ретрай; если ключ
-            # реально сменился, после ретраев сохранение останется заблокированным и старая копия цела.
-            raise BackupUnavailable(f"decrypt failed (wrong key or truncated download): {e}") from e
+            # InvalidToken = неверный ключ ЛИБО оборванная/битая закачка. НЕ помечаем restore
+            # выполненным здесь (иначе save() снял бы защиту и затёр хорошую копию пустой на
+            # транзиенте). BackupCorrupt → restore() ретраит; если повторяется все 10 раз — это
+            # реальная смена ключа, и restore() тогда разрешит старт заново (не блок навсегда).
+            raise BackupCorrupt(f"decrypt failed (wrong key or truncated download): {e}") from e
         except Exception as e:
             raise BackupUnavailable(f"backup download failed: {e}") from e
 

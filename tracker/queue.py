@@ -360,9 +360,11 @@ class ListingPipeline:
             await self.db.update_listing(l)
             return
 
-        text = self.formatter.render(l)
         res = None
         try:
+            # render ВНУТРИ try: если он бросит исключение, finally всё равно снимет резерв.
+            # Иначе краш рендера навсегда блокировал бы этот NFT/продавца/коллекцию (резерв не снят).
+            text = self.formatter.render(l)
             _chat, _thread = settings.route_chat(l.stars_price, l.backdrop)
             res = await self.sender.send_listing(text, l.gift_link, listing_keyboard(l),
                                                  listing_keyboard(l, with_seller=False),

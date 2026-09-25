@@ -106,7 +106,7 @@ class Env:
             # первый live-опрос после initial sync — тихий (закрепляет базу); в проде это делает
             # живой цикл. Тесты стационарного поведения его пропускают через этот прогрев.
             for st in list(self.coord.states.values()):
-                if st.gift_id in self.coord._baseline_pending:
+                if st.baseline_pending:
                     await self.coord.poll_collection(st, "live")
             await self.pipe.queue.join()
         return self
@@ -734,11 +734,11 @@ async def test_25_post_deploy_baseline():
     """Первый live-опрос сразу после initial sync — тихий: churn рынка за время синхронизации
     не уходит в канал как «новый». Только следующие опросы шлют по-настоящему новые лоты."""
     e, tmp = await fresh(30, warmup=False)
-    assert e.coord.states[GID].gift_id in e.coord._baseline_pending
+    assert e.coord.states[GID].baseline_pending
     e.market.list_new(e.market.item(9000))
     await e.poll()
     assert e.pipe.stats["new"] == 0 and not e.sender.sent, "базовый опрос не шлёт new"
-    assert GID not in e.coord._baseline_pending
+    assert not e.coord.states[GID].baseline_pending
     e.market.list_new(e.market.item(9000))
     await e.poll()
     assert e.pipe.stats["new"] == 1 and len(e.sender.sent) == 1, "после базы новый лот уходит"
@@ -864,6 +864,33 @@ def test_30_hardening():
     print("✔ TEST 30 аудит-регрессии: /set-валидация, прокси-порт, отсев чужой кириллицы")
 
 
+async def test_31_baseline_survives_restart():
+    """Флаг тихого baseline переживает рестарт: если процесс упал после initial sync, но до
+    первого тихого опроса, RECOVERY после старта НЕ должен выбросить накопленное как новое."""
+    reset_settings()
+    tmp = Path(tempfile.mkdtemp())
+    market = FakeMarket()
+    for _ in range(30):
+        market.list_new(market.item())
+    patch_market(market)
+    e = await Env(tmp, market).boot(warmup=False)     # initial sync прошёл, baseline НЕ израсходован
+    assert e.coord.states[GID].baseline_pending, "после initial sync baseline_pending=True"
+    market.list_new(market.item(9000))                 # лоты появились «за время простоя»
+    market.list_new(market.item(9000))
+    await e.shutdown()                                 # «падение» до тихого опроса (baseline=1 в БД)
+    # рестарт на той же БД: start() запускает RECOVERY по live-коллекциям
+    e = await Env(tmp, market).boot(warmup=False)
+    await e.pipe.queue.join()
+    assert e.pipe.stats["new"] == 0 and not e.sender.sent, \
+        "RECOVERY после рестарта НЕ выбрасывает накопленное — baseline пережил рестарт"
+    assert not e.coord.states[GID].baseline_pending, "baseline израсходован тихим recovery"
+    market.list_new(market.item(9000))                 # теперь по-настоящему новый
+    await e.poll()
+    assert e.pipe.stats["new"] == 1
+    await e.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 31 baseline переживает рестарт: RECOVERY не выбрасывает накопленное как новое")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
@@ -873,7 +900,8 @@ async def run() -> None:
               test_18_pause, test_19_floor_filter, test_21_ton_priced_lots,
               test_22_log_regressions, test_23_cheap_collections_slow, test_24_partial_collection,
               test_25_post_deploy_baseline, test_26_floor_is_single_threshold,
-              test_27_reinclude_after_skip_no_burst):
+              test_27_reinclude_after_skip_no_burst,
+              test_31_baseline_survives_restart):
         await t()
     test_15_seller_rules()
     test_20_proxies()
