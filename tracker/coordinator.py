@@ -589,14 +589,15 @@ class MarketplaceCoordinator:
             self._running.discard(gid)
 
     async def _catalog_loop(self) -> None:
+        # ровный ритм: время самого запроса входит в интервал (раньше интервал + запрос ≈ 2× дольше)
         while not self._stop.is_set():
-            await asyncio.sleep(settings.catalog_interval)
-            if self.paused:
-                continue
-            try:
-                await self.refresh_catalog()
-            except Exception as e:
-                log.warning("Catalog refresh failed: %s", e)
+            started = time.monotonic()
+            if not self.paused:
+                try:
+                    await self.refresh_catalog()
+                except Exception as e:
+                    log.warning("Catalog refresh failed: %s", e)
+            await asyncio.sleep(max(0.2, settings.catalog_interval - (time.monotonic() - started)))
 
     async def _persist_loop(self) -> None:
         while not self._stop.is_set():

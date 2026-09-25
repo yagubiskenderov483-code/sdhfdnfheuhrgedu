@@ -247,8 +247,6 @@ class ListingPipeline:
         l.seller_about = full.about
         l.seller_channel = full.channel_title
         l.messages = _messages_status(full.paid_message_stars, full.contact_require_premium)
-        if settings.max_seller_nfts > 0:
-            l.seller_nfts = await self._nft_count(l)
 
     async def _nft_count(self, l: Listing) -> int | None:
         uid = l.seller_id
@@ -310,7 +308,12 @@ class ListingPipeline:
 
         await self._enrich_seller(l)
 
+        # Сначала проверяем то, что уже известно (сообщения, Level, язык), и только если продавец
+        # прошёл — отдельный запрос за количеством его NFT. Отсеянным продавцам лишний запрос не нужен.
         sr = self.seller_filter.check(l)
+        if sr.passed and settings.max_seller_nfts > 0 and l.seller_type == "user" and l.seller_id:
+            l.seller_nfts = await self._nft_count(l)
+            sr = self.seller_filter.check(l)
         l.seller_filter_result = sr.code
         if not sr.passed:
             l.status, l.reason = ListingStatus.FILTERED_SELLER, sr.reason

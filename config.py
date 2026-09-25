@@ -94,8 +94,8 @@ class Settings:
     page_limit: int = 30
     live_max_pages: int = 5
     recovery_max_pages: int = 20
-    catalog_interval: float = 3.0            # как часто смотреть счётчики лотов всех коллекций (1 запрос)
-    cold_poll_interval: float = 10.0         # коллекция без изменений счётчика — страховочный опрос раз в N сек
+    catalog_interval: float = 2.0            # как часто смотреть счётчики лотов всех коллекций (1 запрос)
+    cold_poll_interval: float = 6.0         # коллекция без изменений счётчика — страховочный опрос раз в N сек
     market_backup_minutes: float = 30.0      # как часто сохранять снимок рынка в Telegram
     market_snapshot_max_age_hours: float = 6.0
     collections: list[str] = field(default_factory=list)   # пусто = все коллекции
@@ -174,7 +174,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "MAX_SELLER_NFTS": ("max_seller_nfts", lambda v: max(0, int(v))),
     "MAX_SELLER_LEVEL": ("max_seller_level", lambda v: max(0, int(v))),
     "COLD_POLL_INTERVAL": ("cold_poll_interval", lambda v: max(1.0, float(v))),
-    "CATALOG_INTERVAL": ("catalog_interval", lambda v: max(2.0, float(v))),
+    "CATALOG_INTERVAL": ("catalog_interval", lambda v: max(1.0, float(v))),
     "MAX_SAME_COLLECTION_STREAK": ("max_same_collection_streak", lambda v: max(0, int(v))),
     "UNIQUE_SELLERS": ("unique_sellers", lambda v: _bool(v, True)),
     "SELLER_REPEAT_HOURS": ("seller_repeat_hours", lambda v: max(0.0, float(v))),
@@ -203,7 +203,7 @@ def _from_env() -> Settings:
         require_free_messages=_bool(e("REQUIRE_FREE_MESSAGES"), True),
         max_seller_nfts=max(0, _int(e("MAX_SELLER_NFTS"), 12)),
         max_seller_level=max(0, _int(e("MAX_SELLER_LEVEL"), 5)),
-        cold_poll_interval=max(1.0, _float(e("COLD_POLL_INTERVAL"), 10.0)),
+        cold_poll_interval=max(1.0, _float(e("COLD_POLL_INTERVAL"), 6.0)),
         market_backup_minutes=max(5.0, _float(e("MARKET_BACKUP_MINUTES"), 30.0)),
         market_snapshot_max_age_hours=max(0.5, _float(e("MARKET_SNAPSHOT_MAX_AGE_HOURS"), 6.0)),
         unique_sellers=_bool(e("UNIQUE_SELLERS"), True),
@@ -218,7 +218,7 @@ def _from_env() -> Settings:
         page_limit=max(1, min(100, _int(e("PAGE_LIMIT"), 30))),
         live_max_pages=max(1, _int(e("LIVE_MAX_PAGES"), 5)),
         recovery_max_pages=max(1, _int(e("RECOVERY_MAX_PAGES"), 20)),
-        catalog_interval=max(2.0, _float(e("CATALOG_INTERVAL"), 3.0)),
+        catalog_interval=max(1.0, _float(e("CATALOG_INTERVAL"), 2.0)),
         collections=_str_list(e("COLLECTIONS")),
         max_concurrent_sessions=max(1, _int(e("MAX_CONCURRENT_SESSIONS"), 20)),
         session_rps=max(0.05, _float(e("SESSION_RPS"), 1.0)),
