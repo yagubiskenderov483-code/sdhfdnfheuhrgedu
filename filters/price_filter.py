@@ -21,7 +21,9 @@ class FilterResult:
 
 class PriceFilter:
     def check(self, l: Listing) -> FilterResult:
-        min_stars = settings.min_stars
+        # Один порог: если задан COLLECTION_MIN_FLOOR, лоты идут от него же (флор 3000 → лоты от 3000).
+        # MIN_STARS используется, только когда флор не задан (COLLECTION_MIN_FLOOR=0).
+        min_stars = settings.collection_min_floor or settings.min_stars
         min_ton = settings.min_ton
         ton = l.ton_price
 

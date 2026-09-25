@@ -738,6 +738,21 @@ async def test_25_post_deploy_baseline():
     print("✔ TEST 25 после деплоя: первый опрос тихий, затем по-настоящему новые лоты уходят")
 
 
+async def test_26_floor_is_single_threshold():
+    """Один порог: COLLECTION_MIN_FLOOR задаёт и какие коллекции читать, и от какой цены слать лоты."""
+    e, tmp = await fresh(30)
+    settings.collection_min_floor = 3000
+    settings.min_stars = 5000                       # прежний отдельный порог игнорируется
+    e.market.list_new(e.market.item(4740))          # был бы отсеян по старому MIN_STARS=5000
+    await e.poll()
+    assert e.pipe.stats["new"] == 1 and len(e.sender.sent) == 1, (e.pipe.stats, e.sender.sent)
+    e.market.list_new(e.market.item(2500))          # ниже флора — отсеивается
+    await e.poll()
+    assert e.pipe.stats["filtered_price"] == 1, e.pipe.stats
+    await e.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 26 один порог: флор 3000 → лоты от 3000 идут, ниже — отсеиваются")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
@@ -746,7 +761,7 @@ async def run() -> None:
               test_14_ton_rate_changes, test_16_market_snapshot_redeploy, test_17_hot_cold_schedule,
               test_18_pause, test_19_floor_filter, test_21_ton_priced_lots,
               test_22_log_regressions, test_23_cheap_collections_slow, test_24_partial_collection,
-              test_25_post_deploy_baseline):
+              test_25_post_deploy_baseline, test_26_floor_is_single_threshold):
         await t()
     test_15_seller_rules()
     test_20_proxies()
