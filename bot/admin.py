@@ -281,7 +281,9 @@ def build_routers(app: "App") -> list[Router]:
             f"🟡 Connecting: {c.get('CONNECTING', 0)}\n"
             f"📚 Collections LIVE: {coord.sync_progress()[0]}/{coord.sync_progress()[1]} "
             f"(остальные в тихой синхронизации)\n"
-            f"🚫 Пропущено коллекций (флор ниже {settings.collection_min_floor}⭐): {len(coord.skipped)}\n"
+            + (f"🐢 Из них дешёвых (флор ниже {settings.collection_min_floor}⭐, реже): {len(coord.low_prio)}\n"
+               if settings.collection_floor_mode == "slow" else
+               f"🚫 Пропущено коллекций (флор ниже {settings.collection_min_floor}⭐): {len(coord.skipped)}\n") +
             f"⚡ Реакция на новый лот: {f'{coord.hot_latency:.1f}s' if coord.hot_latency is not None else '—'} "
             f"(+ до {settings.catalog_interval:g}s на проверку каталога)\n"
             f"🔁 Страховочный обход: {f'{cycle:.0f}s' if cycle else '—'} (цель {settings.cold_poll_interval:g}s)\n"
@@ -477,12 +479,13 @@ def build_routers(app: "App") -> list[Router]:
         skipped = [st for st in states if st.gift_id in coord.skipped]
 
         def row(st) -> str:
-            mark = "🟢" if coord._is_live(st) else "🟡"
+            mark = ("🐢" if st.gift_id in coord.low_prio else "🟢") if coord._is_live(st) else "🟡"
             floor = f"{st.floor_stars}⭐" if st.floor_stars else "—"
             return f"{mark} {html.escape(st.title)} — флор {floor}, лотов {st.availability_resale or 0}"
 
-        lines = [f"<b>📚 Отслеживается: {len(tracked)}</b> (флор от {settings.collection_min_floor}⭐)",
-                 "🟢 в работе, 🟡 ещё синхронизируется", ""]
+        lines = [f"<b>📚 Отслеживается: {len(tracked)}</b>",
+                 f"🟢 в работе, 🐢 дешёвая (флор ниже {settings.collection_min_floor}⭐, проверяется реже), "
+                 "🟡 ещё синхронизируется", ""]
         lines += [row(st) for st in tracked] or ["—"]
         lines += ["", f"<b>🚫 Пропущено: {len(skipped)}</b> (флор ниже порога)"]
         cheap = [f"{html.escape(st.title)} ({st.floor_stars or '—'}⭐)" for st in skipped[:40]]

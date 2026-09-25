@@ -124,6 +124,8 @@ def reset_settings():
     settings.max_seller_nfts = 0
     settings.max_seller_level = 0
     settings.collection_min_floor = 0
+    settings.collection_floor_mode = "slow"
+    settings.low_priority_poll_interval, settings.low_priority_hot_min = 60.0, 10.0
     settings.fetch_full_seller = False
     settings.test_mode = False
     settings.unique_gifts = False
@@ -546,6 +548,7 @@ async def test_18_pause():
 async def test_19_floor_filter():
     reset_settings()
     settings.collection_min_floor = 4500
+    settings.collection_floor_mode = "skip"
     tmp = Path(tempfile.mkdtemp())
     market = FakeMarket()
     market.lots[2] = []
@@ -641,6 +644,37 @@ async def test_22_log_regressions():
     print("✔ TEST 22 ошибки из логов: пропущенная коллекция, сбой Telegram → повтор другим аккаунтом, дрожание цены")
 
 
+async def test_23_cheap_collections_slow():
+    """Режим slow: дешёвая коллекция тоже отслеживается — дорогой лот в ней находится."""
+    import time as _t
+    reset_settings()
+    settings.collection_min_floor = 4500
+    tmp = Path(tempfile.mkdtemp())
+    market = FakeMarket()
+    market.lots[2] = []
+    market.floors = {GID: 6000, 2: 500}
+    for _ in range(20):
+        market.list_new(market.item())
+        market.list_new(market.item(gid=2), gid=2)
+    patch_market(market)
+    e = await Env(tmp, market).boot()
+    assert e.coord.skipped == set() and e.coord.low_prio == {2} and e.coord.sync_progress() == (2, 2)
+    e.coord._last_poll_mono[2] = _t.monotonic()
+    e.coord._due[2] = _t.monotonic() + 60                      # как после страховочного опроса
+    market.list_new(market.item(20000, gid=2), gid=2)          # дорогой лот в дешёвой коллекции
+    await e.coord.refresh_catalog()
+    assert _t.monotonic() + 5 < e.coord._due[2] < _t.monotonic() + 15, "дешёвая: по изменению, но не чаще раза в 10с"
+    await e.poll(2)
+    assert e.pipe.stats["new"] == 1 and len(e.sender.sent) == 1
+    e.coord._running.add(2)
+    await e.coord._live_poll(e.coord.states[2])
+    e.coord._running.add(2)
+    await e.coord._live_poll(e.coord.states[2])
+    assert e.coord._due[2] - _t.monotonic() > 50, "страховочный обход дешёвой — раз в 60с"
+    await e.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 23 дешёвые коллекции (slow): тоже отслеживаются, дорогой лот в них найден, опрос реже")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
@@ -648,7 +682,7 @@ async def run() -> None:
               test_12_count_mismatch_and_backup_fallback, test_13_backup_survives_deploy,
               test_14_ton_rate_changes, test_16_market_snapshot_redeploy, test_17_hot_cold_schedule,
               test_18_pause, test_19_floor_filter, test_21_ton_priced_lots,
-              test_22_log_regressions):
+              test_22_log_regressions, test_23_cheap_collections_slow):
         await t()
     test_15_seller_rules()
     test_20_proxies()

@@ -77,7 +77,8 @@ class MarketplaceCoordinator:
         self._sync_retry_at: dict[int, float] = {}
         self._hot_since: dict[int, float] = {}
         self.paused = False
-        self.skipped: set[int] = set()            # коллекции с флором ниже COLLECTION_MIN_FLOOR
+        self.skipped: set[int] = set()
+        self.low_prio: set[int] = set()           # флор ниже порога, режим slow: отслеживаются реже            # коллекции с флором ниже COLLECTION_MIN_FLOOR
         self.hot_latency: float | None = None     # сек от изменения счётчика в каталоге до опроса коллекции
         self._stop = asyncio.Event()
         self.stats = {"scanned": 0, "polls": 0, "poll_errors": 0, "silent": 0, "price_moves": 0,
@@ -154,7 +155,12 @@ class MarketplaceCoordinator:
             st.floor_stars = c.resell_min_stars
             if c.availability_resale != st.availability_resale:
                 st.availability_resale = c.availability_resale
-                self._due[c.gift_id] = 0.0  # hot → опросить немедленно
+                if c.gift_id in self.low_prio:
+                    # дешёвая коллекция: опрос при изменении, но не чаще раза в LOW_PRIORITY_HOT_MIN
+                    soon = self._last_poll_mono.get(c.gift_id, 0.0) + settings.low_priority_hot_min
+                    self._due[c.gift_id] = min(self._due.get(c.gift_id, soon), max(0.0, soon))
+                else:
+                    self._due[c.gift_id] = 0.0  # hot → опросить немедленно
                 self._hot_since.setdefault(c.gift_id, time.monotonic())
                 self._dirty.add(c.gift_id)
                 hot += 1
@@ -173,14 +179,25 @@ class MarketplaceCoordinator:
         gid = st.gift_id
         if th <= 0:
             self.skipped.discard(gid)
+            self.low_prio.discard(gid)
             return False
-        tracked = gid not in self.skipped and not first
+        cheap_before = gid in self.skipped or gid in self.low_prio
+        tracked = not cheap_before and not first
         limit = th * 0.9 if tracked else th
-        if floor is None or floor < limit:
+        cheap = floor is None or floor < limit
+        if cheap and settings.collection_floor_mode == "skip":
             self.skipped.add(gid)
+            self.low_prio.discard(gid)
             return True
-        if gid in self.skipped:
-            self.skipped.discard(gid)
+        was_skipped = gid in self.skipped
+        self.skipped.discard(gid)
+        if cheap:
+            # режим slow: дешёвая коллекция тоже отслеживается — сразу при появлении лота (по каталогу),
+            # но страховочный обход реже; так дорогие лоты в «дешёвых» коллекциях не теряются
+            self.low_prio.add(gid)
+        else:
+            self.low_prio.discard(gid)
+        if was_skipped:
             self._due[gid] = 0.0
         return False
 
@@ -467,7 +484,8 @@ class MarketplaceCoordinator:
         out = [st for st in self.states.values()
                if st.gift_id not in self.skipped and not self._is_live(st) and self._sync_retry_at.get(st.gift_id, 0.0) <= now
                and st.gift_id not in self._running]
-        return sorted(out, key=lambda st: st.availability_resale or 0)
+        # сначала дорогие коллекции, внутри — маленькие первыми
+        return sorted(out, key=lambda st: (st.gift_id in self.low_prio, st.availability_resale or 0))
 
     def sync_progress(self) -> tuple[int, int]:
         """(коллекций в LIVE, всего коллекций)"""
@@ -585,7 +603,8 @@ class MarketplaceCoordinator:
             self._last_poll_mono[gid] = now
             # коллекция, где только что были новые лоты, остаётся «горячей»; остальные — страховочный
             # опрос раз в COLD_POLL_INTERVAL, а мгновенно — когда каталог покажет изменение счётчика
-            self._due[gid] = now + (settings.tracker_interval if found else settings.cold_poll_interval)
+            cold = settings.low_priority_poll_interval if gid in self.low_prio else settings.cold_poll_interval
+            self._due[gid] = now + (settings.tracker_interval if found else cold)
             self._running.discard(gid)
 
     async def _catalog_loop(self) -> None:
