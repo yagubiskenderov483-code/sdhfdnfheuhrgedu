@@ -478,6 +478,9 @@ def test_15_seller_rules():
     assert f.check(Listing(**base, messages="бесплатно", seller_nfts=2, seller_about=None,
                            seller_channel="Мой канал про подарки")).code == "CHANNEL_RU"
     assert f.check(Listing(**base, messages="бесплатно", seller_nfts=2)).code == "UNKNOWN_BLOCKED"
+    # нет телефона/био/канала, но к подаркам приложены русские тексты → пропустить
+    assert f.check(Listing(**base, messages="бесплатно", seller_nfts=2,
+                           seller_gift_text="С днём рождения! Люблю тебя")).code == "GIFT_MSG_RU"
     settings.max_seller_level = 5
     assert f.check(Listing(**base, messages="бесплатно", level=5, seller_about="Продаю подарки")).passed
     assert f.check(Listing(**base, messages="бесплатно", level=6,

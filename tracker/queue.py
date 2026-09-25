@@ -33,7 +33,7 @@ from database.models import Listing, ListingStatus
 from filters.price_filter import PriceFilter
 from filters.seller_filter import SellerFilter
 from sessions.manager import SessionManager
-from tracker.marketplace import ResaleItem, SellerFull, fetch_full_user, fetch_nft_count
+from tracker.marketplace import ResaleItem, SellerFull, fetch_full_user, fetch_gift_texts, fetch_nft_count
 from utils.links import gift_link, username_link
 from utils.logger import get_logger, llog
 
@@ -139,6 +139,7 @@ class ListingPipeline:
         self._workers: list[asyncio.Task] = []
         self._seller_cache: dict[int, tuple[float, SellerFull]] = {}
         self._nft_cache: dict[int, tuple[float, int | None]] = {}
+        self._gift_text_cache: dict[int, tuple[float, str | None]] = {}
         self.stats = {"new": 0, "sent": 0, "filtered_price": 0, "filtered_seller": 0,
                       "filtered_repeat": 0, "duplicates": 0, "failed": 0}
         # защита от повторов NFT / продавца между параллельными обработчиками
@@ -264,6 +265,22 @@ class ListingPipeline:
             self._nft_cache.clear()
         return n
 
+    async def _gift_texts(self, l: Listing) -> str | None:
+        uid = l.seller_id
+        cached = self._gift_text_cache.get(uid)
+        if cached and time.monotonic() - cached[0] < settings.seller_cache_ttl:
+            return cached[1]
+        try:
+            txt, _ = await self.sessions.run(lambda c: fetch_gift_texts(c, uid),
+                                             only=l.session_source, attempts=2, timeout=45)
+        except Exception as e:
+            log.debug("getSavedStarGifts(texts) %s failed: %s", uid, e)
+            txt = None
+        self._gift_text_cache[uid] = (time.monotonic(), txt)
+        if len(self._gift_text_cache) > 50_000:
+            self._gift_text_cache.clear()
+        return txt
+
     def _streak_reason(self, l: Listing) -> str | None:
         """Не отправлять одну и ту же коллекцию подряд больше MAX_SAME_COLLECTION_STREAK раз."""
         n = settings.max_same_collection_streak
@@ -313,6 +330,10 @@ class ListingPipeline:
         sr = self.seller_filter.check(l)
         if sr.passed and settings.max_seller_nfts > 0 and l.seller_type == "user" and l.seller_id:
             l.seller_nfts = await self._nft_count(l)
+            sr = self.seller_filter.check(l)
+        # продавец без телефона/био/канала: последний объективный шанс — язык текстов к его подаркам
+        if sr.code == "UNKNOWN_BLOCKED" and l.seller_type == "user" and l.seller_id:
+            l.seller_gift_text = await self._gift_texts(l)
             sr = self.seller_filter.check(l)
         l.seller_filter_result = sr.code
         if not sr.passed:

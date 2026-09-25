@@ -213,6 +213,20 @@ async def fetch_full_user(client: TelegramClient, user_id: int) -> SellerFull:
     )
 
 
+async def fetch_gift_texts(client: TelegramClient, user_id: int, limit: int = 30) -> str:
+    """Тексты, приложенные к подаркам продавца (например поздравление от дарившего).
+    Объективный признак языка — как bio, но из сообщений к подаркам. Скрытые подарки Telegram не отдаёт."""
+    entity = await client.get_input_entity(types.PeerUser(user_id))
+    res = await client(GetSavedStarGiftsRequest(peer=entity, offset="", limit=limit))
+    parts: list[str] = []
+    for g in getattr(res, "gifts", []) or []:
+        msg = getattr(g, "message", None)
+        text = getattr(msg, "text", None)
+        if text:
+            parts.append(text)
+    return "\n".join(parts)
+
+
 async def fetch_nft_count(client: TelegramClient, user_id: int) -> int:
     """Сколько коллекционных (NFT) подарков видно в профиле продавца.
     payments.getSavedStarGifts без обычных подарков: exclude_unlimited + exclude_upgradable +

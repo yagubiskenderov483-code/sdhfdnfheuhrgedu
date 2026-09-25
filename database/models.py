@@ -46,6 +46,7 @@ class Listing:
     floor_stars: int | None = None     # флор коллекции на момент обнаружения (для поста)
     seller_nfts: int | None = None     # сколько NFT видно в профиле продавца
     seller_channel: str | None = None  # название личного канала продавца (для фильтра языка)
+    seller_gift_text: str | None = None  # тексты, приложенные к подаркам продавца — НЕ в БД, для фильтра языка
 
     stars_price: int | None = None
     ton_nano: int | None = None

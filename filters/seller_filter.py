@@ -129,6 +129,9 @@ class SellerFilter:
         if is_russian_text(l.seller_channel):
             return SellerResult(True, "CHANNEL_RU", "personal channel title is in Russian")
 
+        if is_russian_text(l.seller_gift_text):
+            return SellerResult(True, "GIFT_MSG_RU", "gift messages are written in Russian")
+
         if settings.unknown_seller_policy == "allow":
             return SellerResult(True, "UNKNOWN_ALLOWED", "no objective data (policy=allow)")
         return SellerResult(False, "UNKNOWN_BLOCKED", "no Russian bio / phone / whitelist (policy=block)")
