@@ -154,8 +154,8 @@ HELP = (
     "/stats — статистика листингов\n"
     "/last — последние найденные лоты и почему не отправлены\n"
     "/collections — какие коллекции отслеживаются\n"
-    "/settings — текущие настройки\n"
-    "/set &lt;KEY&gt; &lt;VALUE&gt; — изменить настройку на лету\n"
+    "/settings или /filters — все настраиваемые фильтры со значениями\n"
+    "/set &lt;KEY&gt; &lt;VALUE&gt; — изменить фильтр (без аргументов — весь список)\n"
     "/pause — остановить парсинг (аккаунты не делают запросов)\n"
     "/proxies — прокси для аккаунтов (свой IP каждому)\n"
     "/resume — продолжить парсинг\n"
@@ -175,10 +175,66 @@ USER_HELP = (
     "/last — последние найденные лоты и почему не отправлены\n"
     "/collections — какие коллекции отслеживаются\n"
     "/pause, /resume — пауза (если вы добавили аккаунт)\n"
-    "/settings — текущие настройки\n"
+    "/settings или /filters — все настраиваемые фильтры со значениями\n"
     "/test — проверка работы (пример сообщения придёт вам)\n"
     "/cancel — отменить текущий диалог"
 )
+
+
+# Описания настраиваемых ключей и группировка для /set и /filters.
+SETTING_DESC: dict[str, str] = {
+    "MIN_STARS": "мин. цена лота в ⭐ (если COLLECTION_MIN_FLOOR=0)",
+    "COLLECTION_MIN_FLOOR": "единый порог: от какой цены читать коллекции И слать лоты (⭐)",
+    "COLLECTION_FLOOR_MODE": "что делать с коллекциями ниже порога: skip (не читать) | slow (реже)",
+    "MIN_TON": "мин. цена лота в TON (0 = не проверять)",
+    "ALLOW_TON_ONLY": "слать лоты, которые продаются только за TON (true/false)",
+    "RUSSIAN_ONLY": "только русские продавцы (true/false)",
+    "UNKNOWN_SELLER_POLICY": "продавец без явных данных: block (отсеять) | allow (пропускать)",
+    "REQUIRE_FREE_MESSAGES": "продавцу можно написать бесплатно (true/false)",
+    "MAX_SELLER_LEVEL": "макс. Level продавца (0 = не проверять)",
+    "MAX_SELLER_NFTS": "макс. число NFT у продавца (0 = не проверять)",
+    "SELLER_PHONE_PREFIXES": "какие префиксы телефона считать русскими (напр. 7)",
+    "UNIQUE_GIFTS": "не слать один и тот же NFT дважды (true/false)",
+    "UNIQUE_SELLERS": "не слать одного продавца дважды (true/false)",
+    "MAX_SAME_COLLECTION_STREAK": "сколько лотов одной коллекции подряд можно (1 = не подряд)",
+    "SELLER_REPEAT_HOURS": "через сколько часов можно повторить продавца (0 = никогда)",
+    "CATALOG_INTERVAL": "как часто проверять счётчики всех коллекций, сек (быстрое обнаружение)",
+    "COLD_POLL_INTERVAL": "страховочный обход коллекции, сек (реже = меньше FloodWait)",
+    "TRACKER_INTERVAL": "пауза между чтениями горячей коллекции, сек",
+    "PAGE_LIMIT": "сколько лотов читать за раз (1–100)",
+    "SESSION_RPS": "запросов в секунду на ОДИН аккаунт (выше = быстрее, но риск FloodWait)",
+    "GLOBAL_RPS": "потолок запросов/сек на все аккаунты вместе",
+    "MAX_CONCURRENT_SESSIONS": "сколько аккаунтов работают параллельно",
+    "LOW_PRIORITY_POLL_INTERVAL": "обход дешёвых коллекций в режиме slow, сек",
+    "TEST_MODE": "тестовый режим: не слать в канал (true/false)",
+    "ALLOW_ALL_USERS": "разрешить командовать ботом всем (true/false)",
+    "FETCH_FULL_SELLER": "запрашивать профиль продавца для фильтров (true/false)",
+}
+SETTING_GROUPS: list[tuple[str, list[str]]] = [
+    ("🎯 Фильтр цены", ["COLLECTION_MIN_FLOOR", "MIN_STARS", "MIN_TON", "ALLOW_TON_ONLY"]),
+    ("👤 Фильтр продавца", ["RUSSIAN_ONLY", "UNKNOWN_SELLER_POLICY", "REQUIRE_FREE_MESSAGES",
+                            "MAX_SELLER_LEVEL", "MAX_SELLER_NFTS", "SELLER_PHONE_PREFIXES"]),
+    ("🔁 Без повторов", ["UNIQUE_GIFTS", "UNIQUE_SELLERS", "MAX_SAME_COLLECTION_STREAK",
+                         "SELLER_REPEAT_HOURS"]),
+    ("⚡ Скорость", ["CATALOG_INTERVAL", "COLD_POLL_INTERVAL", "TRACKER_INTERVAL", "PAGE_LIMIT",
+                    "SESSION_RPS", "GLOBAL_RPS", "MAX_CONCURRENT_SESSIONS", "LOW_PRIORITY_POLL_INTERVAL"]),
+    ("⚙️ Прочее", ["COLLECTION_FLOOR_MODE", "TEST_MODE", "ALLOW_ALL_USERS", "FETCH_FULL_SELLER"]),
+]
+
+
+def _filters_help() -> str:
+    lines = ["<b>⚙️ Настройки трекера</b>",
+             "Изменить: <code>/set КЛЮЧ ЗНАЧЕНИЕ</code>  (напр. <code>/set MAX_SELLER_LEVEL 10</code>)",
+             "Сохраняется и переживает деплой.", ""]
+    for title, keys in SETTING_GROUPS:
+        lines.append(f"<b>{title}</b>")
+        for k in keys:
+            attr = RUNTIME_KEYS[k][0]
+            cur = html.escape(str(getattr(settings, attr, "?")))
+            desc = SETTING_DESC.get(k, "")
+            lines.append(f"<code>{k}</code> = <b>{cur}</b>\n  <i>{desc}</i>")
+        lines.append("")
+    return "\n".join(lines).strip()
 
 
 # ---------------------------------------------------------------------------- routers
@@ -544,22 +600,15 @@ def build_routers(app: "App") -> list[Router]:
         lines += [f"{k}: {v}" for k, v in sorted(day.items())] or ["—"]
         await m.answer("\n".join(lines))
 
-    @users.message(Command("settings"))
+    @users.message(or_f(Command("settings"), Command("filters")))
     async def cmd_settings(m: Message) -> None:
-        v = settings.public_view()
-        keys = ["min_stars", "min_ton", "allow_ton_only", "russian_only", "unknown_seller_policy",
-                "seller_phone_prefixes", "initial_sync", "tracker_interval", "page_limit",
-                "max_concurrent_sessions", "session_rps", "global_rps", "catalog_interval",
-                "collections", "fetch_full_seller", "test_mode", "target_chat_id", "api_hash", "bot_token"]
-        body = "\n".join(f"{k.upper()} = {html.escape(str(v[k]))}" for k in keys)
-        await m.answer(f"<b>⚙️ Настройки</b>\n<pre>{body}</pre>\n"
-                       f"Изменить: /set KEY VALUE\nДоступно: {', '.join(RUNTIME_KEYS)}")
+        await m.answer(_filters_help())
 
     @admin.message(Command("set"))
     async def cmd_set(m: Message, command: CommandObject) -> None:
         parts = (command.args or "").split(maxsplit=1)
         if len(parts) != 2:
-            await m.answer("Использование: /set MIN_STARS 5000")
+            await m.answer(_filters_help())          # /set без аргументов — весь список
             return
         try:
             value = set_runtime_value(parts[0], parts[1])
