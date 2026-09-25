@@ -209,8 +209,8 @@ SETTING_DESC: dict[str, str] = {
     "TEST_MODE": "тестовый режим: не слать в канал (true/false)",
     "ALLOW_ALL_USERS": "разрешить командовать ботом всем (true/false)",
     "FETCH_FULL_SELLER": "запрашивать профиль продавца для фильтров (true/false)",
-    "PRICE_ROUTES": "каналы по цене: lo-hi:ID через запятую (пусто = один общий канал)",
-    "BACKDROP_ROUTES": "каналы по фону: Название:ID через запятую (напр. Black:-100X); в приоритете над ценой",
+    "PRICE_ROUTES": "каналы/темы по цене: lo-hi:ID или ID/тема через запятую (пусто = один канал)",
+    "BACKDROP_ROUTES": "каналы/темы по фону: Название:ID или ID/тема (напр. Black:-100X/67); в приоритете над ценой",
 }
 SETTING_GROUPS: list[tuple[str, list[str]]] = [
     ("🎯 Фильтр цены", ["COLLECTION_MIN_FLOOR", "MIN_STARS", "MIN_TON", "ALLOW_TON_ONLY"]),
@@ -236,10 +236,11 @@ def _filters_help() -> str:
             attr = RUNTIME_KEYS[k][0]
             val = getattr(settings, attr, "?")
             if k == "PRICE_ROUTES":
-                val = (", ".join(f"{lo}-{hi if hi is not None else ''}→{chat}"
-                                 for lo, hi, chat in val) or "не задано (один канал)")
+                val = (", ".join(f"{lo}-{hi if hi is not None else ''}→{chat}{('/'+str(th)) if th else ''}"
+                                 for lo, hi, chat, th in val) or "не задано (один канал)")
             elif k == "BACKDROP_ROUTES":
-                val = (", ".join(f"{name}→{chat}" for name, chat in val) or "не задано")
+                val = (", ".join(f"{name}→{chat}{('/'+str(th)) if th else ''}"
+                                 for name, chat, th in val) or "не задано")
             cur = html.escape(str(val))
             desc = SETTING_DESC.get(k, "")
             lines.append(f"<code>{k}</code> = <b>{cur}</b>\n  <i>{desc}</i>")

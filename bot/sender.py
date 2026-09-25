@@ -42,7 +42,7 @@ class TelegramSender:
     async def send_listing(self, text: str, preview_url: str | None,
                            markup: InlineKeyboardMarkup | None = None,
                            fallback_markup: InlineKeyboardMarkup | None = None,
-                           target: int | None = None) -> SendResult:
+                           target: int | None = None, thread: int | None = None) -> SendResult:
         if settings.test_mode:
             chat = self._test_chat()
             if chat is None or self.test_sent >= settings.test_max_messages:
@@ -52,14 +52,17 @@ class TelegramSender:
             res = await self.send(chat, "🧪 <b>TEST MODE</b>\n" + text, preview_url, markup, fallback_markup)
             res.test_only = True
             return res
-        # target — канал по цене (PRICE_ROUTES); если не задан, общий TARGET_CHAT_ID
-        return await self.send(target or settings.target_chat_id, text, preview_url, markup, fallback_markup)
+        # target/thread — канал и тема по маршруту (PRICE/BACKDROP_ROUTES); иначе общий TARGET_CHAT_ID
+        return await self.send(target or settings.target_chat_id, text, preview_url, markup,
+                               fallback_markup, thread_id=thread)
 
     async def send(self, chat_id: int, text: str, preview_url: str | None = None,
                    markup: InlineKeyboardMarkup | None = None,
-                   fallback_markup: InlineKeyboardMarkup | None = None, attempts: int = 5) -> SendResult:
+                   fallback_markup: InlineKeyboardMarkup | None = None, attempts: int = 5,
+                   thread_id: int | None = None) -> SendResult:
         preview = (LinkPreviewOptions(url=preview_url, prefer_small_media=True, show_above_text=False)
                    if preview_url else LinkPreviewOptions(is_disabled=True))
+        extra = {"message_thread_id": thread_id} if thread_id else {}
         async with self._lock:
             for attempt in range(attempts):
                 wait = self._last + settings.send_interval - time.monotonic()
@@ -67,7 +70,8 @@ class TelegramSender:
                     await asyncio.sleep(wait)
                 try:
                     msg = await self.bot.send_message(chat_id, text, parse_mode="HTML",
-                                                      link_preview_options=preview, reply_markup=markup)
+                                                      link_preview_options=preview, reply_markup=markup,
+                                                      **extra)
                     self._last = time.monotonic()
                     return SendResult(True, msg.message_id)
                 except TelegramRetryAfter as e:

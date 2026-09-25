@@ -80,7 +80,7 @@ class FakeSender:
     def __init__(self):
         self.sent: list[str] = []
 
-    async def send_listing(self, text, preview_url, markup=None, fallback_markup=None, target=None):
+    async def send_listing(self, text, preview_url, markup=None, fallback_markup=None, target=None, thread=None):
         self.sent.append(text)
         return SendResult(True, len(self.sent))
 
@@ -797,20 +797,21 @@ def test_29_price_routes():
     from config import settings as st
     reset_settings()
     st.target_chat_id = -100999
-    st.price_routes = config._price_routes("250-1000:-1001,1000-5000:-1002,5000-:-1003")
-    assert st.route_chat(500) == -1001
-    assert st.route_chat(1000) == -1002 and st.route_chat(4999) == -1002
-    assert st.route_chat(5000) == -1003 and st.route_chat(99999) == -1003
-    assert st.route_chat(100) == -100999      # ниже всех диапазонов → общий
-    assert st.route_chat(None) == -100999
+    # темы форума: один и тот же ID группы, разные номера тем после /
+    st.price_routes = config._price_routes("250-1000:-100/61,1000-3000:-100/62,3000-5000:-100/63,5000-:-100/64")
+    assert st.route_chat(500) == (-100, 61)
+    assert st.route_chat(1000) == (-100, 62) and st.route_chat(4999) == (-100, 63)
+    assert st.route_chat(5000) == (-100, 64) and st.route_chat(99999) == (-100, 64)
+    assert st.route_chat(100) == (-100999, None)    # ниже всех диапазонов → общий
+    assert st.route_chat(None) == (-100999, None)
     st.price_routes = []
-    assert st.route_chat(7000) == -100999     # маршрутов нет → общий
-    # маршрут по фону — в приоритете над ценой
-    st.price_routes = config._price_routes("5000-:-1003")
-    st.backdrop_routes = config._backdrop_routes("Black:-1009")
-    assert st.route_chat(9000, "Black Velvet") == -1009   # чёрный фон → в свой канал, не в 5000+
-    assert st.route_chat(9000, "Blue") == -1003           # не чёрный → по цене
-    print("✔ TEST 29 каналы по цене и по фону: фон в приоритете, иначе по цене, иначе общий")
+    assert st.route_chat(7000) == (-100999, None)   # маршрутов нет → общий
+    # маршрут по фону (в тему 67) — в приоритете над ценой
+    st.price_routes = config._price_routes("5000-:-100/64")
+    st.backdrop_routes = config._backdrop_routes("Black:-100/67")
+    assert st.route_chat(9000, "Black Velvet") == (-100, 67)   # чёрный фон → своя тема, не 5000+
+    assert st.route_chat(9000, "Blue") == (-100, 64)           # не чёрный → по цене
+    print("✔ TEST 29 каналы/темы по цене и фону: фон в приоритете, иначе по цене, иначе общий")
 
 
 def test_28_russian_detection_softened():

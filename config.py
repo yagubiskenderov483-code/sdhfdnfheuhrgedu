@@ -57,33 +57,42 @@ def _str_list(v: str | None) -> list[str]:
     return [p.strip() for p in (v or "").replace(";", ",").split(",") if p.strip()]
 
 
-def _price_routes(v: str | None) -> list[tuple[int, int | None, int]]:
-    """Разбор PRICE_ROUTES: 'lo-hi:chat_id' через запятую. hi пустой = без верхней границы.
-    Пример: '0-1000:-1001,1000-5000:-1002,5000-:-1003'. Цена в Stars. Пустая строка — маршрутов нет."""
-    routes: list[tuple[int, int | None, int]] = []
+def _chat_thread(s: str) -> tuple[int, int | None]:
+    """'-1004297759767' или '-1004297759767/67' → (chat_id, thread_id|None).
+    Тема (topic) форум-группы: число после / — это ID темы из ссылки t.me/c/<...>/<thread>."""
+    chat_s, _, thread_s = s.strip().partition("/")
+    return int(chat_s), (int(thread_s) if thread_s.strip() else None)
+
+
+def _price_routes(v: str | None) -> list[tuple[int, int | None, int, int | None]]:
+    """Разбор PRICE_ROUTES: 'lo-hi:chat[/topic]' через запятую. hi пустой = без верхней границы.
+    Пример: '250-1000:-100..,5000-:-100../67'. Цена в Stars. Пустая строка — маршрутов нет."""
+    routes: list[tuple[int, int | None, int, int | None]] = []
     for part in (v or "").replace(";", ",").split(","):
         part = part.strip()
         if not part:
             continue
-        rng, _, chat = part.partition(":")
+        rng, _, dest = part.partition(":")
         lo_s, _, hi_s = rng.partition("-")
         lo = int(lo_s or 0)
         hi = int(hi_s) if hi_s.strip() else None
-        routes.append((lo, hi, int(chat)))
+        chat, thread = _chat_thread(dest)
+        routes.append((lo, hi, chat, thread))
     return routes
 
 
-def _backdrop_routes(v: str | None) -> list[tuple[str, int]]:
-    """Разбор BACKDROP_ROUTES: 'название_фона:chat_id' через запятую. Совпадение по подстроке.
-    Пример: 'Black:-1001,Gold:-1002'. Пустая строка — маршрутов по фону нет."""
-    routes: list[tuple[str, int]] = []
+def _backdrop_routes(v: str | None) -> list[tuple[str, int, int | None]]:
+    """Разбор BACKDROP_ROUTES: 'название_фона:chat[/topic]' через запятую. Совпадение по подстроке.
+    Пример: 'Black:-100../67'. Пустая строка — маршрутов по фону нет."""
+    routes: list[tuple[str, int, int | None]] = []
     for part in (v or "").replace(";", ",").split(","):
         part = part.strip()
         if not part:
             continue
-        name, _, chat = part.rpartition(":")
+        name, _, dest = part.rpartition(":")
         if name.strip():
-            routes.append((name.strip(), int(chat)))
+            chat, thread = _chat_thread(dest)
+            routes.append((name.strip(), chat, thread))
     return routes
 
 
@@ -173,18 +182,18 @@ class Settings:
         p = Path(rel)
         return p if p.is_absolute() else BASE_DIR / p
 
-    def route_chat(self, stars: int | None, backdrop: str | None = None) -> int:
-        """Канал для лота: сначала по фону (тема), затем по цене, иначе общий канал."""
+    def route_chat(self, stars: int | None, backdrop: str | None = None) -> tuple[int, int | None]:
+        """Куда слать лот → (chat_id, thread_id): сначала по фону, затем по цене, иначе общий канал."""
         if backdrop:
             bl = backdrop.lower()
-            for name, chat in self.backdrop_routes:
+            for name, chat, thread in self.backdrop_routes:
                 if name.lower() in bl:
-                    return chat
+                    return chat, thread
         if stars is not None:
-            for lo, hi, chat in self.price_routes:
+            for lo, hi, chat, thread in self.price_routes:
                 if stars >= lo and (hi is None or stars < hi):
-                    return chat
-        return self.target_chat_id
+                    return chat, thread
+        return self.target_chat_id, None
 
     def public_view(self) -> dict[str, Any]:
         """Настройки без секретов — для /settings."""
