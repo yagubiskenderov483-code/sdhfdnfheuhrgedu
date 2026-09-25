@@ -183,6 +183,9 @@ class MarketplaceCoordinator:
         th = settings.collection_min_floor
         gid = st.gift_id
         if th <= 0:
+            if (gid in self.skipped) and st.synced:
+                st.needs_full_sync = True   # включаем ранее пропущенную → сперва тихий ре-синк
+                self._due[gid] = 0.0
             self.skipped.discard(gid)
             self.low_prio.discard(gid)
             return False
@@ -203,6 +206,11 @@ class MarketplaceCoordinator:
         else:
             self.low_prio.discard(gid)
         if was_skipped:
+            # Пока коллекция была пропущена, рынок жил — её complete-база устарела. Нельзя сразу слать
+            # то, что накопилось (иначе смена порога = выброс старых лотов как «новых»). Заставляем
+            # сначала тихую полную ре-синхронизацию, и только потом идут по-настоящему новые лоты.
+            if st.synced:
+                st.needs_full_sync = True
             self._due[gid] = 0.0
         return False
 

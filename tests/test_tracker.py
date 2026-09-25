@@ -756,6 +756,41 @@ async def test_26_floor_is_single_threshold():
     print("✔ TEST 26 один порог: флор 3000 → лоты от 3000 идут, ниже — отсеиваются")
 
 
+async def test_27_reinclude_after_skip_no_burst():
+    """Коллекцию, которую какое-то время не читали (была пропущена по порогу), при повторном
+    включении нельзя сразу вываливать: сперва тихая ре-синхронизация, только потом новые лоты."""
+    import time as _t
+    reset_settings()
+    settings.collection_min_floor, settings.collection_floor_mode = 3000, "skip"
+    tmp = Path(tempfile.mkdtemp())
+    market = FakeMarket()
+    market.floors = {GID: 6000}
+    for _ in range(20):
+        market.list_new(market.item(9000))
+    patch_market(market)
+    e = await Env(tmp, market).boot()
+    st = e.coord.states[GID]
+    assert st.synced and st.complete and GID not in e.coord.skipped
+    # флор упал ниже порога → коллекция пропущена
+    market.floors[GID] = 500
+    await e.coord.refresh_catalog()
+    assert GID in e.coord.skipped
+    # пока пропущена — на рынок пришли лоты
+    for _ in range(5):
+        market.list_new(market.item(9000))
+    # флор вернулся → коллекция снова включается
+    market.floors[GID] = 6000
+    await e.coord.refresh_catalog()
+    assert GID not in e.coord.skipped and st.needs_full_sync, "повторное включение должно требовать ре-синк"
+    await e.poll()                                   # тихая полная ре-синхронизация, НИЧЕГО не слать
+    assert e.pipe.stats["new"] == 0 and not e.sender.sent, "накопившееся за простой — не новое"
+    market.list_new(market.item(9000))               # вот теперь по-настоящему новый
+    await e.poll()
+    assert e.pipe.stats["new"] == 1 and len(e.sender.sent) == 1
+    await e.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 27 повторное включение после пропуска: тихий ре-синк, старое не улетает как новое")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
@@ -764,7 +799,8 @@ async def run() -> None:
               test_14_ton_rate_changes, test_16_market_snapshot_redeploy, test_17_hot_cold_schedule,
               test_18_pause, test_19_floor_filter, test_21_ton_priced_lots,
               test_22_log_regressions, test_23_cheap_collections_slow, test_24_partial_collection,
-              test_25_post_deploy_baseline, test_26_floor_is_single_threshold):
+              test_25_post_deploy_baseline, test_26_floor_is_single_threshold,
+              test_27_reinclude_after_skip_no_burst):
         await t()
     test_15_seller_rules()
     test_20_proxies()
