@@ -209,6 +209,7 @@ SETTING_DESC: dict[str, str] = {
     "TEST_MODE": "тестовый режим: не слать в канал (true/false)",
     "ALLOW_ALL_USERS": "разрешить командовать ботом всем (true/false)",
     "FETCH_FULL_SELLER": "запрашивать профиль продавца для фильтров (true/false)",
+    "PRICE_ROUTES": "каналы по цене: lo-hi:ID через запятую (пусто = один общий канал)",
 }
 SETTING_GROUPS: list[tuple[str, list[str]]] = [
     ("🎯 Фильтр цены", ["COLLECTION_MIN_FLOOR", "MIN_STARS", "MIN_TON", "ALLOW_TON_ONLY"]),
@@ -219,6 +220,7 @@ SETTING_GROUPS: list[tuple[str, list[str]]] = [
     ("⚡ Скорость", ["CATALOG_INTERVAL", "COLD_POLL_INTERVAL", "TRACKER_INTERVAL", "PAGE_LIMIT",
                     "SESSION_RPS", "GLOBAL_RPS", "MAX_CONCURRENT_SESSIONS", "LOW_PRIORITY_POLL_INTERVAL"]),
     ("⚙️ Прочее", ["COLLECTION_FLOOR_MODE", "TEST_MODE", "ALLOW_ALL_USERS", "FETCH_FULL_SELLER"]),
+    ("📢 Каналы по цене", ["PRICE_ROUTES"]),
 ]
 
 
@@ -230,7 +232,11 @@ def _filters_help() -> str:
         lines.append(f"<b>{title}</b>")
         for k in keys:
             attr = RUNTIME_KEYS[k][0]
-            cur = html.escape(str(getattr(settings, attr, "?")))
+            val = getattr(settings, attr, "?")
+            if k == "PRICE_ROUTES":
+                val = (", ".join(f"{lo}-{hi if hi is not None else ''}→{chat}"
+                                 for lo, hi, chat in val) or "не задано (один канал)")
+            cur = html.escape(str(val))
             desc = SETTING_DESC.get(k, "")
             lines.append(f"<code>{k}</code> = <b>{cur}</b>\n  <i>{desc}</i>")
         lines.append("")

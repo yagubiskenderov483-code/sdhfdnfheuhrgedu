@@ -57,6 +57,22 @@ def _str_list(v: str | None) -> list[str]:
     return [p.strip() for p in (v or "").replace(";", ",").split(",") if p.strip()]
 
 
+def _price_routes(v: str | None) -> list[tuple[int, int | None, int]]:
+    """Разбор PRICE_ROUTES: 'lo-hi:chat_id' через запятую. hi пустой = без верхней границы.
+    Пример: '0-1000:-1001,1000-5000:-1002,5000-:-1003'. Цена в Stars. Пустая строка — маршрутов нет."""
+    routes: list[tuple[int, int | None, int]] = []
+    for part in (v or "").replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        rng, _, chat = part.partition(":")
+        lo_s, _, hi_s = rng.partition("-")
+        lo = int(lo_s or 0)
+        hi = int(hi_s) if hi_s.strip() else None
+        routes.append((lo, hi, int(chat)))
+    return routes
+
+
 @dataclass
 class Settings:
     # --- Telegram / секреты ---
@@ -64,6 +80,7 @@ class Settings:
     api_hash: str = ""
     bot_token: str = ""
     target_chat_id: int = 0
+    price_routes: list[tuple[int, int | None, int]] = field(default_factory=list)  # каналы по диапазону цены
     admin_ids: set[int] = field(default_factory=set)
     allow_all_users: bool = True
 
@@ -141,6 +158,14 @@ class Settings:
         p = Path(rel)
         return p if p.is_absolute() else BASE_DIR / p
 
+    def route_chat(self, stars: int | None) -> int:
+        """Канал для лота по его цене (Stars). Если маршрутов нет или ни один не подошёл — общий канал."""
+        if stars is not None:
+            for lo, hi, chat in self.price_routes:
+                if stars >= lo and (hi is None or stars < hi):
+                    return chat
+        return self.target_chat_id
+
     def public_view(self) -> dict[str, Any]:
         """Настройки без секретов — для /settings."""
         hidden = {"api_hash", "bot_token", "session_backup_key"}
@@ -160,6 +185,7 @@ class Settings:
 # Ключи, которые можно менять из бота командой /set KEY VALUE
 RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "MIN_STARS": ("min_stars", lambda v: int(v)),
+    "PRICE_ROUTES": ("price_routes", _price_routes),
     "COLLECTION_MIN_FLOOR": ("collection_min_floor", lambda v: max(0, int(v))),
     "COLLECTION_FLOOR_MODE": ("collection_floor_mode", lambda v: v.strip().lower()),
     "LOW_PRIORITY_POLL_INTERVAL": ("low_priority_poll_interval", lambda v: max(5.0, float(v))),
@@ -196,6 +222,7 @@ def _from_env() -> Settings:
         api_hash=(e("API_HASH") or "").strip().strip('"'),
         bot_token=(e("BOT_TOKEN") or "").strip().strip('"'),
         target_chat_id=_int(e("TARGET_CHAT_ID"), 0),
+        price_routes=_price_routes(e("PRICE_ROUTES")),
         admin_ids=_int_set(e("ADMIN_IDS")),
         allow_all_users=_bool(e("ALLOW_ALL_USERS"), True),
         min_stars=_int(e("MIN_STARS"), 5000),

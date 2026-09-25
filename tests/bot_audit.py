@@ -105,8 +105,8 @@ async def run():
         return await fn(None), "session_001"
     app.sessions.run = fake_run
     fsend = t.FakeSender()
-    async def capture(text, preview, markup=None, fallback_markup=None):
-        check_html(text, "LISTING POST"); return await fsend.send_listing(text, preview, markup, fallback_markup)
+    async def capture(text, preview, markup=None, fallback_markup=None, target=None):
+        check_html(text, "LISTING POST"); return await fsend.send_listing(text, preview, markup, fallback_markup, target)
     app.pipeline.sender.send_listing = capture
     await app.start()
     await asyncio.sleep(1.5)

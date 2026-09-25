@@ -41,7 +41,8 @@ class TelegramSender:
 
     async def send_listing(self, text: str, preview_url: str | None,
                            markup: InlineKeyboardMarkup | None = None,
-                           fallback_markup: InlineKeyboardMarkup | None = None) -> SendResult:
+                           fallback_markup: InlineKeyboardMarkup | None = None,
+                           target: int | None = None) -> SendResult:
         if settings.test_mode:
             chat = self._test_chat()
             if chat is None or self.test_sent >= settings.test_max_messages:
@@ -51,7 +52,8 @@ class TelegramSender:
             res = await self.send(chat, "🧪 <b>TEST MODE</b>\n" + text, preview_url, markup, fallback_markup)
             res.test_only = True
             return res
-        return await self.send(settings.target_chat_id, text, preview_url, markup, fallback_markup)
+        # target — канал по цене (PRICE_ROUTES); если не задан, общий TARGET_CHAT_ID
+        return await self.send(target or settings.target_chat_id, text, preview_url, markup, fallback_markup)
 
     async def send(self, chat_id: int, text: str, preview_url: str | None = None,
                    markup: InlineKeyboardMarkup | None = None,

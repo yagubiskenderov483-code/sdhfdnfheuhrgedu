@@ -364,7 +364,8 @@ class ListingPipeline:
         res = None
         try:
             res = await self.sender.send_listing(text, l.gift_link, listing_keyboard(l),
-                                                 listing_keyboard(l, with_seller=False))
+                                                 listing_keyboard(l, with_seller=False),
+                                                 target=settings.route_chat(l.stars_price))
             if res.ok:
                 l.sent = not res.test_only
                 l.message_id = res.message_id
