@@ -143,8 +143,10 @@ class App:
         # 1) бот отвечает на команды СРАЗУ, ещё до долгого запуска трекера
         if run_bot:
             init_claim_code()
+            await self._drop_webhook("startup")
             self._tasks.append(asyncio.create_task(
                 self.dp.start_polling(self.bot, handle_signals=False), name="admin-bot"))
+            self._tasks.append(asyncio.create_task(self._webhook_guard(), name="webhook-guard"))
             await self._set_menu()
         # 2) всё остальное — в фоне; ошибка любого шага не роняет бота
         self._tasks.append(asyncio.create_task(self._boot(run_bot), name="boot"))
@@ -208,6 +210,41 @@ class App:
             await self.bot.set_my_commands(cmds)
         except Exception as e:
             log.warning("setMyCommands failed: %s", e)
+
+    async def _drop_webhook(self, why: str) -> str | None:
+        """Бот работает через getUpdates. Если кто-то включил вебхук с тем же токеном, команды
+        перестают доходить (Conflict: terminated by setWebhook request). Снимаем вебхук."""
+        try:
+            info = await self.bot.get_webhook_info()
+            url = info.url or ""
+            if url:
+                await self.bot.delete_webhook(drop_pending_updates=False)
+                log.warning("Webhook %s was set by ANOTHER program using this bot token (%s) — removed. "
+                            "Stop that program, otherwise it will keep stealing bot commands.", url, why)
+                return url
+        except Exception as e:
+            log.warning("Webhook check failed: %s", e)
+        return None
+
+    async def _webhook_guard(self) -> None:
+        """Раз в минуту проверяем, не включил ли кто-то вебхук; при первом случае пишем админам."""
+        warned: set[str] = set()
+        while True:
+            await asyncio.sleep(60)
+            url = await self._drop_webhook("guard")
+            if url:
+                host = re.sub(r"^https?://([^/]+).*$", r"\1", url)
+                if host not in warned:
+                    warned.add(host)
+                    for chat in all_admins():
+                        try:
+                            await self.bot.send_message(
+                                chat, "⚠️ Другая программа использует токен этого бота и включила вебхук "
+                                      f"(<code>{html.escape(host)}</code>). Из-за этого бот переставал отвечать "
+                                      "на команды. Я его снял, но она включит его снова — остановите её "
+                                      "(например, второй бот с этим токеном на Bothost) или смените токен.")
+                        except Exception:
+                            pass
 
     async def _backup_loop(self) -> None:
         """История отправленного — раз в 10 мин (если что-то отправлено);

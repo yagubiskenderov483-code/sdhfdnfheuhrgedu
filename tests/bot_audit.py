@@ -35,6 +35,8 @@ async def fake_call(self, method, request_timeout=None):
     if isinstance(method, methods.SendDocument):
         return Message(message_id=len(sent), date=now, chat=Chat(id=method.chat_id, type="private"),
                        document={"file_id": f"f{len(sent)}", "file_unique_id": "u", "file_name": "x"})
+    if isinstance(method, methods.GetWebhookInfo):
+        return NS(url="https://other.example/hook")
     if isinstance(method, methods.GetMyDescription):
         return NS(description="")
     if isinstance(method, methods.GetUpdates):
