@@ -71,6 +71,7 @@ class MarketplaceCoordinator:
         self._tasks: list[asyncio.Task] = []
         self._sync_retry_at: dict[int, float] = {}
         self._hot_since: dict[int, float] = {}
+        self.paused = False
         self.hot_latency: float | None = None     # сек от изменения счётчика в каталоге до опроса коллекции
         self._stop = asyncio.Event()
         self.stats = {"scanned": 0, "polls": 0, "poll_errors": 0, "silent": 0, "price_moves": 0,
@@ -119,6 +120,7 @@ class MarketplaceCoordinator:
 
     # ------------------------------------------------------------------ catalog
     async def refresh_catalog(self) -> None:
+        await self._wait_if_paused()
         catalog, _ = await self.sessions.run(fetch_catalog)
         self.last_catalog_at = time.time()
         added, hot = 0, 0
@@ -168,7 +170,18 @@ class MarketplaceCoordinator:
                 out[n] = out.get(n, 0) + 1
         return out
 
+    async def _wait_if_paused(self) -> None:
+        while self.paused and not self._stop.is_set():
+            await asyncio.sleep(1)
+
+    async def set_paused(self, paused: bool) -> None:
+        """/pause и /resume: пока на паузе, трекер не делает ни одного запроса к Telegram."""
+        self.paused = paused
+        await self.db.kv_set("paused", int(paused))
+        log.info("Tracker %s", "PAUSED ⏸ — no Telegram requests" if paused else "RESUMED ▶️")
+
     async def _fetch(self, gid: int, offset: str, limit: int):
+        await self._wait_if_paused()
         page, session = await self.sessions.run(lambda c: fetch_resale_page(c, gid, offset, limit),
                                                 prefer=self.shard_owner(gid))
         self.stats["scanned"] += len(page.items)
@@ -363,6 +376,9 @@ class MarketplaceCoordinator:
     async def start(self) -> None:
         self.mode = TrackerMode.INITIALIZING
         await self._load_state()
+        self.paused = (await self.db.kv_get("paused", "0")) == "1"
+        if self.paused:
+            log.info("Tracker is PAUSED ⏸ (use /resume)")
         await self.pipeline.resume_unfinished()
         await self._wait_for_sessions()
         log.info("Marketplace tracker started")
@@ -438,6 +454,9 @@ class MarketplaceCoordinator:
 
     async def _sync_loop(self) -> None:
         while not self._stop.is_set():
+            if self.paused:
+                await asyncio.sleep(1)
+                continue
             try:
                 pending = self._pending_sync()
                 if pending:
@@ -478,6 +497,9 @@ class MarketplaceCoordinator:
     # ------------------------------------------------------------------ loops
     async def _live_loop(self) -> None:
         while not self._stop.is_set():
+            if self.paused:
+                await asyncio.sleep(0.5)
+                continue
             now = time.monotonic()
             capacity = max(1, min(settings.max_concurrent_sessions, max(1, len(self.sessions.usable()))))
             due = sorted((t, gid) for gid, t in self._due.items()
@@ -520,6 +542,8 @@ class MarketplaceCoordinator:
     async def _catalog_loop(self) -> None:
         while not self._stop.is_set():
             await asyncio.sleep(settings.catalog_interval)
+            if self.paused:
+                continue
             try:
                 await self.refresh_catalog()
             except Exception as e:

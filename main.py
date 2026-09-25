@@ -50,6 +50,7 @@ class App:
                                     history_import=lambda rows: self.db.import_sent_history(rows))
         self.backup.market_export = self.db.export_market_snapshot
         self.backup.market_import = self.db.import_market_snapshot
+        self.backup.paused_getter = lambda: self.coordinator.paused
         self.formatter = MessageFormatter(settings.path(settings.template_path))
         self.price_filter = PriceFilter()
         self.seller_filter = SellerFilter(settings.path("data"))
@@ -120,6 +121,8 @@ class App:
         # после деплоя папка telegram_sessions/ может быть пустой → восстановить из Telegram
         await self.backup.restore()
         await self.backup.restore_market()    # снимок рынка → без долгой полной синхронизации
+        if self.backup.restored_paused:
+            await self.db.kv_set("paused", 1)  # пауза, поставленная до деплоя, сохраняется
         await self.sessions.start_all()
         await self.backup.sync_if_needed()   # например, sessions положены в папку вручную
         if run_bot:
@@ -140,6 +143,8 @@ class App:
             BotCommand(command="sessions", description="Мои аккаунты / удалить"),
             BotCommand(command="status", description="Состояние трекера"),
             BotCommand(command="stats", description="Статистика"),
+            BotCommand(command="pause", description="Остановить парсинг"),
+            BotCommand(command="resume", description="Продолжить парсинг"),
             BotCommand(command="settings", description="Настройки"),
             BotCommand(command="test", description="Проверка работы"),
             BotCommand(command="cancel", description="Отменить действие"),

@@ -123,6 +123,8 @@ HELP = (
     "/stats — статистика листингов\n"
     "/settings — текущие настройки\n"
     "/set &lt;KEY&gt; &lt;VALUE&gt; — изменить настройку на лету\n"
+    "/pause — остановить парсинг (аккаунты не делают запросов)\n"
+    "/resume — продолжить парсинг\n"
     "/reload — перечитать .env, шаблон, списки продавцов, новые *.session\n"
     "/test — проверка API/фильтров/БД/формата (без рассылки); /test channel — тестовый пост в канал\n"
     "/cancel — отменить текущий диалог"
@@ -223,11 +225,11 @@ def build_routers(app: "App") -> list[Router]:
     async def cmd_status(m: Message) -> None:
         c = app.sessions.counts()
         coord, pipe = app.coordinator, app.pipeline
-        running = coord.mode == "LIVE"
+        running = coord.mode == "LIVE" and not coord.paused
         icon = "🟢" if running else ("🟡" if coord.mode in ("INITIALIZING", "INITIAL_SYNC", "RECOVERY") else "🔴")
         cycle = coord.avg_cycle_seconds()
         text = (
-            f"{icon} TRACKER: {'RUNNING' if running else coord.mode}\n"
+            f"{icon} TRACKER: {'⏸ PAUSED (/resume)' if coord.paused else ('RUNNING' if running else coord.mode)}\n"
             f"👥 Sessions: {len(app.sessions.workers)}\n"
             f"🟢 Active: {c.get('ACTIVE', 0)}\n"
             f"🔴 Errors: {c.get('ERROR', 0) + c.get('AUTH_ERROR', 0)}\n"
@@ -318,6 +320,19 @@ def build_routers(app: "App") -> list[Router]:
             await m.answer("Выберите аккаунт для удаления:\n\n" + text, reply_markup=kb)
             return
         await m.answer(await _remove_session(m.from_user.id, name))
+
+    @admin.message(Command("pause"))
+    async def cmd_pause(m: Message) -> None:
+        await app.coordinator.set_paused(True)
+        await app.backup.save()          # чтобы пауза сохранилась и после деплоя
+        await m.answer("⏸ Парсинг остановлен: трекер не делает запросов к Telegram, аккаунты отдыхают.\n"
+                       "Продолжить: /resume")
+
+    @admin.message(Command("resume"))
+    async def cmd_resume(m: Message) -> None:
+        await app.coordinator.set_paused(False)
+        await app.backup.save()
+        await m.answer("▶️ Парсинг продолжен.")
 
     @admin.message(Command("reload"))
     async def cmd_reload(m: Message) -> None:

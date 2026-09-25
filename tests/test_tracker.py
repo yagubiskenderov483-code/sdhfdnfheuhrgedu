@@ -512,12 +512,29 @@ async def test_17_hot_cold_schedule():
     print("✔ TEST 17 без изменений — опрос раз в 20с; изменился счётчик в каталоге — опрос сразу")
 
 
+async def test_18_pause():
+    e, tmp = await fresh(20)
+    await e.coord.set_paused(True)
+    before = e.coord.stats["scanned"]
+    e.market.list_new(e.market.item(9000))
+    task = asyncio.create_task(e.poll())
+    await asyncio.sleep(1.5)
+    assert not task.done() and e.coord.stats["scanned"] == before, "на паузе запросов нет"
+    await e.coord.set_paused(False)
+    await asyncio.wait_for(task, 5)
+    assert e.pipe.stats["new"] == 1
+    assert await e.db.kv_get("paused") == "0"
+    await e.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 18 /pause — ни одного запроса к Telegram; /resume — продолжает с того же места")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
               test_8_seller_change, test_9_burst_500, test_10_no_anchor, test_11_filters_and_repeats,
               test_12_count_mismatch_and_backup_fallback, test_13_backup_survives_deploy,
-              test_14_ton_rate_changes, test_16_market_snapshot_redeploy, test_17_hot_cold_schedule):
+              test_14_ton_rate_changes, test_16_market_snapshot_redeploy, test_17_hot_cold_schedule,
+              test_18_pause):
         await t()
     test_15_seller_rules()
     print("\nALL TESTS PASSED")

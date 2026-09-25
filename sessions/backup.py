@@ -99,6 +99,8 @@ class SessionBackup:
         self._ptr: dict | None = None
         self.market_export: Callable[[], Awaitable[dict]] | None = None
         self.market_import: Callable[[dict], Awaitable[int]] | None = None
+        self.paused_getter: Callable[[], bool] | None = None
+        self.restored_paused: bool = False
 
     # ------------------------------------------------------------------ pointer (bot description)
     async def _read_pointer(self) -> dict:
@@ -158,7 +160,8 @@ class SessionBackup:
                 history = await self._history_export()
             except Exception as e:
                 log.warning("Sent history export failed: %s", e)
-        payload = {"v": 2, "sessions": items, "admins": sorted(self._admins()), "sent": history}
+        payload = {"v": 2, "sessions": items, "admins": sorted(self._admins()), "sent": history,
+                   "paused": bool(self.paused_getter()) if self.paused_getter else False}
         blob = f.encrypt(json.dumps(payload).encode())
 
         if self._last_chat is None:
@@ -216,6 +219,7 @@ class SessionBackup:
             log.error("Backup download failed: %s", e)
             return 0
 
+        self.restored_paused = bool(data.get("paused"))
         if self._set_admins and data.get("admins"):
             self._set_admins(set(int(a) for a in data["admins"]))
         if self._history_import and data.get("sent"):
