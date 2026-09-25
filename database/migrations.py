@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -113,5 +113,5 @@ REQUIRED_COLUMNS: dict[str, set[str]] = {
     "listings": {"listing_id", "gift_unique_id", "gift_id", "seller_key", "status", "sent", "sent_at",
                  "first_seen"},
     "market_items": {"unique_id", "gift_id", "seller_key", "stars", "ton_nano", "listing_id", "state"},
-    "collection_state": {"gift_id", "synced", "complete", "last_cursor"},
+    "collection_state": {"gift_id", "synced", "complete", "last_cursor", "partial", "last_count"},
 }
