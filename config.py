@@ -95,7 +95,7 @@ class Settings:
     live_max_pages: int = 5
     recovery_max_pages: int = 20
     catalog_interval: float = 3.0            # как часто смотреть счётчики лотов всех коллекций (1 запрос)
-    cold_poll_interval: float = 20.0         # коллекция без изменений счётчика — страховочный опрос раз в N сек
+    cold_poll_interval: float = 10.0         # коллекция без изменений счётчика — страховочный опрос раз в N сек
     market_backup_minutes: float = 30.0      # как часто сохранять снимок рынка в Telegram
     market_snapshot_max_age_hours: float = 6.0
     collections: list[str] = field(default_factory=list)   # пусто = все коллекции
@@ -203,7 +203,7 @@ def _from_env() -> Settings:
         require_free_messages=_bool(e("REQUIRE_FREE_MESSAGES"), True),
         max_seller_nfts=max(0, _int(e("MAX_SELLER_NFTS"), 12)),
         max_seller_level=max(0, _int(e("MAX_SELLER_LEVEL"), 5)),
-        cold_poll_interval=max(1.0, _float(e("COLD_POLL_INTERVAL"), 20.0)),
+        cold_poll_interval=max(1.0, _float(e("COLD_POLL_INTERVAL"), 10.0)),
         market_backup_minutes=max(5.0, _float(e("MARKET_BACKUP_MINUTES"), 30.0)),
         market_snapshot_max_age_hours=max(0.5, _float(e("MARKET_SNAPSHOT_MAX_AGE_HOURS"), 6.0)),
         unique_sellers=_bool(e("UNIQUE_SELLERS"), True),
