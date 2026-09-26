@@ -88,7 +88,7 @@ async def run():
     from utils.logger import setup_logging; setup_logging(Path(tempfile.mkdtemp()), "WARNING")
     tmp = Path(tempfile.mkdtemp())
     settings.database_path = str(tmp / "db.sqlite"); settings.sessions_dir = str(tmp / "s")
-    settings.startup_delay = 0; settings.admin_ids = set()
+    settings.startup_delay = 0; settings.admin_ids = set(); settings.allow_all_users = True
     admin_mod.ADMINS_FILE = tmp / "admins.json"
     market = t.FakeMarket(); market.floors = {1: 6000}
     for _ in range(30): market.list_new(market.item())

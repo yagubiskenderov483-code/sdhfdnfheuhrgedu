@@ -71,6 +71,8 @@ def is_manager(uid: int | None) -> bool:
     а НЕ автоматически первому написавшему: иначе любой чужой первым сообщением стал бы админом."""
     if not uid:
         return False
+    if settings.admin_ids:                 # ADMIN_IDS задан — управляют ТОЛЬКО они
+        return uid in settings.admin_ids
     return uid in all_admins() or uid in _owner_ids_getter()
 
 
@@ -93,6 +95,8 @@ MAIN_KB = ReplyKeyboardMarkup(keyboard=[
 
 
 def is_allowed(user_id: int | None) -> bool:
+    if settings.admin_ids:                 # ADMIN_IDS задан — бот-панель только у них, остальным подписка
+        return bool(user_id) and user_id in settings.admin_ids
     return bool(user_id) and (settings.allow_all_users or user_id in all_admins())
 
 
@@ -269,6 +273,8 @@ def build_routers(app: "App") -> list[Router]:
             if not app.sessions.usable():
                 await m.answer("⚠️ Нет ни одного авторизованного аккаунта — трекер не работает.\n"
                                "Нажмите /add_session: нужен только номер телефона и код.")
+        elif getattr(app, "sub_welcome", None):
+            await app.sub_welcome(m)           # обычные пользователи — приветствие и подписка
         else:
             await m.answer(f"Ваш Telegram ID: <code>{m.from_user.id if m.from_user else '?'}</code>\n"
                            "Доступ только для администраторов.")

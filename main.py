@@ -23,7 +23,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import BotCommand
 
-from bot.admin import all_admins, build_routers, init_claim_code, save_admins
+from bot.admin import all_admins, build_routers, init_claim_code, is_manager, save_admins
+from bot.subscription import Subscriptions, build_sub_router
 from bot.formatter import MessageFormatter
 from bot.sender import TelegramSender
 from config import settings
@@ -80,8 +81,16 @@ class App:
                                         self.price_filter, self.seller_filter)
         self.coordinator = MarketplaceCoordinator(self.db, self.sessions, self.pipeline)
         self.dp = Dispatcher(storage=MemoryStorage())
+        self.subs = Subscriptions(self)
+        sub_router, sub_tail = build_sub_router(self, self.subs, is_manager)
+        self.sub_welcome = sub_router.welcome
+        self.subs.on_change = lambda: self.backup.save()
+        self.backup.subs_export = self.subs.export
+        self.backup.subs_import = self.subs.import_
+        self.dp.include_router(sub_router)
         for r in build_routers(self):
             self.dp.include_router(r)
+        self.dp.include_router(sub_tail)      # последним: всё прочее от не-админов → приветствие
         self._tasks: list[asyncio.Task] = []
         self.booting = True          # аккаунты ещё подключаются после запуска
 
@@ -146,7 +155,10 @@ class App:
             init_claim_code()
             await self._drop_webhook("startup")
             self._tasks.append(asyncio.create_task(
-                self.dp.start_polling(self.bot, handle_signals=False), name="admin-bot"))
+                self.dp.start_polling(self.bot, handle_signals=False,
+                                      allowed_updates=self.dp.resolve_used_update_types()),
+                name="admin-bot"))
+            self._tasks.append(asyncio.create_task(self.subs.run(), name="subscriptions"))
             self._tasks.append(asyncio.create_task(self._webhook_guard(), name="webhook-guard"))
             await self._set_menu()
         # 2) всё остальное — в фоне; ошибка любого шага не роняет бота

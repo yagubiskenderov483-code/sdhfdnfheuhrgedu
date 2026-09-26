@@ -113,6 +113,8 @@ class SessionBackup:
         self.market_export: Callable[[], Awaitable[dict]] | None = None
         self.market_import: Callable[[dict], Awaitable[int]] | None = None
         self.paused_getter: Callable[[], bool] | None = None
+        self.subs_export: Callable[[], dict] | None = None
+        self.subs_import: Callable[[dict], Awaitable[int]] | None = None
         self.restored_paused: bool = False
 
     # ------------------------------------------------------------------ pointer (bot description)
@@ -196,7 +198,8 @@ class SessionBackup:
         payload = {"v": 2, "sessions": items, "admins": sorted(self._admins()), "sent": history,
                    "proxies": self.storage.load_pool(),
                    "settings": export_runtime_overrides(),
-                   "paused": bool(self.paused_getter()) if self.paused_getter else False}
+                   "paused": bool(self.paused_getter()) if self.paused_getter else False,
+                   "subs": self.subs_export() if self.subs_export else {}}
         blob = f.encrypt(json.dumps(payload).encode())
 
         if self._last_chat is None:
@@ -301,6 +304,12 @@ class SessionBackup:
             except Exception as e:
                 log.warning("Sent history import failed: %s", e)
 
+        if self.subs_import and data.get("subs"):
+            try:
+                n = await self.subs_import(data["subs"])
+                log.info("Restored %s subscriber(s) from backup", n)
+            except Exception as e:
+                log.warning("Subscriptions import failed: %s", e)
         if data.get("settings"):
             import_runtime_overrides(data["settings"])     # /set-настройки переживают деплой
             log.info("Restored settings changed via /set: %s", ", ".join(sorted(data["settings"])))

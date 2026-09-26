@@ -130,6 +130,10 @@ class Settings:
     backdrop_routes: list[tuple[str, int]] = field(default_factory=list)  # каналы по фону подарка (тема)
     admin_ids: set[int] = field(default_factory=set)
     allow_all_users: bool = True
+    # --- подписка на канал (оплата TON) ---
+    sub_chat_id: int = 0                 # куда пускать подписчиков (0 = TARGET_CHAT_ID)
+    sub_ton_address: str = ""            # кошелёк для оплаты
+    toncenter_api_key: str = ""          # необязательно: снимает лимит 1 запрос/сек у toncenter
 
     # --- фильтр цены ---
     min_stars: int = 5000
@@ -280,6 +284,9 @@ def _from_env() -> Settings:
         backdrop_routes=_backdrop_routes(e("BACKDROP_ROUTES")),
         admin_ids=_int_set(e("ADMIN_IDS")),
         allow_all_users=_bool(e("ALLOW_ALL_USERS"), True),
+        sub_chat_id=_int(e("SUB_CHAT_ID"), 0),
+        sub_ton_address=(e("SUB_TON_ADDRESS") or "").strip(),
+        toncenter_api_key=(e("TONCENTER_API_KEY") or "").strip(),
         min_stars=_int(e("MIN_STARS"), 5000),
         collection_min_floor=max(0, _int(e("COLLECTION_MIN_FLOOR"), 4500)),
         collection_floor_mode=(e("COLLECTION_FLOOR_MODE") or "skip").strip().lower(),
