@@ -746,22 +746,11 @@ def build_routers(app: "App") -> list[Router]:
                                   connection_retries=1, timeout=10,
                                   device_model="GiftTracker", system_version="1.0", app_version="1.0")
 
-        client = _mk(proxy)
+        # Вход (код) всегда напрямую — через прокси это медленно и часто висит.
+        # Прокси сохраняется за аккаунтом и используется потом для работы трекера.
+        client = _mk(None)
         try:
-            try:
-                await asyncio.wait_for(client.connect(), 20)
-            except Exception as e:
-                if not proxy:
-                    raise
-                # прокси мёртвый/не пускает — входим напрямую, чтобы добавление не зависало
-                log.warning("Login via proxy failed (%s) — retrying without proxy", type(e).__name__)
-                try:
-                    await client.disconnect()
-                except Exception:
-                    pass
-                proxy = None
-                client = _mk(None)
-                await asyncio.wait_for(client.connect(), 20)
+            await asyncio.wait_for(client.connect(), 15)
             sent = await asyncio.wait_for(client.send_code_request(phone), 30)
         except errors.ApiIdInvalidError:
             await client.disconnect(); app.storage.discard(name)
