@@ -92,7 +92,8 @@ class TelegramSender:
                         extra = {}
                         continue
                     # кнопка «Продавец» по ID запрещена приватностью продавца → без этой кнопки
-                    if "BUTTON_USER_PRIVACY_RESTRICTED" in es or "BUTTON_URL_INVALID" in es:
+                    if ("BUTTON_USER_PRIVACY_RESTRICTED" in es or "BUTTON_URL_INVALID" in es
+                            or "BUTTON_USER_INVALID" in es):
                         if fallback_markup is not None and markup is not fallback_markup:
                             markup = fallback_markup
                             continue
