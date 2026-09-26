@@ -468,10 +468,25 @@ def build_routers(app: "App") -> list[Router]:
     @admin.message(Command("proxies"))
     async def cmd_proxies(m: Message, command: CommandObject) -> None:
         """/proxies — список; /proxies + прокси с новой строки — заменить пул и раздать аккаунтам."""
+        arg = (command.args or "").strip().lower()
+        if arg in ("off", "clear", "нет", "-", "выкл", "очистить"):
+            app.storage.save_pool([])                  # очистить пул прокси
+            cleared = 0
+            for r in app.storage.list_sessions():
+                if r.proxy:
+                    app.storage.set_proxy(r.name, None)
+                    w = app.sessions.workers.get(r.name)
+                    if w is not None:
+                        await w.change_proxy(None)
+                    cleared += 1
+            await app.backup.save()
+            await m.answer(f"✅ Пул прокси очищен, прокси снят с {cleared} аккаунт(ов). "
+                           "Все работают напрямую, новые аккаунты тоже без прокси.")
+            return
         new = split_lines(command.args or "")
         if command.args and not new:
             await m.answer("Не распознал ни одного прокси. Формат: socks5://user:pass@host:port "
-                           "или host:port:user:pass — по одному на строку.")
+                           "или host:port:user:pass — по одному на строку. Очистить всё: <code>/proxies off</code>")
             return
         if new:
             await _delete(m)                       # в сообщении логины/пароли прокси
