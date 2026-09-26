@@ -206,6 +206,7 @@ SETTING_DESC: dict[str, str] = {
     "TEST_MODE": "тестовый режим: не слать в канал (true/false)",
     "ALLOW_ALL_USERS": "разрешить командовать ботом всем (true/false)",
     "FETCH_FULL_SELLER": "запрашивать профиль продавца для фильтров (true/false)",
+    "TARGET_CHAT_ID": "общий канал/группа (куда идёт лот, не попавший ни в один маршрут)",
     "PRICE_ROUTES": "каналы/темы по цене: lo-hi:ID или ID/тема через запятую (пусто = один канал)",
     "BACKDROP_ROUTES": "каналы/темы по фону: Название:ID или ID/тема (напр. Black:-100X/67); в приоритете над ценой",
 }
@@ -218,7 +219,7 @@ SETTING_GROUPS: list[tuple[str, list[str]]] = [
     ("⚡ Скорость", ["CATALOG_INTERVAL", "COLD_POLL_INTERVAL", "TRACKER_INTERVAL", "PAGE_LIMIT",
                     "SESSION_RPS", "GLOBAL_RPS", "MAX_CONCURRENT_SESSIONS", "LOW_PRIORITY_POLL_INTERVAL"]),
     ("⚙️ Прочее", ["COLLECTION_FLOOR_MODE", "TEST_MODE", "ALLOW_ALL_USERS", "FETCH_FULL_SELLER"]),
-    ("📢 Каналы по цене", ["PRICE_ROUTES"]),
+    ("📢 Общий и каналы по цене", ["TARGET_CHAT_ID", "PRICE_ROUTES"]),
     ("🎨 Каналы по фону", ["BACKDROP_ROUTES"]),
 ]
 

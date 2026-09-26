@@ -237,6 +237,7 @@ class Settings:
 # Ключи, которые можно менять из бота командой /set KEY VALUE
 RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "MIN_STARS": ("min_stars", lambda v: max(0, int(v))),
+    "TARGET_CHAT_ID": ("target_chat_id", lambda v: int(v)),
     "PRICE_ROUTES": ("price_routes", _price_routes),
     "BACKDROP_ROUTES": ("backdrop_routes", _backdrop_routes),
     "COLLECTION_MIN_FLOOR": ("collection_min_floor", lambda v: max(0, int(v))),
