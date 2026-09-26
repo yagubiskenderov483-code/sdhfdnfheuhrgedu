@@ -146,6 +146,8 @@ async def run():
                                   seller_type="user", seller_id=1, seller_username="abc", seller_profile_link="https://t.me/abc"))
     print("take ->", await click(app, 999, "take:1", kb=kb))
     print("taken ->", await click(app, 998, "taken"))
+    print("untake other ->", await click(app, 998, "untake:999"))
+    print("untake owner ->", await click(app, 999, "untake:999"))
     # 5) удаление аккаунта кнопками
     print("rmsess ->", await click(app, OWNER, "rmsess:session_001"))
     print("rmsess_no ->", await click(app, OWNER, "rmsess_no"))

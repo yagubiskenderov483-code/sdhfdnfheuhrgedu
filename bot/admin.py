@@ -296,7 +296,7 @@ def build_routers(app: "App") -> list[Router]:
             return
         first = kb.inline_keyboard[0][0]
         if first.callback_data != q.data:          # старый пост, уже занят
-            await q.answer(_taken_text(first.text), show_alert=True)
+            await q.answer("Данный лот занят", show_alert=True)
             return
         # атомарно: первый нажавший занимает лот, второй получает отказ
         key = (msg.chat.id, msg.message_id)
@@ -311,7 +311,13 @@ def build_routers(app: "App") -> list[Router]:
         who = f"@{u.username}" if u.username else (u.full_name or str(u.id))
         original = msg.html_text or ""
         links = kb.inline_keyboard[1:]
-        rows = [[InlineKeyboardButton(text=f"Занят · {who}", callback_data="taken")]]
+        rows = [[InlineKeyboardButton(text="Отменить", callback_data=f"untake:{u.id}")]]
+        # запоминаем пост, чтобы занявший мог отменить и вернуть лот в канал
+        try:
+            await app.db.kv_set(f"taken:{key[0]}:{key[1]}", json.dumps(
+                {"uid": u.id, "html": original, "kb": kb.model_dump(mode="json", exclude_none=True)}))
+        except Exception as e:
+            log.warning("Could not save taken lot: %s", e)
         try:
             # в канале от лота остаётся только отметка «занят» — сам лот уходит занявшему в личку
             await msg.edit_text(f"<i>Данный лот занят</i>\n{html.escape(who)}",
@@ -332,9 +338,32 @@ def build_routers(app: "App") -> list[Router]:
 
     @public.callback_query(F.data == "taken")
     async def cb_taken(q: CallbackQuery) -> None:
-        kb = getattr(q.message, "reply_markup", None)
-        text = kb.inline_keyboard[0][0].text if kb and kb.inline_keyboard else ""
-        await q.answer(_taken_text(text), show_alert=True)
+        await q.answer("Данный лот занят", show_alert=True)
+
+    @public.callback_query(F.data.startswith("untake:"))
+    async def cb_untake(q: CallbackQuery) -> None:
+        """«Отменить»: тот, кто занял лот, возвращает его в канал. Остальным — «Данный лот занят»."""
+        msg = q.message
+        owner = int(q.data.split(":", 1)[1] or 0)
+        if q.from_user.id != owner:
+            await q.answer("Данный лот занят", show_alert=True)
+            return
+        kv_key = f"taken:{msg.chat.id}:{msg.message_id}"
+        raw = await app.db.kv_get(kv_key)
+        if not raw:
+            await q.answer("Не получилось вернуть лот: пост слишком старый", show_alert=True)
+            return
+        data = json.loads(raw)
+        try:
+            await msg.edit_text(data["html"], reply_markup=InlineKeyboardMarkup.model_validate(data["kb"]))
+        except Exception as e:
+            log.warning("Untake failed: %s", e)
+            await q.answer("Не получилось вернуть лот", show_alert=True)
+            return
+        await app.db.kv_set(kv_key, None)
+        async with claim_lock:
+            claimed.discard((msg.chat.id, msg.message_id))
+        await q.answer("Вы отменили, лот снова свободен")
 
     @public.message(Command("claim"))
     async def cmd_claim(m: Message, command: CommandObject) -> None:
