@@ -277,13 +277,32 @@ class SessionBackup:
     async def _restore_once(self) -> int:
         f = _fernet()
         ptr = (await self._read_pointer()).get("s")
+        src_bot = self.bot
+        old_bot = None
+        if not ptr and settings.old_bot_token and settings.old_bot_token != settings.bot_token:
+            # сменили токен бота: копия лежит у прошлого бота — забираем её оттуда один раз
+            try:
+                old_bot = Bot(settings.old_bot_token)
+                d = await old_bot.get_my_description(language_code=POINTER_LANG)
+                text = (d.description or "") if d else ""
+                if text.startswith(POINTER_PREFIX2):
+                    ptr = (json.loads(text[len(POINTER_PREFIX2):]) or {}).get("s")
+                if ptr:
+                    src_bot = old_bot
+                    log.info("Backup found on the previous bot (OLD_BOT_TOKEN) — migrating accounts")
+            except Exception as e:
+                log.warning("Could not read backup from the previous bot: %s", e)
         if f is None or not ptr:
+            if old_bot:
+                await old_bot.session.close()
             log.info("No backup pointer found — nothing to restore")
             return 0
-        file_id, self._last_chat, self._last_msg = ptr[:3]
+        file_id = ptr[0]
+        if src_bot is self.bot:
+            _, self._last_chat, self._last_msg = ptr[:3]
         try:
             buf = io.BytesIO()
-            await self.bot.download(file_id, destination=buf)
+            await src_bot.download(file_id, destination=buf)
             data = json.loads(f.decrypt(buf.getvalue()))
         except InvalidToken as e:
             # InvalidToken = неверный ключ ЛИБО оборванная/битая закачка. НЕ помечаем restore
@@ -293,6 +312,9 @@ class SessionBackup:
             raise BackupCorrupt(f"decrypt failed (wrong key or truncated download): {e}") from e
         except Exception as e:
             raise BackupUnavailable(f"backup download failed: {e}") from e
+        finally:
+            if old_bot:
+                await old_bot.session.close()
 
         self.restored_paused = bool(data.get("paused"))
         if self._set_admins and data.get("admins"):
@@ -310,6 +332,10 @@ class SessionBackup:
                 log.info("Restored %s subscriber(s) from backup", n)
             except Exception as e:
                 log.warning("Subscriptions import failed: %s", e)
+        if data.get("settings") and src_bot is not self.bot:
+            # новый бот = новая группа/темы из .env: старые маршруты не переносим
+            for k in ("TARGET_CHAT_ID", "PRICE_ROUTES", "BACKDROP_ROUTES", "SUB_CHAT_ID"):
+                data["settings"].pop(k, None)
         if data.get("settings"):
             import_runtime_overrides(data["settings"])     # /set-настройки переживают деплой
             log.info("Restored settings changed via /set: %s", ", ".join(sorted(data["settings"])))

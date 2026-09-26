@@ -21,7 +21,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from config import settings
 from database.models import Listing
 
-DASH = "—"
+DASH = "-"
 
 
 def _e(v) -> str:
@@ -44,7 +44,7 @@ def detected_at(l: Listing) -> str:
         dt = dt.astimezone(ZoneInfo(settings.timezone))
     except Exception:
         pass
-    return dt.strftime("%d.%m.%Y %H:%M:%S")
+    return dt.strftime("%H:%M:%S, %d.%m")
 
 
 def seller_url(l: Listing) -> str | None:
@@ -56,40 +56,48 @@ def seller_url(l: Listing) -> str | None:
 
 
 def listing_keyboard(l: Listing, with_seller: bool = True) -> InlineKeyboardMarkup:
-    """Кнопки: [✓ Занять] / [🎁 Открыть лот] [👤 Продавец]"""
-    rows = [[InlineKeyboardButton(text="✓ Занять", callback_data=f"take:{l.gift_unique_id}"[:64])]]
+    """Кнопки: [✓ Беру] / [Лот] [Написать]"""
+    rows = [[InlineKeyboardButton(text="✓ Беру", callback_data=f"take:{l.gift_unique_id}"[:64])]]
     second = []
     if l.gift_link:
-        second.append(InlineKeyboardButton(text="🎁 Открыть лот", url=l.gift_link))
+        second.append(InlineKeyboardButton(text="Лот", url=l.gift_link))
     url = seller_url(l) if with_seller else None
     if url:
-        second.append(InlineKeyboardButton(text="👤 Продавец", url=url))
+        second.append(InlineKeyboardButton(text="Написать", url=url))
     if second:
         rows.append(second)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def floor_line(l: Listing) -> str:
-    """Флор коллекции (минимальная цена на маркете из payments.getStarGifts) и отклонение цены лота."""
+    """Флор коллекции и насколько цена лота от него отличается."""
     if not l.floor_stars:
         return DASH
-    out = f"{l.floor_stars} Stars"
+    out = f"{l.floor_stars} ⭐"
     if l.stars_price:
         diff = (l.stars_price - l.floor_stars) / l.floor_stars * 100
         if abs(diff) < 0.5:
-            out += " (цена = флор 🔥)"
+            out += ", по флору"
+        elif diff < 0:
+            out += f", ниже на {abs(diff):.0f}%"
         else:
-            out += f" (цена {'+' if diff > 0 else '−'}{abs(diff):.0f}% к флору{' 🔥' if diff < 0 else ''})"
+            out += f", выше на {diff:.0f}%"
     return out
 
 
 def price_line(l: Listing) -> str:
     parts = []
     if l.stars_price is not None:
-        parts.append(f"{l.stars_price} Stars")
+        parts.append(f"{l.stars_price} ⭐")
     if l.ton_price is not None:
         parts.append(f"{fmt_ton(l.ton_price)} {settings.ton_label}")
     return " / ".join(parts) if parts else DASH
+
+
+def _msgs(v: str | None) -> str | None:
+    if not v:
+        return None
+    return {"бесплатно": "ЛС открыты", "только Premium": "ЛС только с Premium"}.get(v, f"ЛС {v}")
 
 
 class _Safe(dict):
@@ -122,8 +130,6 @@ class MessageFormatter:
             seller_line = "TON-кошелёк"
         else:
             seller_line = html.escape(l.seller_name or DASH)
-        if l.seller_id:
-            seller_line += f" ({l.seller_id})"
 
         if l.seller_profile_link:
             seller_profile = html.escape(l.seller_profile_link)
@@ -138,7 +144,19 @@ class MessageFormatter:
         else:
             gift_slug_link = _e(l.gift_slug)
 
+        attrs = " · ".join(html.escape(str(x)) for x in (l.model, l.backdrop, l.symbol) if x)
+        meta = []
+        if l.level not in (None, ""):
+            meta.append(f"уровень {html.escape(str(l.level))}")
+        if l.seller_nfts not in (None, ""):
+            meta.append(f"NFT в профиле: {html.escape(str(l.seller_nfts))}")
+        if _msgs(l.messages):
+            meta.append(html.escape(_msgs(l.messages)))
+        if l.premium:
+            meta.append("Premium")
         return _Safe(
+            attrs=attrs,
+            seller_meta=(lambda t: t[:1].upper() + t[1:])(", ".join(meta)) if meta else "",
             gift_name=_e(gift_name),
             gift_title_link=gift_title_link,
             gift_link=_e(l.gift_link),

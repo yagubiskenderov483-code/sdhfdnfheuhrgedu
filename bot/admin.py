@@ -302,12 +302,12 @@ def build_routers(app: "App") -> list[Router]:
             claimed.add(key)
         u = q.from_user
         who = f"@{u.username}" if u.username else (u.full_name or str(u.id))
-        rows = [[InlineKeyboardButton(text=f"✅ Занял {who}", callback_data="taken")]] + kb.inline_keyboard[1:]
+        rows = [[InlineKeyboardButton(text=f"✅ Взял {who}", callback_data="taken")]] + kb.inline_keyboard[1:]
         try:
             await msg.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         except Exception:
             pass
-        await q.answer("Лот ваш ✅")
+        await q.answer("Лот за вами")
 
     @public.callback_query(F.data == "taken")
     async def cb_taken(q: CallbackQuery) -> None:

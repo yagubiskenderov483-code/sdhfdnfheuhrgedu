@@ -131,9 +131,9 @@ class Subscriptions:
     def plans_kb(self, uid: int) -> InlineKeyboardMarkup:
         rows = []
         if not self.user(uid).get("trial"):
-            rows.append([InlineKeyboardButton(text="🎁 Пробный период — 60 минут", callback_data="sub:trial")])
+            rows.append([InlineKeyboardButton(text="🎁 Пробный час бесплатно", callback_data="sub:trial")])
         for code, (title, price, _) in PLANS.items():
-            rows.append([InlineKeyboardButton(text=f"{title} — {price:g} TON", callback_data=f"sub:buy:{code}")])
+            rows.append([InlineKeyboardButton(text=f"{title} · {price:g} TON", callback_data=f"sub:buy:{code}")])
         rows.append([InlineKeyboardButton(text="« Назад", callback_data="sub:home")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -166,7 +166,7 @@ class Subscriptions:
         dur = "навсегда" if u["pending"] == FOREVER else _fmt_left(time.time() + u["pending"])
         return (f"✅ {reason}\n\n"
                 f"🔗 Ваша одноразовая ссылка для входа:\n{link.invite_link}\n\n"
-                f"Доступ: <b>{dur}</b> — время пойдёт с момента входа.\n"
+                f"Доступ: <b>{dur}</b>, время пойдёт с момента входа.\n"
                 "Ссылка работает один раз и удаляется сразу после входа.")
 
     async def on_join(self, ev: ChatMemberUpdated) -> None:
@@ -216,7 +216,7 @@ class Subscriptions:
             u = self.user(owner)
             try:
                 text = await self.grant(owner, 0 if u.get("pending") else TRIAL_SECONDS,
-                                        "Вашу прошлую ссылку использовал другой человек — выдаём новую.")
+                                        "По вашей ссылке зашёл кто-то другой, держите новую.")
                 await self.bot.send_message(owner, text)
             except Exception as e:
                 log.warning("Re-issue link to %s failed: %s", owner, e)
@@ -306,7 +306,7 @@ class Subscriptions:
             title, price, secs = PLANS[inv["plan"]]
             log.info("Payment received: %s TON from user %s (%s)", price, inv["uid"], inv["plan"])
             try:
-                text = await self.grant(int(inv["uid"]), secs, f"Оплата {price:g} TON получена — тариф {title}.")
+                text = await self.grant(int(inv["uid"]), secs, f"Оплата {price:g} TON пришла, тариф {title}.")
                 await self.bot.send_message(int(inv["uid"]), text)
             except Exception as e:
                 log.error("Grant after payment failed for %s: %s", inv["uid"], e)
@@ -381,8 +381,8 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
     @r.callback_query(F.data == "sub:menu")
     async def cb_menu(q: CallbackQuery) -> None:
         await subs.load()
-        await q.message.edit_text("💎 <b>Подписка</b>\n\nВыберите тариф. Оплата в TON через Tonkeeper — "
-                                  "доступ выдаётся автоматически сразу после оплаты.",
+        await q.message.edit_text("💎 <b>Подписка</b>\n\nВыберите тариф. Платите в TON через Tonkeeper, "
+                                  "ссылка на вход придёт сама сразу после оплаты.",
                                   reply_markup=subs.plans_kb(q.from_user.id))
         await q.answer()
 
@@ -393,7 +393,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if not u or (not u.get("in_chat") and not u.get("pending")):
             text = "У вас нет активной подписки."
         elif u.get("pending") and not u.get("in_chat"):
-            text = "Доступ оплачен — зайдите по ссылке, которую прислал бот. Время пойдёт с момента входа."
+            text = "Доступ оплачен. Зайдите по ссылке, которую прислал бот, время пойдёт с момента входа."
         else:
             text = f"✅ Подписка активна, осталось: <b>{_fmt_left(u['until'])}</b>"
         await q.answer(text[:200], show_alert=True)
@@ -407,7 +407,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             return
         subs.user(uid)["trial"] = True
         try:
-            text = await subs.grant(uid, TRIAL_SECONDS, "Пробный период активирован — 60 минут.")
+            text = await subs.grant(uid, TRIAL_SECONDS, "Пробный час активирован.")
         except Exception as e:
             subs.user(uid)["trial"] = False
             log.error("Trial link failed for %s: %s", uid, e)
@@ -431,8 +431,8 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             [InlineKeyboardButton(text="« Назад", callback_data="sub:menu")],
         ])
         await q.message.edit_text(
-            f"💎 <b>Тариф {title} — {price:g} TON</b>\n\n"
-            "Нажмите «Оплатить в Tonkeeper» — сумма и комментарий подставятся сами.\n\n"
+            f"💎 <b>Тариф {title}, {price:g} TON</b>\n\n"
+            "Нажмите «Оплатить в Tonkeeper», сумма и комментарий подставятся сами.\n\n"
             f"Или вручную:\nАдрес: <code>{settings.sub_ton_address}</code>\n"
             f"Сумма: <code>{price:g}</code> TON\n"
             f"Комментарий: <code>{code}</code> (обязательно!)\n\n"
@@ -454,9 +454,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             except Exception as e:
                 log.warning("Manual payment check failed: %s", e)
         if subs.state["invoices"].get(code, {}).get("paid"):
-            await q.answer("✅ Оплата получена — ссылка отправлена в чат", show_alert=True)
+            await q.answer("✅ Оплата пришла, ссылка в чате", show_alert=True)
         else:
-            await q.answer("Оплата пока не найдена. Если уже оплатили — подождите минуту и проверьте ещё раз.",
+            await q.answer("Оплата пока не пришла. Если уже оплатили, подождите минуту и нажмите ещё раз.",
                            show_alert=True)
 
     # ---------------- админам: список и ручная выдача

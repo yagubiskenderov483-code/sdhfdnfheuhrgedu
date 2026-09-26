@@ -194,6 +194,7 @@ class Settings:
     ton_label: str = "TON"
     timezone: str = "Europe/Moscow"
     session_backup_key: str = ""
+    old_bot_token: str = ""              # прошлый токен: забрать копию аккаунтов при смене бота
     sessions_backup_chat_id: int = 0
     database_path: str = "data/tracker.db"
     sessions_dir: str = "telegram_sessions"
@@ -224,7 +225,7 @@ class Settings:
 
     def public_view(self) -> dict[str, Any]:
         """Настройки без секретов — для /settings."""
-        hidden = {"api_hash", "bot_token", "session_backup_key"}
+        hidden = {"api_hash", "bot_token", "session_backup_key", "old_bot_token"}
         out = {}
         for f in fields(self):
             if f.name in hidden:
@@ -235,7 +236,7 @@ class Settings:
         return out
 
     def secrets(self) -> list[str]:
-        return [s for s in (self.api_hash, self.bot_token, self.session_backup_key) if s]
+        return [s for s in (self.api_hash, self.bot_token, self.session_backup_key, self.old_bot_token) if s]
 
 
 # Ключи, которые можно менять из бота командой /set KEY VALUE
@@ -333,6 +334,7 @@ def _from_env() -> Settings:
         ton_label=(e("TON_LABEL") or "TON").strip(),
         timezone=(e("TIMEZONE") or "Europe/Moscow").strip(),
         session_backup_key=(e("SESSION_BACKUP_KEY") or "").strip(),
+        old_bot_token=(e("OLD_BOT_TOKEN") or "").strip().strip('"'),
         sessions_backup_chat_id=_int(e("SESSIONS_BACKUP_CHAT_ID"), 0),
         database_path=(e("DATABASE_PATH") or "data/tracker.db").strip(),
         sessions_dir=(e("SESSIONS_DIR") or "telegram_sessions").strip(),
@@ -363,6 +365,18 @@ def load_settings() -> Settings:
 def export_runtime_overrides() -> dict[str, str]:
     """Настройки, изменённые командой /set, — сохраняются в копию в Telegram и переживают деплой."""
     return _load_runtime_overrides()
+
+
+def drop_runtime_overrides(keys) -> list[str]:
+    """Убрать /set-значения этих ключей (тогда действуют значения из .env)."""
+    current = _load_runtime_overrides()
+    gone = [k for k in keys if k in current]
+    if gone:
+        for k in gone:
+            current.pop(k, None)
+        RUNTIME_SETTINGS_PATH.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+        reload_settings()
+    return gone
 
 
 def import_runtime_overrides(data: dict) -> None:

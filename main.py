@@ -150,6 +150,15 @@ class App:
     # ------------------------------------------------------------------ lifecycle
     async def start(self, run_bot: bool = True) -> None:
         await self.db.connect()
+        # сменили бота (новый токен) → новая группа и темы берутся из .env, а не из старых /set
+        bot_id = settings.bot_token.split(":", 1)[0]
+        prev = await self.db.kv_get("bot_id")
+        if prev and prev != bot_id:
+            from config import drop_runtime_overrides
+            gone = drop_runtime_overrides(["TARGET_CHAT_ID", "PRICE_ROUTES", "BACKDROP_ROUTES", "SUB_CHAT_ID"])
+            if gone:
+                log.info("New bot token — using channel/topic routes from .env (dropped /set: %s)", ", ".join(gone))
+        await self.db.kv_set("bot_id", bot_id)
         # 1) бот отвечает на команды СРАЗУ, ещё до долгого запуска трекера
         if run_bot:
             init_claim_code()
