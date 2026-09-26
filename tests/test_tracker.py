@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import os
 import asyncio
 import logging
 import shutil
@@ -601,6 +602,7 @@ def test_20_proxies():
     from sessions.storage import SessionStorage
     from utils.proxy import parse_proxy, split_lines
     d = Path(tempfile.mkdtemp())
+    os.environ["USE_PROXIES"] = "1"
     st = SessionStorage(d, 1, "h" * 32)
     for n in ("session_001", "session_002", "session_003", "session_004"):
         (d / f"{n}.session").write_bytes(b"")
@@ -615,6 +617,11 @@ def test_20_proxies():
     st.save_meta("session_001", 1, "h" * 32, owner_id=5)       # метаданные не затирают прокси
     assert st.list_sessions()[0].proxy == pool[0] and st.list_sessions()[0].owner_id == 5
     assert parse_proxy(pool[1])["username"] == "user"
+    os.environ["USE_PROXIES"] = "0"                            # по умолчанию прокси выключены
+    assert st.pick_proxy(2) is None and all(r.proxy is None for r in st.list_sessions())
+    assert st.wipe_proxies() == 4 and not st.pool_path.exists()
+    os.environ["USE_PROXIES"] = "1"
+    assert all(r.proxy is None for r in st.list_sessions())
     print("✔ TEST 20 прокси: разбор форматов, раздача по 2 на прокси, метаданные сохраняются")
 
 

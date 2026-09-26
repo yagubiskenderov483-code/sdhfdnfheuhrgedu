@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import html
 import re
 import signal
@@ -160,6 +161,10 @@ class App:
         # после деплоя папка telegram_sessions/ может быть пустой → восстановить из Telegram
         await step("restore backup", self.backup.restore())
         await step("restore market snapshot", self.backup.restore_market())
+        if os.getenv("USE_PROXIES", "0").strip().lower() not in ("1", "true", "yes", "on"):
+            n = self.storage.wipe_proxies()          # прокси выключены — стираем пул и привязки
+            if n:
+                log.info("Proxies disabled: removed proxy from %d account(s)", n)
         if self.backup.restored_paused:
             await step("restore pause", self.db.kv_set("paused", 1))
         if settings.startup_delay > 0 and self.storage.list_sessions():

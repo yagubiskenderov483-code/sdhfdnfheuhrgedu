@@ -20,6 +20,11 @@ from pathlib import Path
 _NAME_RE = re.compile(r"^session_(\d+)$")
 
 
+def _proxies_enabled() -> bool:
+    """USE_PROXIES=1 в .env включает прокси; по умолчанию все аккаунты работают напрямую."""
+    return os.getenv("USE_PROXIES", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass
 class SessionRecord:
     name: str
@@ -48,6 +53,25 @@ class SessionStorage:
         self.default_api_id = default_api_id
         self.default_api_hash = default_api_hash
 
+    def wipe_proxies(self) -> int:
+        """Полностью убрать прокси: очистить пул и снять прокси со всех аккаунтов."""
+        n = 0
+        try:
+            self.pool_path.unlink()
+        except FileNotFoundError:
+            pass
+        for meta in self.dir.glob("*.json"):
+            try:
+                data = json.loads(meta.read_text(encoding="utf-8"))
+            except (ValueError, json.JSONDecodeError):
+                continue
+            if isinstance(data, dict) and data.get("proxy"):
+                data["proxy"] = None
+                meta.write_text(json.dumps(data), encoding="utf-8")
+                _secure(meta)
+                n += 1
+        return n
+
     def list_sessions(self) -> list[SessionRecord]:
         out = []
         for p in sorted(self.dir.glob("*.session")):
@@ -60,7 +84,7 @@ class SessionStorage:
                     api_id = int(data.get("api_id") or api_id)
                     api_hash = str(data.get("api_hash") or api_hash)
                     owner = int(data["owner_id"]) if data.get("owner_id") else None
-                    proxy = data.get("proxy") or None
+                    proxy = (data.get("proxy") or None) if _proxies_enabled() else None
                 except (ValueError, json.JSONDecodeError):
                     pass
             out.append(SessionRecord(name, p, api_id, api_hash, owner, proxy))
@@ -124,6 +148,8 @@ class SessionStorage:
 
     def pick_proxy(self, per_proxy: int) -> str | None:
         """Наименее загруженный прокси из пула (не больше per_proxy аккаунтов на один)."""
+        if not _proxies_enabled():
+            return None
         pool = self.load_pool()
         if not pool:
             return None
