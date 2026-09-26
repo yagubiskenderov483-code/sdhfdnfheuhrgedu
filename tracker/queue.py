@@ -377,8 +377,8 @@ class ListingPipeline:
                     self.stats["sent"] += 1
                     self.last_sent_at = time.time()
                 latency = time.monotonic() - ev.detected_mono
-                llog("SEND", f"listing={l.listing_id} target={'test' if res.test_only else 'channel'} "
-                             f"latency={latency:.2f}s")
+                dest = "test" if res.test_only else (f"{_chat}/topic{_thread}" if _thread else f"{_chat}")
+                llog("SEND", f"listing={l.listing_id} → {dest} latency={latency:.2f}s")
             else:
                 l.status, l.reason = ListingStatus.SEND_FAILED, res.error
                 self.stats["failed"] += 1
