@@ -86,3 +86,18 @@ async def main():
     await s2.import_(d); assert s2.user(9)["until"] == S.FOREVER
     print("SUB TESTS OK")
 asyncio.run(main())
+
+def test_overpriced_filter():
+    from filters.price_filter import PriceFilter
+    from database.models import Listing
+    import dataclasses
+    settings.collection_min_floor = 400; settings.max_above_floor = 50
+    kw = {x.name: None for x in dataclasses.fields(Listing)
+          if x.default is dataclasses.MISSING and x.default_factory is dataclasses.MISSING}
+    l = Listing(**kw); l.stars_price = 8000; l.floor_stars = 500
+    assert not PriceFilter().check(l).passed
+    l.stars_price = 700
+    assert PriceFilter().check(l).passed
+    print("OVERPRICED FILTER OK")
+
+test_overpriced_filter()

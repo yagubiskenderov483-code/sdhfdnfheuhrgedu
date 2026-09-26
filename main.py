@@ -21,7 +21,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 
 from bot.admin import all_admins, build_routers, init_claim_code, is_manager, save_admins
 from bot.subscription import Subscriptions, build_sub_router
@@ -232,8 +232,16 @@ class App:
             BotCommand(command="test", description="Проверка работы"),
             BotCommand(command="cancel", description="Отменить действие"),
         ]
+        cmds.append(BotCommand(command="subs", description="Подписчики"))
         try:
-            await self.bot.set_my_commands(cmds)
+            # всем — только /start; полное меню — только админам из ADMIN_IDS
+            await self.bot.set_my_commands([BotCommand(command="start", description="Главное меню")],
+                                           scope=BotCommandScopeDefault())
+            for admin in (settings.admin_ids or all_admins()):
+                try:
+                    await self.bot.set_my_commands(cmds, scope=BotCommandScopeChat(chat_id=admin))
+                except Exception as e:
+                    log.warning("setMyCommands for admin %s failed: %s", admin, e)
         except Exception as e:
             log.warning("setMyCommands failed: %s", e)
 

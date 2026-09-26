@@ -188,6 +188,7 @@ SETTING_DESC: dict[str, str] = {
     "COLLECTION_MIN_FLOOR": "единый порог: от какой цены читать коллекции И слать лоты (⭐)",
     "COLLECTION_FLOOR_MODE": "что делать с коллекциями ниже порога: skip (не читать) | slow (реже)",
     "MIN_TON": "мин. цена лота в TON (0 = не проверять)",
+    "MAX_ABOVE_FLOOR": "не слать лоты дороже флора коллекции больше чем на N% (0 = не проверять)",
     "ALLOW_TON_ONLY": "слать лоты, которые продаются только за TON (true/false)",
     "RUSSIAN_ONLY": "только русские продавцы (true/false)",
     "UNKNOWN_SELLER_POLICY": "продавец без явных данных: block (отсеять) | allow (пропускать)",
@@ -215,7 +216,7 @@ SETTING_DESC: dict[str, str] = {
     "BACKDROP_ROUTES": "каналы/темы по фону: Название:ID или ID/тема (напр. Black:-100X/67); в приоритете над ценой",
 }
 SETTING_GROUPS: list[tuple[str, list[str]]] = [
-    ("🎯 Фильтр цены", ["COLLECTION_MIN_FLOOR", "MIN_STARS", "MIN_TON", "ALLOW_TON_ONLY"]),
+    ("🎯 Фильтр цены", ["COLLECTION_MIN_FLOOR", "MAX_ABOVE_FLOOR", "MIN_STARS", "MIN_TON", "ALLOW_TON_ONLY"]),
     ("👤 Фильтр продавца", ["RUSSIAN_ONLY", "UNKNOWN_SELLER_POLICY", "REQUIRE_FREE_MESSAGES",
                             "MAX_SELLER_LEVEL", "MAX_SELLER_NFTS", "SELLER_PHONE_PREFIXES"]),
     ("🔁 Без повторов", ["UNIQUE_GIFTS", "UNIQUE_SELLERS", "MAX_SAME_COLLECTION_STREAK",
@@ -250,6 +251,12 @@ def _filters_help() -> str:
     return "\n".join(lines).strip()
 
 
+def _taken_text(button_text: str) -> str:
+    who = button_text.split("·", 1)[1].strip() if "·" in button_text else ""
+    who = who or button_text.replace("✅ Взял", "").replace("✅ Занял", "").strip()
+    return "Данный лот занят" + (f"\n{who}" if who else "")
+
+
 # ---------------------------------------------------------------------------- routers
 def build_routers(app: "App") -> list[Router]:
     public = Router(name="public")
@@ -281,37 +288,51 @@ def build_routers(app: "App") -> list[Router]:
 
     @public.callback_query(F.data.startswith("take:"))
     async def cb_take(q: CallbackQuery) -> None:
-        """Кнопка «✓ Занять» под постом: первый нажавший забирает лот."""
+        """Кнопка «Занять» под постом: первый нажавший забирает лот, лот приходит ему в личку."""
         msg = q.message
         kb = getattr(msg, "reply_markup", None)
         if not kb or not kb.inline_keyboard:
             await q.answer()
             return
         first = kb.inline_keyboard[0][0]
-        if not first.text.startswith("✓"):
-            await q.answer(f"Лот уже {first.text.lstrip('✅ ').lower()}", show_alert=True)
+        if first.callback_data != q.data:          # старый пост, уже занят
+            await q.answer(_taken_text(first.text), show_alert=True)
             return
-        # атомарно: первый нажавший занимает лот, второй получает отказ (раньше могли выиграть оба)
+        # атомарно: первый нажавший занимает лот, второй получает отказ
         key = (msg.chat.id, msg.message_id)
         async with claim_lock:
             if key in claimed:
-                await q.answer("Лот уже занят", show_alert=True)
+                await q.answer("Данный лот занят", show_alert=True)
                 return
             if len(claimed) > 5000:
-                claimed.clear()   # старые лоты и так защищены текстом кнопки «✅ Занял» (не «✓»)
+                claimed.clear()   # старые лоты и так защищены кнопкой «Занят»
             claimed.add(key)
         u = q.from_user
         who = f"@{u.username}" if u.username else (u.full_name or str(u.id))
-        rows = [[InlineKeyboardButton(text=f"✅ Взял {who}", callback_data="taken")]] + kb.inline_keyboard[1:]
+        original = msg.html_text or ""
+        links = kb.inline_keyboard[1:]
+        rows = [[InlineKeyboardButton(text=f"Занят · {who}", callback_data="taken")]] + links
         try:
-            await msg.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            await msg.edit_text(original + f"\n\n<i>Данный лот занят</i>\n{html.escape(who)}",
+                                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         except Exception:
-            pass
-        await q.answer("Лот за вами")
+            try:
+                await msg.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            except Exception:
+                pass
+        # лот — в личку тому, кто занял
+        try:
+            await app.bot.send_message(u.id, "Вы заняли лот:\n\n" + original,
+                                       reply_markup=InlineKeyboardMarkup(inline_keyboard=links) if links else None)
+            await q.answer("Лот ваш, отправил его вам в личку")
+        except Exception:
+            await q.answer("Лот ваш. Чтобы лоты приходили в личку, напишите боту /start", show_alert=True)
 
     @public.callback_query(F.data == "taken")
     async def cb_taken(q: CallbackQuery) -> None:
-        await q.answer("Лот уже занят", show_alert=True)
+        kb = getattr(q.message, "reply_markup", None)
+        text = kb.inline_keyboard[0][0].text if kb and kb.inline_keyboard else ""
+        await q.answer(_taken_text(text), show_alert=True)
 
     @public.message(Command("claim"))
     async def cmd_claim(m: Message, command: CommandObject) -> None:

@@ -32,6 +32,10 @@ class PriceFilter:
                 return FilterResult(False, f"{l.stars_price} Stars < {min_stars}")
             if min_ton > 0 and ton is not None and ton < min_ton:
                 return FilterResult(False, f"{ton:g} TON < {min_ton:g}")
+            cap = settings.max_above_floor
+            if cap and l.floor_stars and l.stars_price > l.floor_stars * (1 + cap / 100):
+                over = (l.stars_price - l.floor_stars) / l.floor_stars * 100
+                return FilterResult(False, f"{l.stars_price} Stars на {over:.0f}% дороже флора {l.floor_stars}")
             return FilterResult(True, f"{l.stars_price} Stars >= {min_stars}")
 
         if ton is not None:

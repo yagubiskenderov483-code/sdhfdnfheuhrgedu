@@ -395,7 +395,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         elif u.get("pending") and not u.get("in_chat"):
             text = "Доступ оплачен. Зайдите по ссылке, которую прислал бот, время пойдёт с момента входа."
         else:
-            text = f"✅ Подписка активна, осталось: <b>{_fmt_left(u['until'])}</b>"
+            text = f"✅ Подписка активна, осталось: {_fmt_left(u['until'])}"
         await q.answer(text[:200], show_alert=True)
 
     @r.callback_query(F.data == "sub:trial")

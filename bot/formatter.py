@@ -44,7 +44,7 @@ def detected_at(l: Listing) -> str:
         dt = dt.astimezone(ZoneInfo(settings.timezone))
     except Exception:
         pass
-    return dt.strftime("%H:%M:%S, %d.%m")
+    return dt.strftime("%H:%M:%S · %d.%m")
 
 
 def seller_url(l: Listing) -> str | None:
@@ -56,8 +56,8 @@ def seller_url(l: Listing) -> str | None:
 
 
 def listing_keyboard(l: Listing, with_seller: bool = True) -> InlineKeyboardMarkup:
-    """Кнопки: [✓ Беру] / [Лот] [Написать]"""
-    rows = [[InlineKeyboardButton(text="✓ Беру", callback_data=f"take:{l.gift_unique_id}"[:64])]]
+    """Кнопки: [Занять] / [Лот] [Написать]"""
+    rows = [[InlineKeyboardButton(text="Занять", callback_data=f"take:{l.gift_unique_id}"[:64])]]
     second = []
     if l.gift_link:
         second.append(InlineKeyboardButton(text="Лот", url=l.gift_link))
@@ -69,26 +69,29 @@ def listing_keyboard(l: Listing, with_seller: bool = True) -> InlineKeyboardMark
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _n(v: int) -> str:
+    """1250 → «1 250»"""
+    return f"{int(v):,}".replace(",", " ")
+
+
 def floor_line(l: Listing) -> str:
     """Флор коллекции и насколько цена лота от него отличается."""
     if not l.floor_stars:
         return DASH
-    out = f"{l.floor_stars} ⭐"
+    out = f"{_n(l.floor_stars)} ⭐"
     if l.stars_price:
         diff = (l.stars_price - l.floor_stars) / l.floor_stars * 100
         if abs(diff) < 0.5:
-            out += ", по флору"
-        elif diff < 0:
-            out += f", ниже на {abs(diff):.0f}%"
+            out += " - по флору"
         else:
-            out += f", выше на {diff:.0f}%"
+            out += f" - {'+' if diff > 0 else '−'}{abs(diff):.0f}% к флору"
     return out
 
 
 def price_line(l: Listing) -> str:
     parts = []
     if l.stars_price is not None:
-        parts.append(f"{l.stars_price} ⭐")
+        parts.append(f"{_n(l.stars_price)} ⭐")
     if l.ton_price is not None:
         parts.append(f"{fmt_ton(l.ton_price)} {settings.ton_label}")
     return " / ".join(parts) if parts else DASH

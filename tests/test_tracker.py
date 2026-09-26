@@ -132,6 +132,7 @@ def reset_settings():
     settings.max_seller_nfts = 0
     settings.max_seller_level = 0
     settings.collection_min_floor = 0
+    settings.max_above_floor = 0
     settings.collection_floor_mode = "skip"
     settings.low_priority_poll_interval, settings.low_priority_hot_min = 60.0, 10.0
     settings.fetch_full_seller = False
