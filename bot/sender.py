@@ -82,8 +82,17 @@ class TelegramSender:
                     log.warning("Bot API network error: %s (retry in %ss)", e, delay)
                     await asyncio.sleep(delay)
                 except TelegramBadRequest as e:
+                    es = str(e)
+                    # тема (topic) закрыта/удалена/не найдена → шлём в общий канал, чтобы лот не потерять
+                    if extra and ("TOPIC_CLOSED" in es or "TOPIC_DELETED" in es
+                                  or "message thread not found" in es.lower()
+                                  or "MESSAGE_THREAD_NOT_FOUND" in es):
+                        log.warning("Topic %s unavailable (%s) — posting to the main channel instead",
+                                    extra.get("message_thread_id"), es)
+                        extra = {}
+                        continue
                     # кнопка «Продавец» по ID запрещена приватностью продавца → без этой кнопки
-                    if "BUTTON_USER_PRIVACY_RESTRICTED" in str(e) or "BUTTON_URL_INVALID" in str(e):
+                    if "BUTTON_USER_PRIVACY_RESTRICTED" in es or "BUTTON_URL_INVALID" in es:
                         if fallback_markup is not None and markup is not fallback_markup:
                             markup = fallback_markup
                             continue
