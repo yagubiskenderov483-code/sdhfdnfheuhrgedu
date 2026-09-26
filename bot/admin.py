@@ -24,7 +24,7 @@ from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart, Filter, or_f
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, Message,
+from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, LinkPreviewOptions, Message,
                            ReplyKeyboardMarkup)
 from telethon import TelegramClient, errors
 
@@ -311,10 +311,12 @@ def build_routers(app: "App") -> list[Router]:
         who = f"@{u.username}" if u.username else (u.full_name or str(u.id))
         original = msg.html_text or ""
         links = kb.inline_keyboard[1:]
-        rows = [[InlineKeyboardButton(text=f"Занят · {who}", callback_data="taken")]] + links
+        rows = [[InlineKeyboardButton(text=f"Занят · {who}", callback_data="taken")]]
         try:
-            await msg.edit_text(original + f"\n\n<i>Данный лот занят</i>\n{html.escape(who)}",
-                                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            # в канале от лота остаётся только отметка «занят» — сам лот уходит занявшему в личку
+            await msg.edit_text(f"<i>Данный лот занят</i>\n{html.escape(who)}",
+                                reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+                                link_preview_options=LinkPreviewOptions(is_disabled=True))
         except Exception:
             try:
                 await msg.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
