@@ -736,14 +736,33 @@ def build_routers(app: "App") -> list[Router]:
             await m.answer("Некорректный номер. Пример: +79991234567")
             return
         data = await state.get_data()
+        await m.answer("⏳ Подключаюсь к Telegram и запрашиваю код…")
         name = app.storage.next_name()
         proxy = app.storage.pick_proxy(settings.accounts_per_proxy)   # вход сразу через прокси аккаунта
-        client = TelegramClient(str(app.storage.session_path(name).with_suffix("")),
-                                data["api_id"], data["api_hash"], proxy=parse_proxy(proxy),
-                                device_model="GiftTracker", system_version="1.0", app_version="1.0")
+
+        def _mk(px: str | None) -> TelegramClient:
+            return TelegramClient(str(app.storage.session_path(name).with_suffix("")),
+                                  data["api_id"], data["api_hash"], proxy=parse_proxy(px),
+                                  connection_retries=1, timeout=10,
+                                  device_model="GiftTracker", system_version="1.0", app_version="1.0")
+
+        client = _mk(proxy)
         try:
-            await client.connect()
-            sent = await client.send_code_request(phone)
+            try:
+                await asyncio.wait_for(client.connect(), 20)
+            except Exception as e:
+                if not proxy:
+                    raise
+                # прокси мёртвый/не пускает — входим напрямую, чтобы добавление не зависало
+                log.warning("Login via proxy failed (%s) — retrying without proxy", type(e).__name__)
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+                proxy = None
+                client = _mk(None)
+                await asyncio.wait_for(client.connect(), 20)
+            sent = await asyncio.wait_for(client.send_code_request(phone), 30)
         except errors.ApiIdInvalidError:
             await client.disconnect(); app.storage.discard(name)
             await state.clear()
@@ -761,7 +780,9 @@ def build_routers(app: "App") -> list[Router]:
         except Exception as e:
             await client.disconnect(); app.storage.discard(name)
             await state.clear()
-            await m.answer(f"❌ Ошибка: {html.escape(type(e).__name__)}")
+            log.warning("add_session: send_code failed: %r", e)
+            await m.answer(f"❌ Ошибка: {html.escape(type(e).__name__)} {html.escape(str(e)[:200])}\n"
+                           "Попробуйте ещё раз: /add_session")
             return
         pending[m.from_user.id] = {"client": client, "name": name, "phone": phone,
                                    "hash": sent.phone_code_hash, "api_id": data["api_id"],
