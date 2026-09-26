@@ -188,6 +188,7 @@ SETTING_DESC: dict[str, str] = {
     "COLLECTION_MIN_FLOOR": "единый порог: от какой цены читать коллекции И слать лоты (⭐)",
     "COLLECTION_FLOOR_MODE": "что делать с коллекциями ниже порога: skip (не читать) | slow (реже)",
     "MIN_TON": "мин. цена лота в TON (0 = не проверять)",
+    "ROUTE_BY": "в какую тему класть лот: floor (по флору коллекции = цене гифта) | price (по цене лота)",
     "MAX_ABOVE_FLOOR": "не слать лоты дороже флора коллекции больше чем на N% (0 = не проверять)",
     "ALLOW_TON_ONLY": "слать лоты, которые продаются только за TON (true/false)",
     "RUSSIAN_ONLY": "только русские продавцы (true/false)",
@@ -224,7 +225,7 @@ SETTING_GROUPS: list[tuple[str, list[str]]] = [
     ("⚡ Скорость", ["CATALOG_INTERVAL", "COLD_POLL_INTERVAL", "TRACKER_INTERVAL", "PAGE_LIMIT",
                     "SESSION_RPS", "GLOBAL_RPS", "MAX_CONCURRENT_SESSIONS", "LOW_PRIORITY_POLL_INTERVAL"]),
     ("⚙️ Прочее", ["COLLECTION_FLOOR_MODE", "TEST_MODE", "ALLOW_ALL_USERS", "FETCH_FULL_SELLER"]),
-    ("📢 Общий и каналы по цене", ["TARGET_CHAT_ID", "PRICE_ROUTES"]),
+    ("📢 Общий и каналы по цене", ["TARGET_CHAT_ID", "PRICE_ROUTES", "ROUTE_BY"]),
     ("🎨 Каналы по фону", ["BACKDROP_ROUTES"]),
 ]
 

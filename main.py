@@ -182,6 +182,16 @@ class App:
         # после деплоя папка telegram_sessions/ может быть пустой → восстановить из Telegram
         await step("restore backup", self.backup.restore())
         await step("restore market snapshot", self.backup.restore_market())
+        # разовая миграция: убрать старые ценовые /set (555, фильтр дороже флора, лимит аккаунтов) —
+        # теперь действуют значения из .env (порог 400, все аккаунты параллельно)
+        if not await self.db.kv_get("migr_prices_v1"):
+            from config import drop_runtime_overrides
+            gone = drop_runtime_overrides(["COLLECTION_MIN_FLOOR", "MIN_STARS", "MAX_ABOVE_FLOOR",
+                                           "MAX_CONCURRENT_SESSIONS", "GLOBAL_RPS", "SESSION_RPS",
+                                           "CATALOG_INTERVAL", "TRACKER_INTERVAL", "COLD_POLL_INTERVAL"])
+            await self.db.kv_set("migr_prices_v1", 1)
+            if gone:
+                log.info("Reset old /set values to .env: %s", ", ".join(gone))
         if os.getenv("USE_PROXIES", "0").strip().lower() not in ("1", "true", "yes", "on"):
             n = self.storage.wipe_proxies()          # прокси выключены — стираем пул и привязки
             if n:

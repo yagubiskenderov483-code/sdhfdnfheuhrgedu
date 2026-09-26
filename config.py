@@ -142,7 +142,8 @@ class Settings:
     low_priority_hot_min: float = 10.0       # дешёвая коллекция опрашивается по изменению не чаще раза в N сек
     collection_min_floor: int = 4500         # отслеживать только коллекции с флором на маркете от N Stars (0 = все)
     min_ton: float = 0.0
-    max_above_floor: int = 50            # не слать лоты дороже флора коллекции больше чем на N% (0 = выкл)
+    route_by: str = "floor"              # тема по: floor (флор коллекции = цена гифта) | price (цена лота)
+    max_above_floor: int = 0            # не слать лоты дороже флора коллекции больше чем на N% (0 = выкл)
     allow_ton_only: bool = False
 
     # --- фильтр продавца ---
@@ -251,6 +252,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOW_PRIORITY_POLL_INTERVAL": ("low_priority_poll_interval", lambda v: max(5.0, float(v))),
     "MIN_TON": ("min_ton", lambda v: float(v.replace(",", "."))),
     "MAX_ABOVE_FLOOR": ("max_above_floor", lambda v: max(0, int(v))),
+    "ROUTE_BY": ("route_by", lambda v: v.strip().lower() if v.strip().lower() in ("floor", "price") else "floor"),
     "ALLOW_TON_ONLY": ("allow_ton_only", _bool_strict),
     "RUSSIAN_ONLY": ("russian_only", _bool_strict),
     "UNKNOWN_SELLER_POLICY": ("unknown_seller_policy", lambda v: _choice(v, {"allow", "block"})),
@@ -296,7 +298,8 @@ def _from_env() -> Settings:
         low_priority_poll_interval=max(5.0, _float(e("LOW_PRIORITY_POLL_INTERVAL"), 60.0)),
         low_priority_hot_min=max(1.0, _float(e("LOW_PRIORITY_HOT_MIN"), 10.0)),
         min_ton=_float(e("MIN_TON"), 0.0),
-        max_above_floor=max(0, _int(e("MAX_ABOVE_FLOOR"), 50)),
+        max_above_floor=max(0, _int(e("MAX_ABOVE_FLOOR"), 0)),
+        route_by=("price" if (e("ROUTE_BY") or "").strip().lower() == "price" else "floor"),
         allow_ton_only=_bool(e("ALLOW_TON_ONLY"), False),
         russian_only=_bool(e("RUSSIAN_ONLY"), True),
         unknown_seller_policy=(e("UNKNOWN_SELLER_POLICY") or "block").strip().lower(),

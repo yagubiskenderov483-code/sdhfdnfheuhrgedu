@@ -101,3 +101,13 @@ def test_overpriced_filter():
     print("OVERPRICED FILTER OK")
 
 test_overpriced_filter()
+
+def test_route_by_floor():
+    settings.price_routes = [(400, 1000, -1, 4), (1000, 2500, -1, 6), (5000, None, -1, 10)]
+    settings.backdrop_routes = []
+    # гифт коллекции с флором 500, выставлен за 8000 → тема 400-1000 (по реальной цене)
+    assert settings.route_chat(500, None) == (-1, 4)
+    assert settings.route_chat(8000, None) == (-1, 10)
+    print("ROUTE OK")
+
+test_route_by_floor()

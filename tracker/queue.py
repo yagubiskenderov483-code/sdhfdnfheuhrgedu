@@ -365,7 +365,9 @@ class ListingPipeline:
             # render ВНУТРИ try: если он бросит исключение, finally всё равно снимет резерв.
             # Иначе краш рендера навсегда блокировал бы этот NFT/продавца/коллекцию (резерв не снят).
             text = self.formatter.render(l)
-            _chat, _thread = settings.route_chat(l.stars_price, l.backdrop)
+            # тема по реальной стоимости гифта (флор коллекции), а не по цене, которую поставил продавец
+            _value = l.floor_stars if (settings.route_by == "floor" and l.floor_stars) else l.stars_price
+            _chat, _thread = settings.route_chat(_value, l.backdrop)
             res = await self.sender.send_listing(text, l.gift_link, listing_keyboard(l),
                                                  listing_keyboard(l, with_seller=False),
                                                  target=_chat, thread=_thread)
