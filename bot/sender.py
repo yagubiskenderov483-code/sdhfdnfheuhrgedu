@@ -74,6 +74,12 @@ class TelegramSender:
                                                       link_preview_options=preview, reply_markup=markup,
                                                       **extra)
                     self._last = time.monotonic()
+                    if reopened and extra:
+                        # тему закрыл владелец (чтобы писал только бот) — закрываем обратно
+                        try:
+                            await self.bot.close_forum_topic(chat_id, extra["message_thread_id"])
+                        except Exception as e:
+                            log.warning("Could not close topic %s back: %s", extra["message_thread_id"], e)
                     return SendResult(True, msg.message_id)
                 except TelegramRetryAfter as e:
                     log.warning("Bot API RetryAfter %ss", e.retry_after)
@@ -89,7 +95,8 @@ class TelegramSender:
                         reopened = True
                         try:
                             await self.bot.reopen_forum_topic(chat_id, extra["message_thread_id"])
-                            log.warning("Topic %s was closed — reopened it", extra["message_thread_id"])
+                            log.info("Topic %s is closed — opened it for one post, will close again",
+                                     extra["message_thread_id"])
                             continue
                         except Exception as re_err:
                             log.warning("Topic %s is closed and cannot be reopened (%s). Open the topic "
