@@ -44,7 +44,7 @@ def detected_at(l: Listing) -> str:
         dt = dt.astimezone(ZoneInfo(settings.timezone))
     except Exception:
         pass
-    return dt.strftime("%H:%M:%S · %d.%m")
+    return dt.strftime("%H:%M:%S · %d.%m.%Y")
 
 
 def seller_url(l: Listing) -> str | None:
