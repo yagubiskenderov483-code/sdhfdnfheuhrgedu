@@ -63,6 +63,7 @@ class TelegramSender:
         preview = (LinkPreviewOptions(url=preview_url, prefer_small_media=True, show_above_text=False)
                    if preview_url else LinkPreviewOptions(is_disabled=True))
         extra = {"message_thread_id": thread_id} if thread_id else {}
+        reopened = False
         async with self._lock:
             for attempt in range(attempts):
                 wait = self._last + settings.send_interval - time.monotonic()
@@ -83,6 +84,17 @@ class TelegramSender:
                     await asyncio.sleep(delay)
                 except TelegramBadRequest as e:
                     es = str(e)
+                    # тема закрыта → пробуем открыть её (нужно право «Управление темами») и повторить
+                    if extra and "TOPIC_CLOSED" in es and not reopened:
+                        reopened = True
+                        try:
+                            await self.bot.reopen_forum_topic(chat_id, extra["message_thread_id"])
+                            log.warning("Topic %s was closed — reopened it", extra["message_thread_id"])
+                            continue
+                        except Exception as re_err:
+                            log.warning("Topic %s is closed and cannot be reopened (%s). Open the topic "
+                                        "in the group or give the bot the «Manage topics» admin right",
+                                        extra["message_thread_id"], re_err)
                     # тема (topic) закрыта/удалена/не найдена → шлём в общий канал, чтобы лот не потерять
                     if extra and ("TOPIC_CLOSED" in es or "TOPIC_DELETED" in es
                                   or "message thread not found" in es.lower()
