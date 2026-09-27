@@ -25,6 +25,8 @@ class TokenBucket:
             return
         async with self._lock:
             while True:
+                if self.rate <= 0:          # лимит сняли через /set, пока ждали
+                    return
                 now = time.monotonic()
                 self.tokens = min(self.capacity, self.tokens + (now - self.updated) * self.rate)
                 self.updated = now

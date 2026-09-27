@@ -111,3 +111,122 @@ def test_route_by_floor():
     print("ROUTE OK")
 
 test_route_by_floor()
+
+def test_seller_signals():
+    import dataclasses, tempfile
+    from pathlib import Path
+    from filters.seller_filter import SellerFilter
+    from database.models import Listing
+    settings.russian_only = True; settings.unknown_seller_policy = "block"; settings.require_free_messages = False
+    settings.max_seller_level = 0; settings.max_seller_nfts = 0; settings.seller_phone_prefixes = ["7", "375", "380"]
+    f = SellerFilter(Path(tempfile.mkdtemp()))
+    def chk(**kw):
+        base = {x.name: None for x in dataclasses.fields(Listing)
+                if x.default is dataclasses.MISSING and x.default_factory is dataclasses.MISSING}
+        l = Listing(**base); l.seller_type = "user"
+        for k, v in kw.items(): setattr(l, k, v)
+        return f.check(l).code
+    assert chk(seller_about="nft | vk.com/x") == "RU_MARKER"
+    assert chk(seller_about="nft seller") == "UNKNOWN_BLOCKED"
+    assert chk(seller_extra_text="Всем привет") == "STORIES_RU"
+    assert chk(seller_business="Москва, Тверская 1") == "BUSINESS_RU"
+    assert chk(seller_about="من ایران") == "FOREIGN_TEXT"
+    assert chk(seller_name="Ivan 🇷🇺") == "FLAG_RU"
+    print("SELLER SIGNALS OK")
+
+test_seller_signals()
+
+def test_failover():
+    import asyncio, dataclasses, types
+    from tracker.queue import ListingPipeline
+    from tracker.marketplace import SellerFull
+    from tracker.worker import WorkerUnavailable
+    from database.models import Listing
+    settings.fetch_full_seller = True
+    calls = []
+    class S:
+        async def run(self, fn, only=None, **kw):
+            calls.append(only)
+            if only == "dead":
+                raise WorkerUnavailable("dead")
+            return SellerFull(level=2, premium=False, username="x", paid_message_stars=None,
+                              contact_require_premium=None, phone=None, about="Привет"), "alive"
+    p = ListingPipeline.__new__(ListingPipeline)
+    p.sessions = S(); p._seller_cache = {}; p.stats = {}
+    base = {x.name: None for x in dataclasses.fields(Listing)
+            if x.default is dataclasses.MISSING and x.default_factory is dataclasses.MISSING}
+    l = Listing(**base); l.seller_type = "user"; l.seller_id = 5; l.gift_id = 1; l.session_source = "dead"
+    asyncio.run(p._enrich_seller(l))
+    assert calls == ["dead", None] and l.session_source == "alive" and l.level == 2 and p.stats["failover"] == 1
+    print("FAILOVER OK")
+
+test_failover()
+
+def test_session_health():
+    from pathlib import Path
+    from tracker.worker import SessionWorker
+    from tracker.ratelimit import TokenBucket
+    w = SessionWorker("s1", Path("/tmp/x.session"), 1, "h", TokenBucket(0), lambda: 1.0)
+    assert w.risk() == "ok"
+    w._slow_down(10)
+    assert w.speed == 0.5 and w.risk() == "warn"
+    w._slow_down(120); w._slow_down(120)
+    assert w.speed < 0.3 and w.risk() == "high"
+    print("SESSION HEALTH OK")
+
+test_session_health()
+
+def test_priority_queue():
+    import asyncio, types
+    from tracker.queue import ListingPipeline, ListingEvent
+    async def run():
+        p = ListingPipeline.__new__(ListingPipeline)
+        p.queue = asyncio.PriorityQueue(); p._qseq = 0
+        mk = lambda name, t, mode: ListingEvent(types.SimpleNamespace(listing_id=name), t, mode)
+        await p._enqueue(mk("resume", 1.0, "resume"))
+        await p._enqueue(mk("old", 2.0, "live"))
+        await p._enqueue(mk("fresh", 3.0, "live"))
+        order = [(await p.queue.get())[2].listing.listing_id for _ in range(3)]
+        assert order == ["fresh", "old", "resume"], order
+    asyncio.run(run())
+    print("PRIORITY QUEUE OK")
+
+test_priority_queue()
+
+def test_payment_delivery():
+    import asyncio, types
+    import bot.subscription as S
+    class DB:
+        def __init__(s): s.kv = {}
+        async def kv_get(s, k, d=None): return s.kv.get(k, d)
+        async def kv_set(s, k, v): s.kv[k] = v
+    class Bot:
+        fail = True; n = 0
+        async def create_chat_invite_link(s, chat, **kw):
+            if s.fail: raise RuntimeError("no rights")
+            s.n += 1; return types.SimpleNamespace(invite_link=f"L{s.n}")
+        async def revoke_chat_invite_link(s, *a): pass
+        async def send_message(s, *a, **k): pass
+        async def get_chat_member(s, chat, uid): return types.SimpleNamespace(status="left")
+    settings.target_chat_id = -100
+    subs = S.Subscriptions(types.SimpleNamespace(db=DB(), bot=Bot()))
+    async def run():
+        await subs.load()
+        inv = {"uid": 9, "plan": "24h", "nano": 1, "ts": 0, "paid": True, "granted": "inflight"}
+        subs.state["invoices"]["X"] = inv
+        assert not await subs._deliver(inv) and inv["granted"] is False
+        assert not subs.user(9).get("pending")            # неудача не накручивает время
+        await subs._retry_undelivered(); await subs._retry_undelivered()
+        assert not subs.user(9).get("pending")
+        subs.bot.fail = False
+        await subs._retry_undelivered()
+        assert inv["granted"] is True and subs.user(9)["pending"] == 24 * 3600
+        await subs._retry_undelivered()                   # повторно не выдаёт
+        assert subs.user(9)["pending"] == 24 * 3600
+        subs.state["invoices"]["OLD"] = {"uid": 5, "plan": "24h", "nano": 1, "ts": 0, "paid": True}
+        await subs._retry_undelivered()                   # старые счета без флага не трогаем
+        assert not subs.user(5).get("pending")
+    asyncio.run(run())
+    print("PAYMENT DELIVERY OK")
+
+test_payment_delivery()

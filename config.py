@@ -86,6 +86,16 @@ def _chat_thread(s: str) -> tuple[int, int | None]:
     return int(chat_s), (int(thread_s) if thread_s.strip() else None)
 
 
+def _safe_parse(fn, raw, name):
+    """Битое значение в .env не должно ронять бота — работаем без маршрутов и пишем предупреждение."""
+    try:
+        return fn(raw)
+    except (ValueError, TypeError) as e:
+        import sys
+        print(f"WARNING: {name} в .env некорректен ({e}) — маршруты отключены", file=sys.stderr)
+        return []
+
+
 def _price_routes(v: str | None) -> list[tuple[int, int | None, int, int | None]]:
     """Разбор PRICE_ROUTES: 'lo-hi:chat[/topic]' через запятую. hi пустой = без верхней границы.
     Пример: '250-1000:-100..,5000-:-100../67'. Цена в Stars. Пустая строка — маршрутов нет."""
@@ -142,6 +152,9 @@ class Settings:
     low_priority_hot_min: float = 10.0       # дешёвая коллекция опрашивается по изменению не чаще раза в N сек
     collection_min_floor: int = 4500         # отслеживать только коллекции с флором на маркете от N Stars (0 = все)
     min_ton: float = 0.0
+    priority_floor: int = 2500           # коллекции с флором от N ⭐ опрашиваются чаще и первыми (0 = выкл)
+    priority_poll_interval: float = 1.5  # как часто опрашивать каждую дорогую коллекцию, сек
+    max_lot_age: int = 600               # лот, пролежавший в очереди дольше N сек, не отправляется (0 = выкл)
     route_by: str = "floor"              # тема по: floor (флор коллекции = цена гифта) | price (цена лота)
     max_above_floor: int = 0            # не слать лоты дороже флора коллекции больше чем на N% (0 = выкл)
     allow_ton_only: bool = False
@@ -252,6 +265,8 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOW_PRIORITY_POLL_INTERVAL": ("low_priority_poll_interval", lambda v: max(5.0, float(v))),
     "MIN_TON": ("min_ton", lambda v: float(v.replace(",", "."))),
     "MAX_ABOVE_FLOOR": ("max_above_floor", lambda v: max(0, int(v))),
+    "PRIORITY_FLOOR": ("priority_floor", lambda v: max(0, int(v))),
+    "PRIORITY_POLL_INTERVAL": ("priority_poll_interval", lambda v: max(0.5, float(v.replace(",", ".")))),
     "ROUTE_BY": ("route_by", lambda v: v.strip().lower() if v.strip().lower() in ("floor", "price") else "floor"),
     "ALLOW_TON_ONLY": ("allow_ton_only", _bool_strict),
     "RUSSIAN_ONLY": ("russian_only", _bool_strict),
@@ -285,8 +300,8 @@ def _from_env() -> Settings:
         api_hash=(e("API_HASH") or "").strip().strip('"'),
         bot_token=(e("BOT_TOKEN") or "").strip().strip('"'),
         target_chat_id=_int(e("TARGET_CHAT_ID"), 0),
-        price_routes=_price_routes(e("PRICE_ROUTES")),
-        backdrop_routes=_backdrop_routes(e("BACKDROP_ROUTES")),
+        price_routes=_safe_parse(_price_routes, e("PRICE_ROUTES"), "PRICE_ROUTES"),
+        backdrop_routes=_safe_parse(_backdrop_routes, e("BACKDROP_ROUTES"), "BACKDROP_ROUTES"),
         admin_ids=_int_set(e("ADMIN_IDS")),
         allow_all_users=_bool(e("ALLOW_ALL_USERS"), True),
         sub_chat_id=_int(e("SUB_CHAT_ID"), 0),
@@ -299,6 +314,9 @@ def _from_env() -> Settings:
         low_priority_hot_min=max(1.0, _float(e("LOW_PRIORITY_HOT_MIN"), 10.0)),
         min_ton=_float(e("MIN_TON"), 0.0),
         max_above_floor=max(0, _int(e("MAX_ABOVE_FLOOR"), 0)),
+        priority_floor=max(0, _int(e("PRIORITY_FLOOR"), 2500)),
+        priority_poll_interval=max(0.5, _float(e("PRIORITY_POLL_INTERVAL"), 1.5)),
+        max_lot_age=max(0, _int(e("MAX_LOT_AGE"), 600)),
         route_by=("price" if (e("ROUTE_BY") or "").strip().lower() == "price" else "floor"),
         allow_ton_only=_bool(e("ALLOW_TON_ONLY"), False),
         russian_only=_bool(e("RUSSIAN_ONLY"), True),

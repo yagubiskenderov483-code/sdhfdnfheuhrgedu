@@ -82,15 +82,23 @@ class SessionManager:
         return [w for w in self.workers.values() if w.is_usable()]
 
     async def run(self, fn, only: str | None = None, attempts: int = 6,
-                  timeout: float | None = 60, prefer: str | None = None) -> tuple[Any, str]:
+                  timeout: float | None = 60, prefer: str | None = None,
+                  priority: bool = False) -> tuple[Any, str]:
         """Выполнить MTProto-запрос на любой свободной session (или строго на `only`).
         FloodWait / обрыв на одной session → автоматически повтор на другой.
         Возвращает (результат, имя session)."""
         last: Exception | None = None
         for attempt in range(attempts):
-            w = await self.acquire(timeout=timeout, only=only, prefer=prefer if attempt == 0 else None)
+            pw = self.workers.get(only) if (priority and only) else None
+            if pw is not None:
+                pw.priority_waiters += 1        # обход коллекций уступает эту session проверке лота
             try:
-                return await w.call(fn), w.name
+                w = await self.acquire(timeout=timeout, only=only, prefer=prefer if attempt == 0 else None)
+            finally:
+                if pw is not None:
+                    pw.priority_waiters -= 1
+            try:
+                return await w.call(fn, priority=priority), w.name
             except WorkerUnavailable as e:
                 last = e
                 if only:
@@ -110,12 +118,18 @@ class SessionManager:
                 w = self.workers.get(only)
                 if w is None or w.status in (WorkerStatus.AUTH_ERROR, WorkerStatus.STOPPED):
                     raise WorkerUnavailable(f"session {only} unavailable")
+                if not w.is_usable() and (w.status == WorkerStatus.ERROR or w.flood_until - now > 3):
+                    # умерла / долгий FloodWait — не ждём её, вызывающий переключится на другую
+                    raise WorkerUnavailable(f"session {only} is {w.status.value}")
                 candidates = [w] if (w.is_usable() and not w.busy) else []
             else:
-                candidates = [w for w in self.workers.values() if w.is_usable() and not w.busy]
+                candidates = [w for w in self.workers.values()
+                              if w.is_usable() and not w.busy and not w.priority_waiters]
             if candidates:
                 pw = self.workers.get(prefer) if prefer else None
-                best = pw if pw in candidates else min(candidates, key=lambda w: w.ready_at())
+                soonest = min(candidates, key=lambda w: w.ready_at())
+                # «своя» session коллекции — только если она не сильно медленнее самой свободной
+                best = pw if (pw in candidates and pw.ready_at() <= soonest.ready_at() + 0.5) else soonest
                 best.busy = True   # остаток интервала session выдержит сам внутри call()
                 return best
             if deadline is not None and now >= deadline:

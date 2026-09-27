@@ -33,7 +33,9 @@ from database.models import Listing, ListingStatus
 from filters.price_filter import PriceFilter
 from filters.seller_filter import SellerFilter
 from sessions.manager import SessionManager
-from tracker.marketplace import ResaleItem, SellerFull, fetch_full_user, fetch_gift_texts, fetch_nft_count
+from tracker.marketplace import (ResaleItem, SellerFull, fetch_extra_texts, fetch_full_user,
+                                 fetch_full_user_failover, fetch_gift_texts,
+                                 fetch_nft_count)
 from utils.links import gift_link, username_link
 from utils.logger import get_logger, llog
 
@@ -126,6 +128,10 @@ class ListingEvent:
     mode: str
 
 
+class _Stale(Exception):
+    """Лот устарел, пока проверялся продавец — не отправляем."""
+
+
 class ListingPipeline:
     def __init__(self, db: Database, sessions: SessionManager, sender: TelegramSender,
                  formatter: MessageFormatter, price_filter: PriceFilter, seller_filter: SellerFilter):
@@ -135,10 +141,13 @@ class ListingPipeline:
         self.formatter = formatter
         self.price_filter = price_filter
         self.seller_filter = seller_filter
-        self.queue: asyncio.Queue[ListingEvent] = asyncio.Queue()
+        # приоритетная очередь: свежие LIVE-лоты первыми, дообработка после перезапуска — после них
+        self.queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
+        self._qseq = 0
         self._workers: list[asyncio.Task] = []
         self._seller_cache: dict[int, tuple[float, SellerFull]] = {}
         self._nft_cache: dict[int, tuple[float, int | None]] = {}
+        self._extra_text_cache: dict[int, tuple[float, str | None]] = {}
         self._gift_text_cache: dict[int, tuple[float, str | None]] = {}
         self.stats = {"new": 0, "sent": 0, "filtered_price": 0, "filtered_seller": 0,
                       "filtered_repeat": 0, "duplicates": 0, "failed": 0}
@@ -151,21 +160,33 @@ class ListingPipeline:
         self._streak = 0
         self._sending_gift_ids: set[int] = set()
         self.last_new_at: float | None = None      # time.time()
+        self.latency: dict[str, float] = {}
+        self.paused_getter = None                  # задаёт App: lambda: coordinator.paused
+        self.floor_getter = None                   # задаёт App: gift_id → флор коллекции
+        self._seen_ids: dict[str, None] = {}       # недавние listing_id (RAM-кэш дедупа, по порядку)
         self.last_sent_at: float | None = None
 
     # ------------------------------------------------------------------ admission (global dedup)
     async def admit(self, items: list[ResaleItem], session: str | None, mode: str,
-                    floor_stars: int | None = None) -> int:
+                    floor_stars: int | None = None, t_detect: float | None = None) -> int:
         """items — сверху вниз (новейшие первыми). В очередь кладём от старых к новым."""
         admitted = 0
+        t_found = time.monotonic()
         for it in reversed(items):
             listing = build_listing(it, session)
             listing.floor_stars = floor_stars
+            listing.t_detect, listing.t_found = t_detect, t_found
+            # быстрый отсев дублей в памяти — без обращения к БД
+            if listing.listing_id in self._seen_ids:
+                self.stats["duplicates"] += 1
+                continue
             # Глобальная дедупликация: право на обработку получает только тот, чей INSERT прошёл.
             if not await self.db.insert_listing_if_new(listing):
+                self._remember(listing.listing_id)
                 self.stats["duplicates"] += 1
                 llog("DUPLICATE", f"listing={listing.listing_id} already_known=true")
                 continue
+            self._remember(listing.listing_id)
             admitted += 1
             self.stats["new"] += 1
             self.last_new_at = time.time()
@@ -176,8 +197,20 @@ class ListingPipeline:
             llog("NEW", f'listing={listing.listing_id} gift="{listing.gift_name} #{listing.gift_num}" '
                         f"price={price} seller={listing.seller_key} detected={listing.first_seen} "
                         f"via={session} mode={mode}")
-            await self.queue.put(ListingEvent(listing, time.monotonic(), mode))
+            await self._enqueue(ListingEvent(listing, time.monotonic(), mode))
         return admitted
+
+    async def _enqueue(self, ev: ListingEvent) -> None:
+        self._qseq += 1
+        prio = 0 if ev.mode == "live" else 1
+        # внутри приоритета — самый свежий первым
+        await self.queue.put((prio * 1e12 - ev.detected_mono, self._qseq, ev))
+
+    def _remember(self, listing_id: str) -> None:
+        self._seen_ids[listing_id] = None
+        if len(self._seen_ids) > 200_000:
+            for _ in range(20_000):                      # выкидываем самые старые
+                self._seen_ids.pop(next(iter(self._seen_ids)))
 
     async def resume_unfinished(self) -> int:
         last = await self.db.last_sent_listing()
@@ -185,7 +218,10 @@ class ListingPipeline:
             self._last_sent_gift_id, self._streak = last["gift_id"], 1
         rows = await self.db.unfinished_listings()
         for r in rows:
-            await self.queue.put(ListingEvent(listing_from_row(r), time.monotonic(), "resume"))
+            lr = listing_from_row(r)
+            if self.floor_getter and lr.floor_stars is None:
+                lr.floor_stars = self.floor_getter(lr.gift_id)
+            await self._enqueue(ListingEvent(lr, time.monotonic(), "resume"))
         if rows:
             log.info("Resuming %s unfinished listing(s) from previous run", len(rows))
         return len(rows)
@@ -203,7 +239,7 @@ class ListingPipeline:
 
     async def _worker_loop(self, idx: int) -> None:
         while True:
-            ev = await self.queue.get()
+            _, _, ev = await self.queue.get()
             try:
                 await self.process(ev)
             except asyncio.CancelledError:
@@ -228,12 +264,22 @@ class ListingPipeline:
         else:
             uid = l.seller_id
             try:
-                # access_hash продавца есть только у той session, которая получила лот → строго на ней
+                # access_hash продавца есть у той session, которая получила лот → сначала на ней
                 full, _ = await self.sessions.run(lambda c: fetch_full_user(c, uid),
-                                                  only=l.session_source, attempts=2, timeout=45)
+                                                  only=l.session_source, priority=True, attempts=2, timeout=15)
             except Exception as e:
-                log.debug("getFullUser %s failed: %s", uid, e)
-                return
+                # failover: session умерла / FloodWait / занята — берём любую другую живую
+                gid = l.gift_id
+                log.info("Seller %s: session %s unavailable (%s) — switching to another session",
+                         uid, l.session_source, type(e).__name__)
+                try:
+                    full, other = await self.sessions.run(lambda c: fetch_full_user_failover(c, uid, gid),
+                                                          attempts=3, timeout=20)
+                    l.session_source = other      # дальнейшие проверки продавца — на рабочей session
+                    self.stats["failover"] = self.stats.get("failover", 0) + 1
+                except Exception as e2:
+                    log.debug("getFullUser %s failover failed: %s", uid, e2)
+                    return
             self._seller_cache[uid] = (time.monotonic(), full)
             if len(self._seller_cache) > 50_000:
                 self._seller_cache.clear()
@@ -247,6 +293,8 @@ class ListingPipeline:
             l.seller_phone = full.phone
         l.seller_about = full.about
         l.seller_channel = full.channel_title
+        l.seller_business = getattr(full, "business_text", None)
+        l.seller_channel_id = getattr(full, "channel_id", None)
         l.messages = _messages_status(full.paid_message_stars, full.contact_require_premium)
 
     async def _nft_count(self, l: Listing) -> int | None:
@@ -256,10 +304,10 @@ class ListingPipeline:
             return cached[1]
         try:
             n, _ = await self.sessions.run(lambda c: fetch_nft_count(c, uid),
-                                           only=l.session_source, attempts=2, timeout=45)
+                                           only=l.session_source, priority=True, attempts=2, timeout=45)
         except Exception as e:
             log.debug("getSavedStarGifts %s failed: %s", uid, e)
-            n = None
+            return None          # сбой не кэшируем — в следующий раз спросим снова
         self._nft_cache[uid] = (time.monotonic(), n)
         if len(self._nft_cache) > 50_000:
             self._nft_cache.clear()
@@ -272,13 +320,30 @@ class ListingPipeline:
             return cached[1]
         try:
             txt, _ = await self.sessions.run(lambda c: fetch_gift_texts(c, uid),
-                                             only=l.session_source, attempts=1, timeout=20)
+                                             only=l.session_source, priority=True, attempts=1, timeout=20)
         except Exception as e:
             log.debug("getSavedStarGifts(texts) %s failed: %s", uid, e)
-            txt = None
+            return None
         self._gift_text_cache[uid] = (time.monotonic(), txt)
         if len(self._gift_text_cache) > 50_000:
             self._gift_text_cache.clear()
+        return txt
+
+    async def _extra_texts(self, l: Listing) -> str | None:
+        uid = l.seller_id
+        cached = self._extra_text_cache.get(uid)
+        if cached and time.monotonic() - cached[0] < settings.seller_cache_ttl:
+            return cached[1]
+        ch = l.seller_channel_id
+        try:
+            txt, _ = await self.sessions.run(lambda c: fetch_extra_texts(c, uid, ch),
+                                             only=l.session_source, priority=True, attempts=1, timeout=20)
+        except Exception as e:
+            log.debug("stories/channel %s failed: %s", uid, e)
+            return None
+        self._extra_text_cache[uid] = (time.monotonic(), txt)
+        if len(self._extra_text_cache) > 50_000:
+            self._extra_text_cache.clear()
         return txt
 
     def _streak_reason(self, l: Listing) -> str | None:
@@ -309,6 +374,24 @@ class ListingPipeline:
 
     async def process(self, ev: ListingEvent) -> None:
         l = ev.listing
+        while self.paused_getter and self.paused_getter():
+            await asyncio.sleep(1)          # /off: не делаем запросов и не шлём, пока парсер выключен
+        t_start = time.monotonic()
+        # защита от завала: если лот пролежал в очереди слишком долго, он уже не «свежий» — не шлём
+        base = min(ev.detected_mono, l.t_detect) if l.t_detect is not None else ev.detected_mono
+        age = t_start - base
+        if ev.mode == "resume":
+            # лот из прошлого запуска: считаем возраст по реальному времени обнаружения, а не по перезапуску
+            try:
+                age = max(age, (datetime.now(timezone.utc) - datetime.fromisoformat(l.first_seen)).total_seconds())
+            except (TypeError, ValueError):
+                pass
+        if settings.max_lot_age > 0 and age > settings.max_lot_age:
+            l.status, l.reason = ListingStatus.ERROR, f"stale: found {age:.0f}s ago"
+            self.stats["stale"] = self.stats.get("stale", 0) + 1
+            llog("FILTER", f"#{l.listing_id} skipped: {l.reason}")
+            await self.db.update_listing(l)
+            return
         price_txt = " / ".join(x for x in (
             f"{l.stars_price} Stars" if l.stars_price is not None else "",
             f"{l.ton_price:g} TON" if l.ton_price is not None else "") if x) or "no price"
@@ -334,6 +417,15 @@ class ListingPipeline:
         # продавец без телефона/био/канала: последний объективный шанс — язык текстов к его подаркам
         if sr.code == "UNKNOWN_BLOCKED" and l.seller_type == "user" and l.seller_id:
             l.seller_gift_text = await self._gift_texts(l)
+            sr = self.seller_filter.check(l)
+        # всё ещё непонятно — смотрим истории и посты личного канала
+        if sr.code == "UNKNOWN_BLOCKED" and l.seller_type == "user" and l.seller_id:
+            l.seller_extra_text = await self._extra_texts(l)
+            sr = self.seller_filter.check(l)
+        # продавец прошёл только по текстам/историям — лимит NFT ещё не проверяли
+        if (sr.passed and l.seller_nfts is None and settings.max_seller_nfts > 0
+                and l.seller_type == "user" and l.seller_id):
+            l.seller_nfts = await self._nft_count(l)
             sr = self.seller_filter.check(l)
         l.seller_filter_result = sr.code
         if not sr.passed:
@@ -364,6 +456,11 @@ class ListingPipeline:
         try:
             # render ВНУТРИ try: если он бросит исключение, finally всё равно снимет резерв.
             # Иначе краш рендера навсегда блокировал бы этот NFT/продавца/коллекцию (резерв не снят).
+            t_checked = time.monotonic()
+            if ev.mode != "resume" and settings.max_lot_age > 0 and t_checked - base > settings.max_lot_age:
+                raise _Stale(f"stale: {t_checked - base:.0f}s after detection (slow seller check)")
+            if l.t_detect is not None:
+                l.detect_secs = t_checked - l.t_detect
             text = self.formatter.render(l)
             # тема по реальной стоимости гифта (флор коллекции), а не по цене, которую поставил продавец
             _value = l.floor_stars if (settings.route_by == "floor" and l.floor_stars) else l.stars_price
@@ -378,14 +475,28 @@ class ListingPipeline:
                 if not res.test_only:
                     self.stats["sent"] += 1
                     self.last_sent_at = time.time()
-                latency = time.monotonic() - ev.detected_mono
+                t_sent = time.monotonic()
+                latency = t_sent - ev.detected_mono
                 dest = "test" if res.test_only else (f"{_chat}/topic{_thread}" if _thread else f"{_chat}")
                 llog("SEND", f"listing={l.listing_id} → {dest} latency={latency:.2f}s")
+                if l.t_detect is not None and l.t_found is not None:
+                    parts = {"request": l.t_found - l.t_detect, "queue": t_start - l.t_found,
+                             "check": t_checked - t_start, "send": t_sent - t_checked,
+                             "total": t_sent - l.t_detect}
+                    for k, v in parts.items():
+                        old = self.latency.get(k)
+                        self.latency[k] = v if old is None else old * 0.8 + v * 0.2
+                    llog("LATENCY", f"listing={l.listing_id} " + " ".join(f"{k}={v:.2f}s" for k, v in parts.items()))
             else:
                 l.status, l.reason = ListingStatus.SEND_FAILED, res.error
                 self.stats["failed"] += 1
                 llog("SEND", f"listing={l.listing_id} FAILED: {res.error}", level=40)
             await self.db.update_listing(l)   # sent=1 записан ДО снятия резерва → нет гонки повторов
+        except _Stale as e:
+            l.status, l.reason = ListingStatus.ERROR, str(e)
+            self.stats["stale"] = self.stats.get("stale", 0) + 1
+            llog("FILTER", f"#{l.listing_id} skipped: {e}")
+            await self.db.update_listing(l)
         finally:
             async with self._repeat_lock:
                 self._reserved_gifts.discard(l.gift_unique_id)

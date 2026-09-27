@@ -46,6 +46,13 @@ class Listing:
     floor_stars: int | None = None     # флор коллекции на момент обнаружения (для поста)
     seller_nfts: int | None = None     # сколько NFT видно в профиле продавца
     seller_channel: str | None = None  # название личного канала продавца (для фильтра языка)
+    # замеры скорости (только в памяти): monotonic-время обнаружения и момента, когда лот прочитан
+    t_detect: float | None = None
+    t_found: float | None = None
+    detect_secs: float | None = None   # сколько секунд от обнаружения до отправки (для строки в посте)
+    seller_channel_id: int | None = None
+    seller_business: str | None = None   # бизнес-профиль (приветствие, адрес) — НЕ в БД, для фильтра языка
+    seller_extra_text: str | None = None # истории и посты личного канала — НЕ в БД, для фильтра языка
     seller_gift_text: str | None = None  # тексты, приложенные к подаркам продавца — НЕ в БД, для фильтра языка
 
     stars_price: int | None = None

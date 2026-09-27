@@ -76,6 +76,8 @@ class MarketplaceCoordinator:
         self._tasks: list[asyncio.Task] = []
         self._sync_retry_at: dict[int, float] = {}
         self._hot_since: dict[int, float] = {}
+        self._poll_t0: dict[int, float] = {}
+        self._poll_fails: dict[int, int] = {}
         self.paused = False
         self.skipped: set[int] = set()
         self.low_prio: set[int] = set()           # флор ниже порога, режим slow: отслеживаются реже            # коллекции с флором ниже COLLECTION_MIN_FLOOR
@@ -417,6 +419,7 @@ class MarketplaceCoordinator:
         # 2b) Коллекция, которую Telegram отдаёт не целиком: незнакомый лот наверху может быть
         #     старым лотом, которого мы не видели, со сменённой ценой. Новый листинг увеличивает
         #     count, смена цены — нет. Пропускаем как NEW не больше, чем вырос count; иначе — тихо.
+        was_baseline = st.baseline_pending
         if st.baseline_pending:
             for it in cls.new:
                 self.stats["silent"] += 1
@@ -425,6 +428,22 @@ class MarketplaceCoordinator:
             cls.new = []
             st.baseline_pending = False
             self._dirty.add(gid)
+
+        # 2c) «ложный якорь»: сверху встал старый лот (перевыставили / чуть сменили цену), а настоящие
+        #     новые оказались ПОД ним. Счётчик коллекции вырос на delta → столько новых точно есть.
+        #     Недостающих до delta берём из невиданных лотов ниже якоря (самые верхние), остальные — тихо.
+        if (st.complete and not st.partial and not was_baseline and count is not None
+                and st.last_count is not None and cls.silent):
+            missing = (count - st.last_count) - len(cls.new)
+            if missing > 0:
+                below = [it for it, why in cls.silent if why == "first_seen_below_anchor"][:missing]
+                if below:
+                    ids = {id(it) for it in below}
+                    cls.silent = [(it, why) for it, why in cls.silent if id(it) not in ids]
+                    cls.new = cls.new + below
+                    self.stats["silent"] -= len(below)
+                    for it in below:
+                        llog("NEW_BELOW_ANCHOR", f"listing={it.listing_id} count_delta={count - st.last_count}")
 
         if cls.new and st.partial:
             delta = (count - st.last_count) if (count is not None and st.last_count is not None) else 0
@@ -449,7 +468,8 @@ class MarketplaceCoordinator:
         if cls.new:
             if mode == "recover":
                 llog("RECOVERY", f'collection="{st.title}" new_during_downtime={len(cls.new)}')
-            admitted = await self.pipeline.admit(cls.new, session, mode, floor_stars=st.floor_stars)
+            admitted = await self.pipeline.admit(cls.new, session, mode, floor_stars=st.floor_stars,
+                                                 t_detect=self._poll_t0.get(gid) if mode == "live" else None)
             st.last_seen_listing_id = cls.new[0].listing_id
             st.last_seen_timestamp = now_iso
 
@@ -471,9 +491,11 @@ class MarketplaceCoordinator:
         except errors.RPCError as e:
             self.stats["poll_errors"] += 1
             log.warning("[%s] RPC error: %s", st.title, e)
+            return 0      # ошибка самого запроса — повторять часто бессмысленно
         except (WorkerUnavailable, TimeoutError) as e:
             self.stats["poll_errors"] += 1
             log.warning("[%s] no session available: %s", st.title, e)
+            return None   # временно нет свободного аккаунта — повторить скоро
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -490,7 +512,7 @@ class MarketplaceCoordinator:
                 return await self._poll_safe(s, mode)
 
         results = await asyncio.gather(*(one(s) for s in states))
-        return sum(results)
+        return sum(r or 0 for r in results)
 
     # ------------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -635,11 +657,14 @@ class MarketplaceCoordinator:
             return
         now = time.monotonic()
         capacity = max(1, min(settings.max_concurrent_sessions, max(1, len(self.sessions.usable()))))
-        due = sorted((t, gid) for gid, t in self._due.items()
+        # 1) коллекции, где каталог показал новый лот (hot) — всегда первыми;
+        # 2) затем дорогие (флор от PRIORITY_FLOOR); 3) остальные по времени
+        due = sorted((0 if gid in self._hot_since else (1 if self._is_priority(gid) else 2), t, gid)
+                     for gid, t in self._due.items()
                      if t <= now and gid not in self._running
                      and gid in self.states and self._is_live(self.states[gid]))
         live_running = sum(1 for g in self._running if g in self.states and self._is_live(self.states[g]))
-        for _, gid in due:
+        for _, _, gid in due:
             if live_running >= capacity:
                 break
             live_running += 1
@@ -651,13 +676,30 @@ class MarketplaceCoordinator:
             asyncio.create_task(self._live_poll(st), name=f"poll-{gid}")
         await asyncio.sleep(0.02)
 
+    def _priority_interval(self) -> float:
+        """Частый опрос дорогих коллекций, но не больше половины мощности аккаунтов —
+        иначе остальные коллекции и «горячие» лоты встают в очередь, а аккаунты ловят FloodWait."""
+        n = sum(1 for g in self.states if self._is_priority(g))
+        usable = max(1, len(self.sessions.usable()))
+        budget = usable * max(0.05, settings.session_rps) * 0.5
+        return max(settings.priority_poll_interval, n / budget if budget else 60.0)
+
+    def _is_priority(self, gid: int) -> bool:
+        st = self.states.get(gid)
+        return bool(settings.priority_floor and st is not None and st.floor_stars
+                    and st.floor_stars >= settings.priority_floor)
+
     async def _live_poll(self, st: CollectionState) -> None:
         gid = st.gift_id
         found = 0
         hot_at = self._hot_since.pop(gid, None)
+        started = time.monotonic()
+        # момент обнаружения: изменение счётчика в каталоге (если было) или начало опроса
+        self._poll_t0[gid] = hot_at if (hot_at is not None and started - hot_at < 120) else started
         if hot_at is not None:
-            lat = time.monotonic() - hot_at
-            self.hot_latency = lat if self.hot_latency is None else self.hot_latency * 0.8 + lat * 0.2
+            lat = started - hot_at
+            if lat < 120:          # старые отметки (после паузы/синхронизации) не портят среднее
+                self.hot_latency = lat if self.hot_latency is None else self.hot_latency * 0.8 + lat * 0.2
         try:
             found = await self._poll_safe(st, "live")
         finally:
@@ -670,7 +712,23 @@ class MarketplaceCoordinator:
             # коллекция, где только что были новые лоты, остаётся «горячей»; остальные — страховочный
             # опрос раз в COLD_POLL_INTERVAL, а мгновенно — когда каталог покажет изменение счётчика
             cold = settings.low_priority_poll_interval if gid in self.low_prio else settings.cold_poll_interval
-            self._due[gid] = now + (settings.tracker_interval if found else cold)
+            if self._is_priority(gid):
+                # дорогие коллекции опрашиваются чаще — но не реже обычных
+                cold = min(cold, self._priority_interval())
+            if found is None:
+                # нет свободной session — повторить скоро (с нарастающей паузой) и не терять «горячесть»
+                fails = self._poll_fails.get(gid, 0) + 1
+                self._poll_fails[gid] = fails
+                if hot_at is not None:
+                    self._hot_since.setdefault(gid, hot_at)
+                nxt = now + min(cold, 2.0 ** min(fails - 1, 6))
+            elif gid in self._hot_since:
+                self._poll_fails.pop(gid, None)
+                nxt = now      # пока шёл опрос, каталог показал ещё изменение — опросить сразу
+            else:
+                self._poll_fails.pop(gid, None)
+                nxt = now + (settings.tracker_interval if found else cold)
+            self._due[gid] = nxt
             self._running.discard(gid)
 
     async def _catalog_loop(self) -> None:

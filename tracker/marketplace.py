@@ -31,11 +31,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from telethon import TelegramClient
+from telethon import errors, TelegramClient
 from telethon.tl import types
 from telethon.tl.functions.payments import (GetResaleStarGiftsRequest, GetSavedStarGiftsRequest,
                                             GetStarGiftsRequest)
 from telethon.tl.functions.users import GetFullUserRequest
+from telethon.tl.functions.stories import GetPeerStoriesRequest
 
 
 @dataclass
@@ -188,6 +189,8 @@ class SellerFull:
     phone: str | None
     about: str | None = None
     channel_title: str | None = None     # название личного канала профиля (UserFull.personal_channel_id)
+    channel_id: int | None = None        # id личного канала (для чтения последних постов)
+    business_text: str | None = None     # бизнес-профиль: приветствие, адрес
 
 
 async def fetch_full_user(client: TelegramClient, user_id: int) -> SellerFull:
@@ -210,10 +213,72 @@ async def fetch_full_user(client: TelegramClient, user_id: int) -> SellerFull:
         about=getattr(full, "about", None),
         channel_title=next((getattr(c, "title", None) for c in (res.chats or [])
                             if getattr(c, "id", None) == getattr(full, "personal_channel_id", None)), None),
+        channel_id=getattr(full, "personal_channel_id", None),
+        business_text=_business_text(full),
     )
 
 
-async def fetch_gift_texts(client: TelegramClient, user_id: int, limit: int = 20) -> str:
+async def fetch_full_user_failover(client: TelegramClient, user_id: int, gift_id: int) -> SellerFull:
+    """Резервный путь, если аккаунт, нашедший лот, отвалился: другой аккаунт читает верх рынка
+    этой коллекции (Telegram отдаёт продавцов вместе с доступом к ним) и уже потом их профиль."""
+    try:
+        return await fetch_full_user(client, user_id)
+    except (ValueError, TypeError):
+        await client(GetResaleStarGiftsRequest(gift_id=gift_id, offset="", limit=30))
+        return await fetch_full_user(client, user_id)
+
+
+def _business_text(full) -> str | None:
+    parts = []
+    intro = getattr(full, "business_intro", None)
+    if intro:
+        parts += [getattr(intro, "title", None), getattr(intro, "description", None)]
+    loc = getattr(full, "business_location", None)
+    if loc:
+        parts.append(getattr(loc, "address", None))
+    return "\n".join(p for p in parts if p) or None
+
+
+async def fetch_extra_texts(client: TelegramClient, user_id: int, channel_id: int | None) -> str:
+    """Подписи к историям продавца, адреса на историях и последние посты его личного канала."""
+    parts: list[str] = []
+    entity = await client.get_input_entity(types.PeerUser(user_id))
+    try:
+        res = await client(GetPeerStoriesRequest(peer=entity))
+        for st in getattr(getattr(res, "stories", None), "stories", None) or []:
+            if getattr(st, "caption", None):
+                parts.append(st.caption)
+            for area in getattr(st, "media_areas", None) or []:
+                if isinstance(getattr(area, "title", None), str):          # место (venue)
+                    parts.append(area.title)
+                addr = getattr(area, "address", None)                       # геометка с адресом
+                if isinstance(addr, str):
+                    parts.append(addr)
+                elif addr is not None:
+                    iso = getattr(addr, "country_iso2", None)
+                    if iso:
+                        parts.append(f"country:{iso}")
+                    parts += [getattr(addr, "city", None) or "", getattr(addr, "street", None) or ""]
+    except (errors.FloodError, errors.ServerError, ConnectionError, OSError,
+            errors.AuthKeyUnregisteredError, errors.SessionRevokedError):
+        raise                     # FloodWait / обрыв должны дойти до session — она отдохнёт / переподключится
+    except Exception:
+        pass
+    if channel_id:
+        try:
+            ch = await client.get_input_entity(types.PeerChannel(channel_id))
+            async for m in client.iter_messages(ch, limit=5):
+                if getattr(m, "message", None):
+                    parts.append(m.message)
+        except (errors.FloodError, errors.ServerError, ConnectionError, OSError,
+                errors.AuthKeyUnregisteredError, errors.SessionRevokedError):
+            raise
+        except Exception:
+            pass
+    return "\n".join(p for p in parts if p)
+
+
+async def fetch_gift_texts(client: TelegramClient, user_id: int, limit: int = 50) -> str:
     """Тексты, приложенные к подаркам продавца (например поздравление от дарившего).
     Объективный признак языка — как bio, но из сообщений к подаркам. Скрытые подарки Telegram не отдаёт."""
     entity = await client.get_input_entity(types.PeerUser(user_id))

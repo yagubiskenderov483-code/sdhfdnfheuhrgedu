@@ -114,6 +114,8 @@ class SessionBackup:
         self.market_import: Callable[[dict], Awaitable[int]] | None = None
         self.paused_getter: Callable[[], bool] | None = None
         self.subs_export: Callable[[], dict] | None = None
+        self.flags: dict = {}                         # разовые миграции, уже выполненные (переживают деплой)
+        self._save_lock = asyncio.Lock()
         self.subs_import: Callable[[dict], Awaitable[int]] | None = None
         self.restored_paused: bool = False
 
@@ -167,6 +169,10 @@ class SessionBackup:
         return out
 
     async def save(self, chat_hint: int | None = None, allow_shrink: bool = False) -> bool:
+        async with self._save_lock:        # одновременные сохранения не перетирают друг друга
+            return await self._save(chat_hint, allow_shrink)
+
+    async def _save(self, chat_hint: int | None = None, allow_shrink: bool = False) -> bool:
         """allow_shrink=True — только при удалении аккаунта: разрешает сохранить копию с меньшим
         числом аккаунтов, чем в прошлой. В остальных случаях меньшая копия НЕ перезаписывает старую
         (защита от затирания, если аккаунты ещё не восстановились или файл временно недоступен)."""
@@ -199,7 +205,8 @@ class SessionBackup:
                    "proxies": self.storage.load_pool(),
                    "settings": export_runtime_overrides(),
                    "paused": bool(self.paused_getter()) if self.paused_getter else False,
-                   "subs": self.subs_export() if self.subs_export else {}}
+                   "subs": self.subs_export() if self.subs_export else {},
+                   "flags": self.flags}
         blob = f.encrypt(json.dumps(payload).encode())
 
         if self._last_chat is None:
@@ -317,6 +324,8 @@ class SessionBackup:
                 await old_bot.session.close()
 
         self.restored_paused = bool(data.get("paused"))
+        if isinstance(data.get("flags"), dict):
+            self.flags.update(data["flags"])
         if self._set_admins and data.get("admins"):
             self._set_admins(set(int(a) for a in data["admins"]))
         if self._history_import and data.get("sent"):

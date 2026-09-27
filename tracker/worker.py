@@ -74,6 +74,12 @@ class SessionWorker:
         self.flood_until = 0.0
         self.next_allowed = 0.0
         self.busy = False
+        self.priority_waiters = 0          # срочные запросы (проверка продавца) ждут именно эту session
+        # здоровье аккаунта: при FloodWait/ошибках сам замедляется, при долгой стабильной работе разгоняется
+        self.speed = 1.0                   # множитель скорости: 1.0 — норма, 0.2 — сильно замедлен
+        self.ok_streak = 0                 # успешных запросов подряд
+        self.ping_ms: float | None = None  # среднее время ответа Telegram, мс
+        self.recent_floods: list[float] = []   # моменты FloodWait за последний час
         self.requests = 0
         self.errors = 0
         self.floods = 0
@@ -206,6 +212,29 @@ class SessionWorker:
         return self.status == WorkerStatus.ACTIVE or (
             self.status == WorkerStatus.FLOOD and time.monotonic() >= self.flood_until)
 
+    def _slow_down(self, flood_seconds: int) -> None:
+        """Аккаунт начал ловить FloodWait → снижаем его скорость, чтобы Telegram его не ограничил сильнее.
+        Чем чаще и дольше FloodWait за последний час, тем сильнее замедление."""
+        now = time.monotonic()
+        self.recent_floods = [t for t in self.recent_floods if now - t < 3600] + [now]
+        factor = 0.5 if flood_seconds < 60 else 0.3
+        if len(self.recent_floods) >= 3:
+            factor *= 0.6
+        self.speed = max(0.15, self.speed * factor)
+        self.ok_streak = 0
+        log.warning("Session %s: FloodWait %ss (%s за час) — замедляю до x%.2f",
+                    self.name, flood_seconds, len(self.recent_floods), self.speed)
+
+    def risk(self) -> str:
+        """Оценка риска: ok | warn | high — по частоте FloodWait и ошибок."""
+        now = time.monotonic()
+        n = len([t for t in self.recent_floods if now - t < 3600])
+        if n >= 3 or self.speed <= 0.3:
+            return "high"
+        if n >= 1 or self.speed < 1.0:
+            return "warn"
+        return "ok"
+
     def ready_at(self) -> float:
         return max(self.next_allowed, self.flood_until)
 
@@ -214,7 +243,7 @@ class SessionWorker:
         return self.is_usable() and not self.busy and now >= self.ready_at()
 
     # ------------------------------------------------------------------ calls
-    async def call(self, fn: Callable[[TelegramClient], Awaitable[Any]]) -> Any:
+    async def call(self, fn: Callable[[TelegramClient], Awaitable[Any]], priority: bool = False) -> Any:
         """Выполнить запрос. Бросает WorkerUnavailable при flood/сети/авторизации,
         прочие RPCError (например STARGIFT_INVALID) пробрасывает как есть."""
         if self.client is None:
@@ -225,16 +254,25 @@ class SessionWorker:
             if wait > 0:
                 await asyncio.sleep(wait)
             await self.limiter.acquire()
-            rps = max(0.05, self._rps())
+            rps = max(0.05, self._rps() * self.speed)
             self.next_allowed = time.monotonic() + 1.0 / rps
             self.requests += 1
             if self.status == WorkerStatus.FLOOD:
                 self.status = WorkerStatus.ACTIVE
-            return await fn(self.client)
+            t0 = time.monotonic()
+            result = await fn(self.client)
+            ms = (time.monotonic() - t0) * 1000
+            self.ping_ms = ms if self.ping_ms is None else self.ping_ms * 0.9 + ms * 0.1
+            self.ok_streak += 1
+            if self.speed < 1.0 and self.ok_streak >= 60:
+                self.speed = min(1.0, self.speed * 1.25)   # долго без проблем → понемногу разгоняем
+                self.ok_streak = 0
+            return result
         except errors.FloodError as e:
             seconds = int(getattr(e, "seconds", 0) or 30)
             self.floods += 1
             self.flood_until = time.monotonic() + seconds + 1
+            self._slow_down(seconds)
             self.status = WorkerStatus.FLOOD
             self.reason = f"FloodWait {seconds}s"
             log.warning("Session %s FloodWait %ss — waiting, requests go to other sessions", self.name, seconds)
@@ -246,6 +284,7 @@ class SessionWorker:
             raise WorkerUnavailable(self.reason) from e
         except (ConnectionError, OSError, asyncio.TimeoutError, *_PROXY_ERRORS) as e:
             self.errors += 1
+            self.ok_streak = 0
             self.status = WorkerStatus.ERROR
             self.reason = f"connection{' (proxy ' + mask_proxy(self.proxy) + ')' if self.proxy else ''}: {type(e).__name__}"
             raise WorkerUnavailable(self.reason) from e

@@ -126,7 +126,7 @@ class MessageFormatter:
 
         if l.seller_username:
             handle = f"@{l.seller_username}"
-            seller_line = f'<a href="{html.escape(l.seller_profile_link or "")}">{html.escape(handle)}</a>'
+            seller_line = f'<a href="{html.escape(l.seller_profile_link or f"https://t.me/{l.seller_username}")}">{html.escape(handle)}</a>'
         elif l.seller_type == "user" and l.seller_id:
             seller_line = f'<a href="tg://user?id={l.seller_id}">{html.escape(l.seller_name or "user")}</a>'
         elif l.seller_type == "address":
@@ -157,7 +157,10 @@ class MessageFormatter:
             meta.append(html.escape(_msgs(l.messages)))
         if l.premium:
             meta.append("Premium")
+        detect_line = (f"\n⚡ Обнаружен за {l.detect_secs:.2f} сек"
+                       if l.detect_secs is not None else "")
         return _Safe(
+            detect_line=detect_line,
             attrs=attrs,
             seller_meta=(lambda t: t[:1].upper() + t[1:])(", ".join(meta)) if meta else "",
             gift_name=_e(gift_name),

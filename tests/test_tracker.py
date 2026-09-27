@@ -229,8 +229,18 @@ async def test_5_unknown_old_enters_window():
     e, tmp = await fresh(100)
     ghost = e.market.item()
     e.market.lots[GID].insert(20, ghost)              # «впервые попал в окно» ниже известных
+    e.market.hidden -= 1                              # старый скрытый лот всплыл: общий count не вырос
     await e.poll()
     assert e.pipe.stats["new"] == 0
+    await e.shutdown(); shutil.rmtree(tmp)
+    # (в) «ложный якорь»: старый лот перевыставили наверх, а настоящий новый — под ним; count вырос → NEW
+    e, tmp = await fresh(100)
+    old_top = e.market.lots[GID][50]
+    fresh_lot = e.market.item()
+    e.market.lots[GID].insert(0, fresh_lot)
+    e.market.lots[GID].remove(old_top); e.market.lots[GID].insert(0, old_top)   # старый встал выше нового
+    await e.poll()
+    assert e.pipe.stats["new"] == 1, e.pipe.stats
     await e.shutdown(); shutil.rmtree(tmp)
     print("✔ TEST 5  неизвестный старый листинг впервые попал в окно → 0 NEW (SILENT_OLD)")
 

@@ -80,6 +80,8 @@ class App:
         self.pipeline = ListingPipeline(self.db, self.sessions, self.sender, self.formatter,
                                         self.price_filter, self.seller_filter)
         self.coordinator = MarketplaceCoordinator(self.db, self.sessions, self.pipeline)
+        self.pipeline.paused_getter = lambda: self.coordinator.paused
+        self.pipeline.floor_getter = lambda gid: getattr(self.coordinator.states.get(gid), "floor_stars", None)
         self.dp = Dispatcher(storage=MemoryStorage())
         self.subs = Subscriptions(self)
         sub_router, sub_tail = build_sub_router(self, self.subs, is_manager)
@@ -93,6 +95,7 @@ class App:
         self.dp.include_router(sub_tail)      # последним: всё прочее от не-админов → приветствие
         self._tasks: list[asyncio.Task] = []
         self.booting = True          # аккаунты ещё подключаются после запуска
+        self.bench: dict | None = None
 
     # ------------------------------------------------------------------ diagnostics
     async def run_check(self) -> tuple[str, str | None]:
@@ -172,6 +175,7 @@ class App:
             await self._set_menu()
         # 2) всё остальное — в фоне; ошибка любого шага не роняет бота
         self._tasks.append(asyncio.create_task(self._boot(run_bot), name="boot"))
+        self._tasks.append(asyncio.create_task(self._bench_loop(), name="bench"))
 
     async def _boot(self, run_bot: bool) -> None:
         async def step(name, coro):
@@ -184,20 +188,31 @@ class App:
         await step("restore market snapshot", self.backup.restore_market())
         # разовая миграция: убрать старые ценовые /set (555, фильтр дороже флора, лимит аккаунтов) —
         # теперь действуют значения из .env (порог 400, все аккаунты параллельно)
-        if not await self.db.kv_get("migr_prices_v1"):
+        if not await self._flag("migr_prices_v1"):
             from config import drop_runtime_overrides
             gone = drop_runtime_overrides(["COLLECTION_MIN_FLOOR", "MIN_STARS", "MAX_ABOVE_FLOOR",
                                            "MAX_CONCURRENT_SESSIONS", "GLOBAL_RPS", "SESSION_RPS",
                                            "CATALOG_INTERVAL", "TRACKER_INTERVAL", "COLD_POLL_INTERVAL"])
-            await self.db.kv_set("migr_prices_v1", 1)
+            await self._set_flag("migr_prices_v1")
             if gone:
                 log.info("Reset old /set values to .env: %s", ", ".join(gone))
+        if not await self._flag("migr_seller_v3"):
+            from config import drop_runtime_overrides
+            drop_runtime_overrides(["UNKNOWN_SELLER_POLICY", "SELLER_PHONE_PREFIXES"])     # block: нужен хоть один признак
+            await self._set_flag("migr_seller_v3")
+        if not await self._flag("migr_speed_v4"):
+            from config import drop_runtime_overrides
+            drop_runtime_overrides(["CATALOG_INTERVAL", "GLOBAL_RPS", "PRIORITY_POLL_INTERVAL", "SESSION_RPS",
+                                    "MAX_CONCURRENT_SESSIONS", "TRACKER_INTERVAL", "COLD_POLL_INTERVAL"])
+            await self._set_flag("migr_speed_v4")
         if os.getenv("USE_PROXIES", "0").strip().lower() not in ("1", "true", "yes", "on"):
             n = self.storage.wipe_proxies()          # прокси выключены — стираем пул и привязки
             if n:
                 log.info("Proxies disabled: removed proxy from %d account(s)", n)
         if self.backup.restored_paused:
             await step("restore pause", self.db.kv_set("paused", 1))
+        if self.backup.restored_paused or str(await self.db.kv_get("paused") or "0") == "1":
+            self.coordinator.paused = True     # /off действует сразу, ещё до подключения аккаунтов
         if settings.startup_delay > 0 and self.storage.list_sessions():
             # при деплое старая копия бота может ещё работать: если обе подключат один аккаунт,
             # Telegram аннулирует его (AUTH_KEY_DUPLICATED). Даём старой копии завершиться.
@@ -205,6 +220,9 @@ class App:
             await asyncio.sleep(settings.startup_delay)
         await step("connect sessions", self.sessions.start_all())
         self.booting = False
+        await step("menu", self._set_menu())      # админы из копии получают полное меню
+        if getattr(self, "_flags_dirty", False):
+            await step("save flags", self.backup.save())   # чтобы разовые сбросы не повторились
         await step("backup sync", self.backup.sync_if_needed())
         if run_bot:
             self._tasks.append(asyncio.create_task(self._backup_loop(), name="backup-loop"))
@@ -225,6 +243,40 @@ class App:
             except Exception:
                 pass
 
+    async def _flag(self, name: str) -> bool:
+        return bool(self.backup.flags.get(name) or await self.db.kv_get(name))
+
+    async def _set_flag(self, name: str) -> None:
+        self.backup.flags[name] = 1          # попадёт в копию → миграция не повторится после деплоя
+        await self.db.kv_set(name, 1)
+        self._flags_dirty = True
+
+    async def _bench_loop(self) -> None:
+        """Живой замер раз в минуту: запросы, FloodWait, ошибки, пинг, задержка лота по этапам."""
+        prev = None
+        while True:
+            await asyncio.sleep(60)
+            try:
+                ws = list(self.sessions.workers.values())
+                cur = (sum(w.requests for w in ws), sum(w.floods for w in ws), sum(w.errors for w in ws),
+                       self.pipeline.stats.get("new", 0), self.pipeline.stats.get("sent", 0))
+                if prev is not None:
+                    d = [a - b for a, b in zip(cur, prev)]
+                    pings = [w.ping_ms for w in ws if getattr(w, "ping_ms", None)]
+                    slow = sum(1 for w in ws if getattr(w, "speed", 1.0) < 1.0)
+                    lat = self.pipeline.latency
+                    self.bench = {"req": d[0], "flood": d[1], "err": d[2], "new": d[3], "sent": d[4],
+                                  "ping": (sum(pings) / len(pings)) if pings else None, "slow": slow}
+                    log.info("BENCH 60s: requests=%s (%.1f/s) floods=%s errors=%s new=%s sent=%s ping=%s "
+                             "slowed_sessions=%s | lot: request=%s queue=%s check=%s send=%s total=%s",
+                             d[0], d[0] / 60, d[1], d[2], d[3], d[4],
+                             f"{self.bench['ping']:.0f}ms" if self.bench["ping"] else "-", slow,
+                             *(f"{lat[k]:.2f}s" if k in lat else "-"
+                               for k in ("request", "queue", "check", "send", "total")))
+                prev = cur
+            except Exception as e:
+                log.debug("bench failed: %s", e)
+
     async def _set_menu(self) -> None:
         """Команды в синей кнопке «Меню» рядом с полем ввода."""
         cmds = [
@@ -235,8 +287,8 @@ class App:
             BotCommand(command="stats", description="Статистика"),
             BotCommand(command="last", description="Последние лоты и почему не отправлены"),
             BotCommand(command="collections", description="Какие коллекции отслеживаются"),
-            BotCommand(command="pause", description="Остановить парсинг"),
-            BotCommand(command="resume", description="Продолжить парсинг"),
+            BotCommand(command="off", description="Выключить парсер (пользователям: «Парсер закрыт»)"),
+            BotCommand(command="on", description="Включить парсер"),
             BotCommand(command="proxies", description="Прокси для аккаунтов"),
             BotCommand(command="settings", description="Настройки"),
             BotCommand(command="test", description="Проверка работы"),

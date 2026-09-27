@@ -12,8 +12,8 @@ import asyncio
 import time
 
 from aiogram import Bot
-from aiogram.exceptions import (TelegramBadRequest, TelegramForbiddenError, TelegramNetworkError,
-                                TelegramRetryAfter)
+from aiogram.exceptions import (TelegramAPIError, TelegramBadRequest, TelegramForbiddenError,
+                                TelegramNetworkError, TelegramRetryAfter, TelegramServerError)
 from aiogram.types import InlineKeyboardMarkup, LinkPreviewOptions
 
 from config import settings
@@ -63,8 +63,9 @@ class TelegramSender:
         preview = (LinkPreviewOptions(url=preview_url, prefer_small_media=True, show_above_text=False)
                    if preview_url else LinkPreviewOptions(is_disabled=True))
         extra = {"message_thread_id": thread_id} if thread_id else {}
-        reopened = False
+        reopened: int | bool = False
         async with self._lock:
+          try:
             for attempt in range(attempts):
                 wait = self._last + settings.send_interval - time.monotonic()
                 if wait > 0:
@@ -74,25 +75,19 @@ class TelegramSender:
                                                       link_preview_options=preview, reply_markup=markup,
                                                       **extra)
                     self._last = time.monotonic()
-                    if reopened and extra:
-                        # тему закрыл владелец (чтобы писал только бот) — закрываем обратно
-                        try:
-                            await self.bot.close_forum_topic(chat_id, extra["message_thread_id"])
-                        except Exception as e:
-                            log.warning("Could not close topic %s back: %s", extra["message_thread_id"], e)
                     return SendResult(True, msg.message_id)
                 except TelegramRetryAfter as e:
                     log.warning("Bot API RetryAfter %ss", e.retry_after)
                     await asyncio.sleep(e.retry_after + 0.5)
-                except TelegramNetworkError as e:
+                except (TelegramNetworkError, TelegramServerError) as e:
                     delay = min(30, 2 ** attempt)
-                    log.warning("Bot API network error: %s (retry in %ss)", e, delay)
+                    log.warning("Bot API network/server error: %s (retry in %ss)", e, delay)
                     await asyncio.sleep(delay)
                 except TelegramBadRequest as e:
                     es = str(e)
                     # тема закрыта → пробуем открыть её (нужно право «Управление темами») и повторить
                     if extra and "TOPIC_CLOSED" in es and not reopened:
-                        reopened = True
+                        reopened = extra["message_thread_id"]
                         try:
                             await self.bot.reopen_forum_topic(chat_id, extra["message_thread_id"])
                             log.info("Topic %s is closed — opened it for one post, will close again",
@@ -126,3 +121,13 @@ class TelegramSender:
                     log.error("Bot has no access to chat %s: %s", chat_id, e)
                     return SendResult(False, error=str(e))
             return SendResult(False, error="retries exhausted")
+          except TelegramAPIError as e:
+            log.error("Bot API error: %s", e)
+            return SendResult(False, error=str(e))
+          finally:
+            if reopened:
+                # тему закрыл владелец (чтобы писал только бот) — закрываем обратно в любом случае
+                try:
+                    await self.bot.close_forum_topic(chat_id, reopened)
+                except Exception as e:
+                    log.warning("Could not close topic %s back: %s", reopened, e)

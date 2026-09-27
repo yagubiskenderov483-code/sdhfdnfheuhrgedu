@@ -9,10 +9,13 @@ insert_listing_if_new() делает INSERT OR IGNORE и возвращает Tr
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
 import aiosqlite
+
+from config import settings
 
 from database.migrations import MIGRATIONS, REQUIRED_COLUMNS, SCHEMA_VERSION
 from database.models import Listing, ListingStatus, utcnow_iso
@@ -312,6 +315,11 @@ class Database:
                 "gift_id", "title", "synced", "complete", "last_cursor", "last_seen_listing_id",
                 "last_seen_timestamp", "availability_resale", "last_poll", "last_session", "last_count")}
             row["partial"] = int(c.get("partial") or 0)
+            # снимок старше MAX_LOT_AGE: всё, что выставили за простой, уже не свежее → первый опрос тихий.
+            # Короткий деплой (пара минут) — лоты за это время свежие, их отправляем.
+            ts = snap.get("ts")
+            old_snap = bool(ts) and settings.max_lot_age > 0 and time.time() - float(ts) > settings.max_lot_age
+            row["baseline"] = 1 if old_snap else 0
             await self.save_collection_state(row)
         return len(rows)
 

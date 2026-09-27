@@ -38,6 +38,8 @@ log = get_logger("subs")
 WELCOME = ("<b>Добро Пожаловать в лучший Telegram Tracker NFT</b>\n\n"
            "Tracker - отслеживает все лоты выставленные в настоящее время")
 
+CLOSED_TEXT = "🔒 Парсер закрыт"
+
 TRIAL_SECONDS = 60 * 60
 FOREVER = -1.0
 # код тарифа → (название, цена TON, длительность в секундах или FOREVER)
@@ -138,6 +140,13 @@ class Subscriptions:
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     # ------------------------------------------------------------------ invite links
+    async def _member_status(self, uid: int) -> str | None:
+        """Статус в канале или None, если Telegram не ответил."""
+        try:
+            return (await self.bot.get_chat_member(sub_chat_id(), uid)).status
+        except Exception:
+            return None
+
     async def _is_member(self, uid: int) -> bool:
         try:
             m = await self.bot.get_chat_member(sub_chat_id(), uid)
@@ -149,18 +158,23 @@ class Subscriptions:
         """Выдать доступ: если человек уже в канале — продлить; иначе — одноразовая ссылка."""
         async with self._lock:
             u = self.user(uid)
-            if await self._is_member(uid) and u.get("in_chat"):
-                if seconds == FOREVER or u["until"] == FOREVER:
+            if await self._is_member(uid):
+                # уже в канале (в т.ч. зашёл не по нашей ссылке) — просто продлеваем, ссылка не нужна
+                pend = u.get("pending") or 0
+                if seconds == FOREVER or u["until"] == FOREVER or pend == FOREVER:
                     u["until"] = FOREVER
                 else:
-                    u["until"] = max(time.time(), float(u["until"] or 0)) + seconds
+                    u["until"] = max(time.time(), float(u["until"] or 0)) + seconds + float(pend)
+                u["pending"], u["in_chat"] = 0, True
                 await self.save(backup=True)
                 return f"✅ {reason}\nПодписка продлена: осталось <b>{_fmt_left(u['until'])}</b>."
-            u["pending"] = FOREVER if (seconds == FOREVER or u.get("pending") == FOREVER) \
-                else float(u.get("pending") or 0) + seconds
+            # сначала ссылка: если создать не вышло — ничего не меняем (повтор не накрутит время)
             link = await self.bot.create_chat_invite_link(
                 sub_chat_id(), name=f"sub {uid}"[:32], member_limit=1,
                 expire_date=int(time.time() + LINK_TTL))
+            await self._revoke_links(uid)       # старые ссылки этого человека больше не работают
+            u["pending"] = FOREVER if (seconds == FOREVER or u.get("pending") == FOREVER) \
+                else float(u.get("pending") or 0) + seconds
             self.state["links"][link.invite_link] = {"uid": uid, "ts": time.time()}
             await self.save(backup=True)
         dur = "навсегда" if u["pending"] == FOREVER else _fmt_left(time.time() + u["pending"])
@@ -168,6 +182,14 @@ class Subscriptions:
                 f"🔗 Ваша одноразовая ссылка для входа:\n{link.invite_link}\n\n"
                 f"Доступ: <b>{dur}</b>, время пойдёт с момента входа.\n"
                 "Ссылка работает один раз и удаляется сразу после входа.")
+
+    async def _revoke_links(self, uid: int) -> None:
+        for link in [l for l, r in self.state["links"].items() if int(r.get("uid", 0)) == uid]:
+            try:
+                await self.bot.revoke_chat_invite_link(sub_chat_id(), link)
+            except Exception:
+                pass
+            self.state["links"].pop(link, None)
 
     async def on_join(self, ev: ChatMemberUpdated) -> None:
         if ev.chat.id != sub_chat_id():
@@ -207,7 +229,7 @@ class Subscriptions:
                 if pend == FOREVER or u["until"] == FOREVER:
                     u["until"] = FOREVER
                 else:
-                    u["until"] = max(time.time(), float(u["until"] or 0)) + float(pend or TRIAL_SECONDS)
+                    u["until"] = max(time.time(), float(u["until"] or 0)) + float(pend or 0)
                 u["pending"] = 0
                 u["in_chat"] = True
                 await self.save(backup=True)
@@ -215,7 +237,7 @@ class Subscriptions:
         if again:
             u = self.user(owner)
             try:
-                text = await self.grant(owner, 0 if u.get("pending") else TRIAL_SECONDS,
+                text = await self.grant(owner, 0,
                                         "По вашей ссылке зашёл кто-то другой, держите новую.")
                 await self.bot.send_message(owner, text)
             except Exception as e:
@@ -226,19 +248,23 @@ class Subscriptions:
         except Exception:
             pass
 
-    async def kick(self, uid: int) -> None:
-        """Удалить из канала без ЧС: ban → сразу unban."""
+    async def kick(self, uid: int) -> bool:
+        """Удалить из канала без ЧС: ban → сразу unban. → True, если человека в канале больше нет."""
         chat = sub_chat_id()
         try:
             await self.bot.ban_chat_member(chat, uid, until_date=int(time.time()) + 60)
         except Exception as e:
+            es = str(e).lower()
+            if "participant" in es or "user not found" in es or "user_not_participant" in es:
+                return True      # его и так нет в канале
             log.warning("Kick %s failed: %s", uid, e)
-            return
+            return False
         await asyncio.sleep(1)
         try:
             await self.bot.unban_chat_member(chat, uid, only_if_banned=True)
         except Exception as e:
             log.warning("Unban %s failed: %s", uid, e)
+        return True
 
     # ------------------------------------------------------------------ payments (TON)
     def invoice_url(self, code: str) -> str:
@@ -277,7 +303,7 @@ class Subscriptions:
         if not open_codes or not settings.sub_ton_address:
             return 0
         txs = await self._fetch_txs()
-        paid = []
+        paid, underpaid = [], []
         async with self._lock:
             seen = set(self.state["seen_tx"])
             for tx in txs:
@@ -294,29 +320,59 @@ class Subscriptions:
                 if value < inv["nano"]:
                     log.warning("Invoice %s underpaid: %s < %s nanoTON", code, value, inv["nano"])
                     self.state["seen_tx"].append(h)
+                    underpaid.append((inv["uid"], code, value, inv["nano"]))
                     continue
-                inv["paid"], inv["tx"] = True, h
+                inv["paid"], inv["tx"], inv["granted"] = True, h, "inflight"
                 self.state["seen_tx"].append(h)
                 open_codes.discard(code)
                 paid.append(inv)
             self.state["seen_tx"] = self.state["seen_tx"][-1000:]
             if paid:
                 await self.save()
+        for uid, code, value, need in underpaid:
+            for admin in settings.admin_ids:
+                try:
+                    await self.bot.send_message(admin, f"⚠️ Недоплата по счёту <code>{code}</code> от "
+                                                       f"<code>{uid}</code>: пришло {value / 1e9:g} TON из "
+                                                       f"{need / 1e9:g}. Выдать вручную: /grant {uid} часы")
+                except Exception:
+                    pass
         for inv in paid:
             title, price, secs = PLANS[inv["plan"]]
             log.info("Payment received: %s TON from user %s (%s)", price, inv["uid"], inv["plan"])
-            try:
-                text = await self.grant(int(inv["uid"]), secs, f"Оплата {price:g} TON пришла, тариф {title}.")
-                await self.bot.send_message(int(inv["uid"]), text)
-            except Exception as e:
-                log.error("Grant after payment failed for %s: %s", inv["uid"], e)
+            ok = await self._deliver(inv)
             for admin in settings.admin_ids:
                 try:
-                    await self.bot.send_message(admin, f"💰 Оплата {price:g} TON — тариф {title}, "
-                                                       f"пользователь <code>{inv['uid']}</code>")
+                    await self.bot.send_message(admin, f"💰 Оплата {price:g} TON, тариф {title}, "
+                                                       f"пользователь <code>{inv['uid']}</code>"
+                                                       + ("" if ok else "\n⚠️ Ссылку выдать не удалось, бот "
+                                                          "повторит сам. Проверьте права бота в канале."))
                 except Exception:
                     pass
         return len(paid)
+
+    async def _deliver(self, inv: dict) -> bool:
+        """Выдать доступ по оплаченному счёту. Если не вышло — повторим в фоне (оплата не теряется)."""
+        title, price, secs = PLANS[inv["plan"]]
+        inv["granted"] = "inflight"
+        try:
+            text = await self.grant(int(inv["uid"]), secs, f"Оплата {price:g} TON пришла, тариф {title}.")
+            inv["granted"] = True
+            await self.save(backup=True)
+        except Exception as e:
+            inv["granted"] = False          # повторит _retry_undelivered
+            log.error("Grant after payment failed for %s: %s (will retry)", inv["uid"], e)
+            return False
+        try:
+            await self.bot.send_message(int(inv["uid"]), text)
+        except Exception:
+            pass
+        return True
+
+    async def _retry_undelivered(self) -> None:
+        # только явно неудавшиеся выдачи (старые счета без флага не трогаем — они уже выданы)
+        for inv in [i for i in self.state["invoices"].values() if i.get("paid") and i.get("granted") is False]:
+            await self._deliver(inv)
 
     # ------------------------------------------------------------------ background loop
     async def run(self) -> None:
@@ -327,6 +383,11 @@ class Subscriptions:
                 await self._expire()
             except Exception as e:
                 log.warning("Subscription expiry check failed: %s", e)
+            if tick % 6 == 0:
+                try:
+                    await self._retry_undelivered()
+                except Exception as e:
+                    log.warning("Retry of paid invoices failed: %s", e)
             if tick % 2 == 0:
                 try:
                     await self.check_payments()
@@ -341,7 +402,8 @@ class Subscriptions:
                if u.get("in_chat") and u.get("until") not in (FOREVER, None) and 0 < float(u["until"]) <= now
                and int(k) not in settings.admin_ids]
         for uid in due:
-            await self.kick(uid)
+            if not await self.kick(uid):
+                continue          # не получилось выгнать — попробуем на следующем круге
             async with self._lock:
                 self.user(uid)["in_chat"] = False
                 await self.save()
@@ -358,14 +420,33 @@ class Subscriptions:
             self.state["links"].pop(link, None)
 
 
+async def _safe_edit(msg, text: str, reply_markup=None) -> None:
+    """edit_text, который не падает на «message is not modified» / старом сообщении."""
+    try:
+        await msg.edit_text(text, reply_markup=reply_markup)
+    except Exception as e:
+        if "not modified" in str(e):
+            return
+        try:
+            await msg.answer(text, reply_markup=reply_markup)
+        except Exception:
+            pass
+
+
 # ---------------------------------------------------------------------------- router
 def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int | None], bool]) -> tuple[Router, Router]:
     """→ (router подписки, catch-all для не-админов — подключать ПОСЛЕДНИМ)."""
     r = Router(name="subscription")
     tail = Router(name="subscription-tail")
 
+    def closed() -> bool:
+        return bool(getattr(getattr(app, "coordinator", None), "paused", False))
+
     async def welcome(m: Message) -> None:
         await subs.load()
+        if closed():
+            await m.answer(CLOSED_TEXT)
+            return
         await m.answer(WELCOME, reply_markup=subs.main_kb())
 
     @r.chat_member()
@@ -375,13 +456,16 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
 
     @r.callback_query(F.data == "sub:home")
     async def cb_home(q: CallbackQuery) -> None:
-        await q.message.edit_text(WELCOME, reply_markup=subs.main_kb())
+        await _safe_edit(q.message, WELCOME, reply_markup=subs.main_kb())
         await q.answer()
 
     @r.callback_query(F.data == "sub:menu")
     async def cb_menu(q: CallbackQuery) -> None:
+        if closed():
+            await q.answer(CLOSED_TEXT, show_alert=True)
+            return
         await subs.load()
-        await q.message.edit_text("💎 <b>Подписка</b>\n\nВыберите тариф. Платите в TON через Tonkeeper, "
+        await _safe_edit(q.message, "💎 <b>Подписка</b>\n\nВыберите тариф. Платите в TON через Tonkeeper, "
                                   "ссылка на вход придёт сама сразу после оплаты.",
                                   reply_markup=subs.plans_kb(q.from_user.id))
         await q.answer()
@@ -389,17 +473,41 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
     @r.callback_query(F.data == "sub:my")
     async def cb_my(q: CallbackQuery) -> None:
         await subs.load()
-        u = subs.state["users"].get(str(q.from_user.id))
-        if not u or (not u.get("in_chat") and not u.get("pending")):
-            text = "У вас нет активной подписки."
-        elif u.get("pending") and not u.get("in_chat"):
-            text = "Доступ оплачен. Зайдите по ссылке, которую прислал бот, время пойдёт с момента входа."
-        else:
-            text = f"✅ Подписка активна, осталось: {_fmt_left(u['until'])}"
-        await q.answer(text[:200], show_alert=True)
+        uid = q.from_user.id
+        u = subs.state["users"].get(str(uid))
+        now = time.time()
+        left = (u or {}).get("until") or 0
+        status = await subs._member_status(uid)
+        if status is None:
+            await q.answer("Telegram не ответил, попробуйте через минуту", show_alert=True)
+            return
+        if status in ("member", "administrator", "creator", "restricted"):
+            if u and u.get("in_chat"):
+                await q.answer(f"✅ Подписка активна, осталось: {_fmt_left(left)}"[:200], show_alert=True)
+            else:
+                await q.answer("Вы в канале" + (f", осталось: {_fmt_left(left)}" if left else ""), show_alert=True)
+            return
+        # оплачено, но не зашёл (ссылка могла истечь) или вышел, а время ещё осталось → новая ссылка
+        if u and (u.get("pending") or left == FOREVER or (left and left > now)):
+            async with subs._lock:
+                if not u.get("pending"):
+                    u["pending"] = FOREVER if left == FOREVER else left - now
+                    u["until"], u["in_chat"] = 0, False
+            try:
+                text = await subs.grant(uid, 0, "Ваш доступ ещё действует, держите новую ссылку.")
+                await q.message.answer(text)
+                await q.answer()
+            except Exception as e:
+                log.error("New link for %s failed: %s", uid, e)
+                await q.answer("Не удалось создать ссылку, попробуйте позже", show_alert=True)
+            return
+        await q.answer("У вас нет активной подписки.", show_alert=True)
 
     @r.callback_query(F.data == "sub:trial")
     async def cb_trial(q: CallbackQuery) -> None:
+        if closed():
+            await q.answer(CLOSED_TEXT, show_alert=True)
+            return
         await subs.load()
         uid = q.from_user.id
         if subs.user(uid).get("trial"):
@@ -418,6 +526,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
 
     @r.callback_query(F.data.startswith("sub:buy:"))
     async def cb_buy(q: CallbackQuery) -> None:
+        if closed():
+            await q.answer(CLOSED_TEXT, show_alert=True)
+            return
         await subs.load()
         plan = q.data.split(":", 2)[2]
         if plan not in PLANS or not settings.sub_ton_address:
@@ -430,7 +541,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"sub:check:{code}")],
             [InlineKeyboardButton(text="« Назад", callback_data="sub:menu")],
         ])
-        await q.message.edit_text(
+        await _safe_edit(q.message, 
             f"💎 <b>Тариф {title}, {price:g} TON</b>\n\n"
             "Нажмите «Оплатить в Tonkeeper», сумма и комментарий подставятся сами.\n\n"
             f"Или вручную:\nАдрес: <code>{settings.sub_ton_address}</code>\n"
@@ -460,7 +571,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                            show_alert=True)
 
     # ---------------- админам: список и ручная выдача
-    @r.message(Command("subs"), F.from_user.func(lambda u: is_manager(u.id)))
+    @r.message(Command("subs"), F.from_user.func(lambda u: u.id in settings.admin_ids))
     async def cmd_subs(m: Message) -> None:
         await subs.load()
         rows = []
@@ -474,14 +585,23 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                        "Выдать вручную: <code>/grant ID часы</code> или <code>/grant ID навсегда</code>\n"
                        "Забрать: <code>/revoke ID</code>")
 
-    @r.message(Command("grant"), F.from_user.func(lambda u: is_manager(u.id)))
+    @r.message(Command("grant"), F.from_user.func(lambda u: u.id in settings.admin_ids))
     async def cmd_grant(m: Message, command: CommandObject) -> None:
         await subs.load()
         parts = (command.args or "").split()
         if len(parts) != 2 or not parts[0].isdigit():
             await m.answer("Формат: <code>/grant ID часы</code> или <code>/grant ID навсегда</code>")
             return
-        secs = FOREVER if parts[1].lower() in ("навсегда", "forever", "0") else float(parts[1]) * 3600
+        if parts[1].lower() in ("навсегда", "forever"):
+            secs = FOREVER
+        else:
+            try:
+                secs = float(parts[1].replace(",", ".")) * 3600
+            except ValueError:
+                secs = 0
+            if secs <= 0:
+                await m.answer("Часы — положительное число, например <code>/grant 123 24</code>")
+                return
         uid = int(parts[0])
         try:
             text = await subs.grant(uid, secs, "Вам выдан доступ администратором.")
@@ -490,7 +610,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         except Exception as e:
             await m.answer(f"❌ {e}")
 
-    @r.message(Command("revoke"), F.from_user.func(lambda u: is_manager(u.id)))
+    @r.message(Command("revoke"), F.from_user.func(lambda u: u.id in settings.admin_ids))
     async def cmd_revoke(m: Message, command: CommandObject) -> None:
         await subs.load()
         arg = (command.args or "").strip()
@@ -500,6 +620,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         uid = int(arg)
         await subs.kick(uid)
         async with subs._lock:
+            await subs._revoke_links(uid)
             u = subs.user(uid)
             u.update({"until": 0, "in_chat": False, "pending": 0})
             await subs.save(backup=True)

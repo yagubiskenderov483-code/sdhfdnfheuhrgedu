@@ -36,6 +36,19 @@ _CYR = re.compile(r"[Ѐ-ӿ]", re.IGNORECASE)        # любая кирилли�
 _NON_SLAVIC = re.compile(r"[әғқңөұүһҳҷҙӣӯҫӑӕҝҕӧҭҡӳӗђћџњљјѓќѕ]", re.IGNORECASE)
 
 
+# Письменности, которых нет у RU/UA/BY: арабская/персидская, иврит, индийские, тайская,
+# китайская/японская/корейская, грузинская, армянская.
+_FOREIGN_SCRIPT = re.compile(r"[\u0590-\u06FF\u0750-\u077F\u0900-\u0DFF\u0E00-\u0E7F"
+                             r"\u10A0-\u10FF\u0530-\u058F\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF]")
+
+
+def is_foreign_text(text: str | None) -> bool:
+    """Текст явно не на нашем языке: чужая письменность или неславянская кириллица."""
+    if not text:
+        return False
+    return bool(_FOREIGN_SCRIPT.search(text) or _NON_SLAVIC.search(text))
+
+
 def is_russian_text(text: str | None) -> bool:
     """Текст на славянской кириллице (русский / украинский / белорусский).
     Смягчено: латиница (бренды/ссылки) и короткий текст не мешают.
@@ -45,7 +58,25 @@ def is_russian_text(text: str | None) -> bool:
     t = text.strip()
     if _NON_SLAVIC.search(t):             # ә ғ қ ң ... → казахский и др., не наш
         return False
-    return len(_CYR.findall(t)) >= 3      # достаточно кириллицы; латиница рядом не мешает
+    return len(_CYR.findall(t)) >= 2      # хоть немного кириллицы; латиница рядом не мешает
+
+
+_FLAGS = ("🇷🇺", "🇺🇦", "🇧🇾")
+# Русскоязычные сервисы/деньги/города в тексте профиля (часто пишут латиницей)
+_RU_MARKERS = re.compile(
+    r"(vk\.com|vk\.ru|\bvk\b|ok\.ru|mail\.ru|yandex|\.ru\b|\.su\b|\.by\b|\.ua\b|₽|\brub\b|\bрубл|"
+    r"sber|tinkoff|t-bank|tbank|ozon|wildberries|\bwb\b|avito|funpay|playerok|lolz|"
+    r"moscow|msk|\bspb\b|piter|saint.?petersburg|kazan|novosibirsk|ekaterinburg|ekb\b|krasnodar|minsk|kyiv|kiev|"
+    r"kharkiv|odesa|odessa|country:(ru|ua|by))", re.IGNORECASE)
+
+
+def has_ru_marker(*texts: str | None) -> bool:
+    return any(t and _RU_MARKERS.search(t) for t in texts)
+
+
+def has_flag(*texts: str | None) -> bool:
+    """Продавец сам поставил флаг RU/UA/BY в имя, био или канал."""
+    return any(t and any(f in t for f in _FLAGS) for t in texts)
 
 
 @dataclass
@@ -128,6 +159,23 @@ class SellerFilter:
 
         if is_russian_text(l.seller_gift_text):
             return SellerResult(True, "GIFT_MSG_RU", "gift messages are written in Russian")
+
+        if has_flag(l.seller_name, l.seller_about, l.seller_channel, l.seller_business):
+            return SellerResult(True, "FLAG_RU", "RU/UA/BY flag in profile")
+
+        if is_russian_text(l.seller_business):
+            return SellerResult(True, "BUSINESS_RU", "business profile is in Russian")
+
+        if is_russian_text(l.seller_extra_text):
+            return SellerResult(True, "STORIES_RU", "stories / channel posts are in Russian")
+
+        if has_ru_marker(l.seller_about, l.seller_channel, l.seller_business, l.seller_extra_text):
+            return SellerResult(True, "RU_MARKER", "Russian services / cities / currency in profile")
+
+        # явно чужой язык в био / канале / подписях подарков → не наш продавец
+        for field in (l.seller_about, l.seller_channel, l.seller_gift_text, l.seller_business, l.seller_extra_text):
+            if is_foreign_text(field):
+                return SellerResult(False, "FOREIGN_TEXT", "profile text is in a foreign language")
 
         if settings.unknown_seller_policy == "allow":
             return SellerResult(True, "UNKNOWN_ALLOWED", "no objective data (policy=allow)")

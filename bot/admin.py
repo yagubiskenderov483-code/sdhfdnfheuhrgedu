@@ -188,6 +188,8 @@ SETTING_DESC: dict[str, str] = {
     "COLLECTION_MIN_FLOOR": "единый порог: от какой цены читать коллекции И слать лоты (⭐)",
     "COLLECTION_FLOOR_MODE": "что делать с коллекциями ниже порога: skip (не читать) | slow (реже)",
     "MIN_TON": "мин. цена лота в TON (0 = не проверять)",
+    "PRIORITY_FLOOR": "коллекции с флором от N ⭐ опрашиваются чаще и первыми (0 = выкл)",
+    "PRIORITY_POLL_INTERVAL": "как часто опрашивать каждую дорогую коллекцию, сек",
     "ROUTE_BY": "в какую тему класть лот: floor (по флору коллекции = цене гифта) | price (по цене лота)",
     "MAX_ABOVE_FLOOR": "не слать лоты дороже флора коллекции больше чем на N% (0 = не проверять)",
     "ALLOW_TON_ONLY": "слать лоты, которые продаются только за TON (true/false)",
@@ -222,7 +224,7 @@ SETTING_GROUPS: list[tuple[str, list[str]]] = [
                             "MAX_SELLER_LEVEL", "MAX_SELLER_NFTS", "SELLER_PHONE_PREFIXES"]),
     ("🔁 Без повторов", ["UNIQUE_GIFTS", "UNIQUE_SELLERS", "MAX_SAME_COLLECTION_STREAK",
                          "SELLER_REPEAT_HOURS"]),
-    ("⚡ Скорость", ["CATALOG_INTERVAL", "COLD_POLL_INTERVAL", "TRACKER_INTERVAL", "PAGE_LIMIT",
+    ("⚡ Скорость", ["PRIORITY_FLOOR", "PRIORITY_POLL_INTERVAL", "CATALOG_INTERVAL", "COLD_POLL_INTERVAL", "TRACKER_INTERVAL", "PAGE_LIMIT",
                     "SESSION_RPS", "GLOBAL_RPS", "MAX_CONCURRENT_SESSIONS", "LOW_PRIORITY_POLL_INTERVAL"]),
     ("⚙️ Прочее", ["COLLECTION_FLOOR_MODE", "TEST_MODE", "ALLOW_ALL_USERS", "FETCH_FULL_SELLER"]),
     ("📢 Общий и каналы по цене", ["TARGET_CHAT_ID", "PRICE_ROUTES", "ROUTE_BY"]),
@@ -395,7 +397,8 @@ def build_routers(app: "App") -> list[Router]:
                 pass
             app.storage.discard(p["name"])
 
-    @users.message(or_f(Command("pause", "resume", "reload", "set", "proxies", "proxy"), F.text.in_({BTN_PAUSE, BTN_RESUME})))
+    @users.message(or_f(Command("pause", "resume", "on", "off", "reload", "set", "proxies", "proxy"),
+                        F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
                        f"Ваш Telegram ID: <code>{m.from_user.id}</code> — его можно вписать в ADMIN_IDS.")
@@ -421,10 +424,23 @@ def build_routers(app: "App") -> list[Router]:
                f"🚫 Пропущено коллекций (флор ниже {settings.collection_min_floor}⭐): {len(coord.skipped)}\n") +
             f"⚡ Реакция на новый лот: {f'{coord.hot_latency:.1f}s' if coord.hot_latency is not None else '—'} "
             f"(+ до {settings.catalog_interval:g}s на проверку каталога)\n"
+            + ((lambda b: f"📈 За минуту: {b['req']} запросов, FloodWait {b['flood']}, ошибок {b['err']}, "
+                          f"пинг {b['ping']:.0f}ms, замедлено аккаунтов {b['slow']}\n" if b.get('ping') else
+                          f"📈 За минуту: {b['req']} запросов, FloodWait {b['flood']}, ошибок {b['err']}\n")
+               (app.bench) if getattr(app, "bench", None) else "")
+            + (("⏱ Задержка лота (среднее): " + " · ".join(
+                f"{n} {app.pipeline.latency[k]:.2f}s" for k, n in
+                (("request", "запрос"), ("queue", "очередь"), ("check", "проверка"), ("send", "отправка"),
+                 ("total", "итого")) if k in app.pipeline.latency) + "\n")
+               if app.pipeline.latency else "")
+            +
             f"🔁 Страховочный обход: {f'{cycle:.0f}s' if cycle else '—'} (цель {settings.cold_poll_interval:g}s)\n"
             f"📦 Scanned: {coord.stats['scanned']}\n"
             f"🎁 New listings: {pipe.stats['new']}\n"
             f"📨 Sent: {pipe.stats['sent']}\n"
+            f"🧮 Дубли: {pipe.stats.get('duplicates', 0)} · смена цены: {coord.stats.get('price_moves', 0)} · "
+            f"старые (не шлём): {coord.stats.get('silent', 0)} · ошибки опроса: {coord.stats.get('poll_errors', 0)} · "
+            f"автозамена аккаунта: {pipe.stats.get('failover', 0)} · устаревшие в очереди: {pipe.stats.get('stale', 0)}\n"
             f"📥 Queue: {pipe.queue.qsize()}\n"
             f"⏱ Last listing: {_ago(pipe.last_new_at)}\n"
             f"⏱ Last sent: {_ago(pipe.last_sent_at)}\n"
@@ -454,8 +470,15 @@ def build_routers(app: "App") -> list[Router]:
         rows = []
         icons = {"ACTIVE": "🟢", "FLOOD_WAIT": "⏳", "CONNECTING": "🟡"}
         for name, w in sorted(app.sessions.workers.items())[:60]:
-            line = (f"{icons.get(w.status.value, '🔴')} <b>{html.escape(name)}</b> — {w.status.value}, "
-                    f"коллекций: {shards.get(name, 0)}, 🌐 {html.escape(mask_proxy(getattr(w, 'proxy', None)))}")
+            ping = getattr(w, "ping_ms", None)
+            speed = getattr(w, "speed", 1.0)
+            risk = w.risk() if hasattr(w, "risk") else "ok"
+            health = ("" if risk == "ok" else
+                      (" ⚠️ риск, замедлен" if risk == "warn" else " 🟥 высокий риск, сильно замедлен")
+                      + f" x{speed:.2f}")
+            line = (f"{icons.get(w.status.value, '🔴')} <b>{html.escape(name)}</b> — {w.status.value}"
+                    + (f" {ping:.0f}ms" if ping is not None else "")
+                    + f", коллекций: {shards.get(name, 0)}{health}")
             if w.status.value not in ("ACTIVE", "CONNECTING"):
                 line += f"\n    Reason: {html.escape(w.reason or '—')}"
             lines.append(line)
@@ -511,18 +534,18 @@ def build_routers(app: "App") -> list[Router]:
             return
         await m.answer(await _remove_session(m.from_user.id, name))
 
-    @admin.message(or_f(Command("pause"), F.text == BTN_PAUSE))
+    @admin.message(or_f(Command("pause", "off"), F.text == BTN_PAUSE))
     async def cmd_pause(m: Message) -> None:
         await app.coordinator.set_paused(True)
-        await app.backup.save()          # чтобы пауза сохранилась и после деплоя
-        await m.answer("⏸ Парсинг остановлен: трекер не делает запросов к Telegram, аккаунты отдыхают.\n"
-                       "Продолжить: /resume")
+        await app.backup.save()          # чтобы выключение сохранилось и после деплоя
+        await m.answer("🔒 Парсер выключен. Лоты не ищутся, пользователям бот пишет «Парсер закрыт».\n"
+                       "Включить: /on")
 
-    @admin.message(or_f(Command("resume"), F.text == BTN_RESUME))
+    @admin.message(or_f(Command("resume", "on"), F.text == BTN_RESUME))
     async def cmd_resume(m: Message) -> None:
         await app.coordinator.set_paused(False)
         await app.backup.save()
-        await m.answer("▶️ Парсинг продолжен.")
+        await m.answer("🟢 Парсер включён.")
 
     @admin.message(Command("proxies"))
     async def cmd_proxies(m: Message, command: CommandObject) -> None:
@@ -714,7 +737,7 @@ def build_routers(app: "App") -> list[Router]:
             return
         if parts[0].upper() == "GLOBAL_RPS":
             app.sessions.limiter.set_rate(settings.global_rps)
-        if parts[0].upper() in ("COLLECTION_MIN_FLOOR", "COLLECTION_FLOOR_MODE"):
+        if parts[0].upper() in ("COLLECTION_MIN_FLOOR", "COLLECTION_FLOOR_MODE") and not app.coordinator.paused:
             try:
                 await app.coordinator.refresh_catalog()   # применить порог сразу, а не через цикл
             except Exception:
@@ -856,6 +879,7 @@ def build_routers(app: "App") -> list[Router]:
         rec = SessionRecord(p["name"], app.storage.session_path(p["name"]), p["api_id"], p["api_hash"], uid,
                             p.get("proxy"))
         w = await app.sessions.add_record(rec)
+        w.speed = 0.3        # новый аккаунт «прогревается»: сначала медленно, потом сам разгоняется
         log.info("Session %s added via bot (account id %s, by user %s)", p["name"], getattr(me, "id", "?"), uid)
         saved = await app.backup.save(chat_hint=m.chat.id)
         await m.answer(f"✅ Аккаунт <b>{p['name']}</b> добавлен\n"
