@@ -47,6 +47,9 @@ class Listing:
     seller_nfts: int | None = None     # сколько NFT видно в профиле продавца
     seller_channel: str | None = None  # название личного канала продавца (для фильтра языка)
     # замеры скорости (только в памяти): monotonic-время обнаружения и момента, когда лот прочитан
+    model_rarity: str | None = None      # редкость (только в памяти, для поста)
+    backdrop_rarity: str | None = None
+    symbol_rarity: str | None = None
     t_detect: float | None = None
     t_found: float | None = None
     detect_secs: float | None = None   # сколько секунд от обнаружения до отправки (для строки в посте)

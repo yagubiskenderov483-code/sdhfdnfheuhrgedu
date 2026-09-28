@@ -230,3 +230,72 @@ def test_payment_delivery():
     print("PAYMENT DELIVERY OK")
 
 test_payment_delivery()
+
+def test_remind_and_stats():
+    import asyncio, types, time as _t
+    import bot.subscription as S
+    class DB:
+        def __init__(s): s.kv = {}
+        async def kv_get(s, k, d=None): return s.kv.get(k, d)
+        async def kv_set(s, k, v): s.kv[k] = v
+    sent = []
+    class Bot:
+        async def send_message(s, uid, text, **k): sent.append(uid)
+    subs = S.Subscriptions(types.SimpleNamespace(db=DB(), bot=Bot()))
+    async def run():
+        await subs.load()
+        now = _t.time()
+        subs.user(1).update(in_chat=True, until=now + 1800, started=now - 86400)   # сутки, осталось 30 мин
+        subs.user(2).update(in_chat=True, until=now + 1800, started=now - 1800)    # пробный час — не напоминаем
+        await subs._remind(); await subs._remind()
+        assert sent == [1], sent
+        subs.state["revenue_nano"], subs.state["paid_count"] = 3_000_000_000, 2
+        st = subs.stats()
+        assert st["paid_total"] == 3 and st["paid_count"] == 2 and st["active"] == 2
+    asyncio.run(run())
+    print("REMIND + STATS OK")
+
+test_remind_and_stats()
+
+def test_cheaters():
+    import asyncio, types, time as _t
+    import bot.subscription as S
+    settings.admin_ids = {1}; settings.target_chat_id = -100; settings.sub_chat_id = 0
+    class DB:
+        def __init__(s): s.kv = {}
+        async def kv_get(s, k, d=None): return s.kv.get(k, d)
+        async def kv_set(s, k, v): s.kv[k] = v
+    kicked, members = [], {77, 88}
+    class Bot:
+        async def ban_chat_member(s, chat, uid, **k): kicked.append(uid)
+        async def unban_chat_member(s, *a, **k): pass
+        async def send_message(s, *a, **k): pass
+        async def revoke_chat_invite_link(s, *a): pass
+        async def get_chat_member(s, chat, uid):
+            return types.SimpleNamespace(status="member" if uid in members else "left")
+    subs = S.Subscriptions(types.SimpleNamespace(db=DB(), bot=Bot()))
+    S.asyncio.sleep = (lambda orig: (lambda t: orig(0)))(asyncio.sleep)
+    def ev(uid, link=None, adder=None, uname="cheat"):
+        u = types.SimpleNamespace(id=uid, username=uname, first_name="X", last_name=None, is_bot=False)
+        return types.SimpleNamespace(chat=types.SimpleNamespace(id=-100), from_user=types.SimpleNamespace(id=adder or uid),
+            old_chat_member=types.SimpleNamespace(status="left", user=u),
+            new_chat_member=types.SimpleNamespace(status="member", user=u),
+            invite_link=types.SimpleNamespace(invite_link=link) if link else None)
+    async def run():
+        await subs.load()
+        await subs.on_join(ev(50))                       # зашёл по общей ссылке без подписки → кик
+        assert kicked == [50]
+        await subs.on_join(ev(51, adder=1))              # админ добавил вручную → не трогаем
+        assert kicked == [50]
+        subs.user(52).update(until=_t.time() + 3600)     # есть оплаченное время → пускаем
+        await subs.on_join(ev(52))
+        assert kicked == [50] and subs.user(52)["in_chat"] and subs.user(52)["username"] == "cheat"
+        # событие выхода/кика потерялось: срок кончился, а человек всё ещё в канале → выкидываем
+        subs.user(77).update(until=_t.time() - 60, in_chat=False)
+        subs.user(88).update(until=S.FOREVER, in_chat=True)
+        await subs._reconcile()
+        assert 77 in kicked and 88 not in kicked
+    asyncio.run(run())
+    print("CHEATERS OK")
+
+test_cheaters()

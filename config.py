@@ -154,6 +154,7 @@ class Settings:
     min_ton: float = 0.0
     priority_floor: int = 2500           # коллекции с флором от N ⭐ опрашиваются чаще и первыми (0 = выкл)
     priority_poll_interval: float = 1.5  # как часто опрашивать каждую дорогую коллекцию, сек
+    auto_remove_dead: bool = True        # сессию, которую снёс Telegram, удалять из трекера автоматически
     max_lot_age: int = 600               # лот, пролежавший в очереди дольше N сек, не отправляется (0 = выкл)
     route_by: str = "floor"              # тема по: floor (флор коллекции = цена гифта) | price (цена лота)
     max_above_floor: int = 0            # не слать лоты дороже флора коллекции больше чем на N% (0 = выкл)
@@ -317,6 +318,7 @@ def _from_env() -> Settings:
         priority_floor=max(0, _int(e("PRIORITY_FLOOR"), 2500)),
         priority_poll_interval=max(0.5, _float(e("PRIORITY_POLL_INTERVAL"), 1.5)),
         max_lot_age=max(0, _int(e("MAX_LOT_AGE"), 600)),
+        auto_remove_dead=_bool(e("AUTO_REMOVE_DEAD"), True),
         route_by=("price" if (e("ROUTE_BY") or "").strip().lower() == "price" else "floor"),
         allow_ton_only=_bool(e("ALLOW_TON_ONLY"), False),
         russian_only=_bool(e("RUSSIAN_ONLY"), True),

@@ -96,6 +96,7 @@ class App:
         self._tasks: list[asyncio.Task] = []
         self.booting = True          # аккаунты ещё подключаются после запуска
         self.bench: dict | None = None
+        self.users_closed = False    # /close: пользователям «Парсер закрыт», а лоты идут
 
     # ------------------------------------------------------------------ diagnostics
     async def run_check(self) -> tuple[str, str | None]:
@@ -211,6 +212,7 @@ class App:
                 log.info("Proxies disabled: removed proxy from %d account(s)", n)
         if self.backup.restored_paused:
             await step("restore pause", self.db.kv_set("paused", 1))
+        self.users_closed = bool(self.backup.flags.get("users_closed"))
         if self.backup.restored_paused or str(await self.db.kv_get("paused") or "0") == "1":
             self.coordinator.paused = True     # /off действует сразу, ещё до подключения аккаунтов
         if settings.startup_delay > 0 and self.storage.list_sessions():
@@ -230,13 +232,26 @@ class App:
         await step("tracker", self.coordinator.start())
 
     async def _notify_auth_error(self, w) -> None:
+        """Telegram снёс сессию (выкинули из «Устройств», две копии бота, бан) — она уже не оживёт.
+        Удаляем аккаунт из трекера автоматически и сообщаем владельцу/админам."""
         owner = next((r.owner_id for r in self.storage.list_sessions() if r.name == w.name), None)
         targets = {owner} if owner else set()
-        targets |= all_admins()
+        targets |= (settings.admin_ids or all_admins())
+        removed = False
+        if settings.auto_remove_dead:
+            await asyncio.sleep(3)
+            try:
+                if w.name in self.sessions.workers and w.status.value == "AUTH_ERROR":
+                    await self.sessions.remove(w.name)
+                    await self.backup.save(allow_shrink=True)
+                    removed = True
+                    log.warning("Session %s removed automatically: %s", w.name, w.reason)
+            except Exception as e:
+                log.warning("Auto-remove of %s failed: %s", w.name, e)
         text = (f"⚠️ Аккаунт <b>{html.escape(w.name)}</b> отключён Telegram.\n"
                 f"Причина: {html.escape(w.reason or '—')}\n\n"
-                "Трекер его не удалял — Telegram больше не принимает эту сессию. "
-                "Удалите его в /sessions и добавьте аккаунт заново через /add_session.")
+                + ("🗑 Удалён из трекера автоматически. Чтобы вернуть — добавьте заново через /add_session."
+                   if removed else "Удалите его в /sessions и добавьте заново через /add_session."))
         for chat in targets:
             try:
                 await self.bot.send_message(chat, text)
@@ -254,8 +269,17 @@ class App:
     async def _bench_loop(self) -> None:
         """Живой замер раз в минуту: запросы, FloodWait, ошибки, пинг, задержка лота по этапам."""
         prev = None
+        tick = 0
         while True:
             await asyncio.sleep(60)
+            tick += 1
+            if tick % 360 == 1:          # раз в 6 часов — чистка базы от старого мусора
+                try:
+                    n = await self.db.housekeeping()
+                    if n:
+                        log.info("Housekeeping: removed %s old filtered listing(s)", n)
+                except Exception as e:
+                    log.debug("housekeeping failed: %s", e)
             try:
                 ws = list(self.sessions.workers.values())
                 cur = (sum(w.requests for w in ws), sum(w.floods for w in ws), sum(w.errors for w in ws),
@@ -289,6 +313,8 @@ class App:
             BotCommand(command="collections", description="Какие коллекции отслеживаются"),
             BotCommand(command="off", description="Выключить парсер (пользователям: «Парсер закрыт»)"),
             BotCommand(command="on", description="Включить парсер"),
+            BotCommand(command="close", description="Закрыть для пользователей (лоты идут)"),
+            BotCommand(command="open", description="Открыть для пользователей"),
             BotCommand(command="proxies", description="Прокси для аккаунтов"),
             BotCommand(command="settings", description="Настройки"),
             BotCommand(command="test", description="Проверка работы"),

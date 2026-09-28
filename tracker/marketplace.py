@@ -65,6 +65,9 @@ class ResaleItem:
     stars: int | None
     ton_nano: int | None
     ton_only: bool
+    model_rarity: str | None = None     # редкость атрибута: «1.2%» / «Легендарная» …
+    backdrop_rarity: str | None = None
+    symbol_rarity: str | None = None
     user: Any = None                # telethon User (если есть)
     chat: Any = None                # telethon Channel/Chat (если продавец — канал)
 
@@ -93,6 +96,18 @@ def parse_price(resell_amount: list | None) -> tuple[int | None, int | None]:
     return stars, ton
 
 
+def _rarity(a) -> str | None:
+    r = getattr(a, "rarity", None)
+    if r is None:
+        pm = getattr(a, "rarity_permille", None)            # старый слой API
+        return f"{pm / 10:g}%" if isinstance(pm, int) else None
+    if isinstance(r, types.StarGiftAttributeRarity):
+        return f"{r.permille / 10:g}%"
+    return {"StarGiftAttributeRarityLegendary": "легендарная", "StarGiftAttributeRarityEpic": "эпическая",
+            "StarGiftAttributeRarityRare": "редкая", "StarGiftAttributeRarityUncommon": "необычная"
+            }.get(type(r).__name__)
+
+
 def _attributes(attrs: list | None) -> tuple[str | None, str | None, str | None]:
     model = backdrop = symbol = None
     for a in attrs or []:
@@ -103,6 +118,21 @@ def _attributes(attrs: list | None) -> tuple[str | None, str | None, str | None]
         elif isinstance(a, types.StarGiftAttributePattern):
             symbol = a.name
     return model, backdrop, symbol
+
+
+def _rarities(attrs: list | None) -> tuple[str | None, str | None, str | None]:
+    m = b = p = None
+    for a in attrs or []:
+        try:
+            if isinstance(a, types.StarGiftAttributeModel):
+                m = _rarity(a)
+            elif isinstance(a, types.StarGiftAttributeBackdrop):
+                b = _rarity(a)
+            elif isinstance(a, types.StarGiftAttributePattern):
+                p = _rarity(a)
+        except Exception:
+            pass
+    return m, b, p
 
 
 def _owner(g: types.StarGiftUnique) -> tuple[str, str | None, int | None]:
@@ -125,6 +155,7 @@ def parse_unique_gift(g: Any, users: dict[int, Any], chats: dict[int, Any]) -> R
         return None
     stars, ton = parse_price(g.resell_amount)
     model, backdrop, symbol = _attributes(g.attributes)
+    mr, br, sr = _rarities(g.attributes)
     seller_key, owner_type, owner_id = _owner(g)
     return ResaleItem(
         unique_id=g.id,
@@ -143,6 +174,7 @@ def parse_unique_gift(g: Any, users: dict[int, Any], chats: dict[int, Any]) -> R
         stars=stars,
         ton_nano=ton,
         ton_only=bool(g.resale_ton_only),
+        model_rarity=mr, backdrop_rarity=br, symbol_rarity=sr,
         user=users.get(owner_id) if owner_type == "user" else None,
         chat=chats.get(owner_id) if owner_type in ("channel", "chat") else None,
     )

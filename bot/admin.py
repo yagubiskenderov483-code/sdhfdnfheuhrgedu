@@ -397,7 +397,7 @@ def build_routers(app: "App") -> list[Router]:
                 pass
             app.storage.discard(p["name"])
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "reload", "set", "proxies", "proxy"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -469,7 +469,7 @@ def build_routers(app: "App") -> list[Router]:
         shards = app.coordinator.shard_counts()
         rows = []
         icons = {"ACTIVE": "🟢", "FLOOD_WAIT": "⏳", "CONNECTING": "🟡"}
-        for name, w in sorted(app.sessions.workers.items())[:60]:
+        for name, w in sorted(app.sessions.workers.items())[:95]:
             ping = getattr(w, "ping_ms", None)
             speed = getattr(w, "speed", 1.0)
             risk = w.risk() if hasattr(w, "risk") else "ok"
@@ -480,18 +480,32 @@ def build_routers(app: "App") -> list[Router]:
                     + (f" {ping:.0f}ms" if ping is not None else "")
                     + f", коллекций: {shards.get(name, 0)}{health}")
             if w.status.value not in ("ACTIVE", "CONNECTING"):
-                line += f"\n    Reason: {html.escape(w.reason or '—')}"
+                line += f"\n    Reason: {html.escape((w.reason or '—')[:120])}"
             lines.append(line)
             if can_manage(uid, owners.get(name)):
-                rows.append([InlineKeyboardButton(text=f"🗑 Удалить {name}", callback_data=f"rmsess:{name}")])
-        if len(app.sessions.workers) > 60:
-            lines.append(f"… и ещё {len(app.sessions.workers) - 60}")
+                btn = InlineKeyboardButton(text=f"🗑 {name}", callback_data=f"rmsess:{name}")
+                if rows and len(rows[-1]) < 3:
+                    rows[-1].append(btn)
+                else:
+                    rows.append([btn])
+        if len(app.sessions.workers) > 95:
+            lines.append(f"… и ещё {len(app.sessions.workers) - 95}")
         return "\n".join(lines), (InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
 
     @users.message(or_f(Command("sessions"), F.text == BTN_SESSIONS))
     async def cmd_sessions(m: Message) -> None:
         text, kb = _sessions_view(m.from_user.id)
-        await m.answer(text, reply_markup=kb)
+        # 45+ аккаунтов не влезают в одно сообщение (лимит Telegram 4096) — режем на части по строкам
+        chunks, cur = [], ""
+        for line in text.split("\n"):
+            if len(cur) + len(line) + 1 > 3800:
+                chunks.append(cur)
+                cur = ""
+            cur += line + "\n"
+        if cur.strip():
+            chunks.append(cur)
+        for i, chunk in enumerate(chunks):
+            await m.answer(chunk, reply_markup=kb if i == len(chunks) - 1 else None)
 
     async def _remove_session(uid: int, name: str) -> str:
         owners = {r.name: r.owner_id for r in app.storage.list_sessions()}
@@ -540,6 +554,21 @@ def build_routers(app: "App") -> list[Router]:
         await app.backup.save()          # чтобы выключение сохранилось и после деплоя
         await m.answer("🔒 Парсер выключен. Лоты не ищутся, пользователям бот пишет «Парсер закрыт».\n"
                        "Включить: /on")
+
+    @admin.message(Command("close"))
+    async def cmd_close(m: Message) -> None:
+        app.users_closed = True
+        app.backup.flags["users_closed"] = 1
+        await app.backup.save()
+        await m.answer("🔒 Для пользователей закрыто: бот пишет «Парсер закрыт», подписку не продаёт.\n"
+                       "Лоты в канал продолжают идти. Открыть: /open · выключить сам парсинг: /off")
+
+    @admin.message(Command("open"))
+    async def cmd_open(m: Message) -> None:
+        app.users_closed = False
+        app.backup.flags["users_closed"] = 0
+        await app.backup.save()
+        await m.answer("🟢 Для пользователей открыто.")
 
     @admin.message(or_f(Command("resume", "on"), F.text == BTN_RESUME))
     async def cmd_resume(m: Message) -> None:

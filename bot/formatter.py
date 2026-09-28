@@ -159,7 +159,13 @@ class MessageFormatter:
             meta.append("Premium")
         detect_line = (f"\n⚡ Обнаружен за {l.detect_secs:.2f} сек"
                        if l.detect_secs is not None else "")
+        deal_badge = ""
+        if l.floor_stars and l.stars_price and l.stars_price < l.floor_stars:
+            off = (l.floor_stars - l.stars_price) / l.floor_stars * 100
+            if off >= 5:
+                deal_badge = "  🔥"          # выгодный лот: ниже флора на 5%+
         return _Safe(
+            deal_badge=deal_badge,
             detect_line=detect_line,
             attrs=attrs,
             seller_meta=(lambda t: t[:1].upper() + t[1:])(", ".join(meta)) if meta else "",
@@ -170,9 +176,9 @@ class MessageFormatter:
             gift_slug=_e(l.gift_slug),
             gift_slug_link=gift_slug_link,
             detected_at=html.escape(detected_at(l)),
-            model=_e(l.model),
-            backdrop=_e(l.backdrop),
-            symbol=_e(l.symbol),
+            model=_e(l.model) + (f" ({html.escape(l.model_rarity)})" if l.model_rarity else ""),
+            backdrop=_e(l.backdrop) + (f" ({html.escape(l.backdrop_rarity)})" if l.backdrop_rarity else ""),
+            symbol=_e(l.symbol) + (f" ({html.escape(l.symbol_rarity)})" if l.symbol_rarity else ""),
             price_line=html.escape(price_line(l)),
             floor_line=html.escape(floor_line(l)),
             stars_price=_e(l.stars_price),

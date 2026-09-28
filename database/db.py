@@ -9,6 +9,7 @@ insert_listing_if_new() делает INSERT OR IGNORE и возвращает Tr
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -133,6 +134,20 @@ class Database:
 
     async def kv_set(self, key: str, value: Any) -> None:
         await self.kv_set_many({key: value})
+
+    async def housekeeping(self, keep_days: int = 14) -> int:
+        """Чистка: старые отсеянные лоты (не отправленные) и пустые служебные записи.
+        Отправленные лоты не трогаем — по ним проверяется «этот продавец/NFT уже был»."""
+        assert self.conn
+        cutoff = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        async with self._write_lock:
+            cur = await self.conn.execute(
+                "DELETE FROM listings WHERE sent=0 AND status!='NEW' "
+                "AND first_seen < datetime(?, ?)", (cutoff, f"-{keep_days} days"))
+            n = cur.rowcount or 0
+            await self.conn.execute("DELETE FROM kv WHERE value IS NULL")
+            await self.conn.commit()
+        return n
 
     # ------------------------------------------------------------------ market state
     async def lookup_market_items(self, unique_ids: Iterable[int]) -> dict[int, tuple[str, str, int | None, int | None]]:

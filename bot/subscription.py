@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import secrets
 import time
@@ -41,6 +42,7 @@ WELCOME = ("<b>Добро Пожаловать в лучший Telegram Tracker 
 CLOSED_TEXT = "🔒 Парсер закрыт"
 
 TRIAL_SECONDS = 60 * 60
+REMIND_BEFORE = 60 * 60          # напомнить о продлении за час до конца
 FOREVER = -1.0
 # код тарифа → (название, цена TON, длительность в секундах или FOREVER)
 PLANS: dict[str, tuple[str, float, float]] = {
@@ -94,6 +96,9 @@ class Subscriptions:
         for k in ("users", "invoices", "links"):
             if isinstance(data.get(k), dict):
                 self.state[k].update(data[k])
+        for k in ("revenue_nano", "paid_count"):
+            if isinstance(data.get(k), (int, float)):
+                self.state[k] = max(int(self.state.get(k) or 0), int(data[k]))
         if isinstance(data.get("seen_tx"), list):
             self.state["seen_tx"] = list(dict.fromkeys(self.state["seen_tx"] + data["seen_tx"]))[-1000:]
 
@@ -207,7 +212,12 @@ class Subscriptions:
             return
         link = ev.invite_link.invite_link if ev.invite_link else None
         rec = self.state["links"].get(link) if link else None
+        user = ev.new_chat_member.user
         if not rec:
+            adder = getattr(getattr(ev, "from_user", None), "id", None)
+            if adder in settings.admin_ids and adder != uid:
+                return            # админ добавил человека вручную — не трогаем
+            await self._unknown_join(uid, user)
             return
         # ссылку удаляем навсегда в любом случае
         try:
@@ -225,6 +235,7 @@ class Subscriptions:
                 again = True
             else:
                 u = self.user(uid)
+                self._remember_who(u, user)
                 pend = u.get("pending") or 0
                 if pend == FOREVER or u["until"] == FOREVER:
                     u["until"] = FOREVER
@@ -232,6 +243,7 @@ class Subscriptions:
                     u["until"] = max(time.time(), float(u["until"] or 0)) + float(pend or 0)
                 u["pending"] = 0
                 u["in_chat"] = True
+                u["started"] = time.time()
                 await self.save(backup=True)
                 again = False
         if again:
@@ -247,6 +259,73 @@ class Subscriptions:
             await self.bot.send_message(uid, f"🎉 Вы в канале! Доступ: <b>{_fmt_left(self.user(uid)['until'])}</b>.")
         except Exception:
             pass
+
+    @staticmethod
+    def _remember_who(u: dict, user) -> None:
+        """Запоминаем, кто именно зашёл: id, юз и имя (для /subs и для проверки)."""
+        if user is None:
+            return
+        u["username"] = getattr(user, "username", None) or u.get("username")
+        u["name"] = (" ".join(x for x in (getattr(user, "first_name", None), getattr(user, "last_name", None)) if x)
+                     or u.get("name"))
+
+    def _has_access(self, u: dict | None) -> bool:
+        if not u:
+            return False
+        until = u.get("until")
+        return until == FOREVER or (bool(until) and float(until) > time.time())
+
+    async def _unknown_join(self, uid: int, user) -> None:
+        """Зашёл не по нашей одноразовой ссылке (общая ссылка, чужая ссылка админа, «папка» и т.п.).
+        Если у человека есть оплаченный доступ — учитываем; иначе — сразу выкидываем."""
+        if uid in settings.admin_ids or getattr(user, "is_bot", False):
+            return
+        async with self._lock:
+            u = self.state["users"].get(str(uid))
+            if u is not None:
+                self._remember_who(u, user)
+            if u and u.get("pending"):
+                pend = u["pending"]
+                u["until"] = FOREVER if pend == FOREVER else max(time.time(), float(u.get("until") or 0)) + float(pend)
+                u["pending"], u["in_chat"], u["started"] = 0, True, time.time()
+                await self.save(backup=True)
+                return
+            if self._has_access(u):
+                u["in_chat"] = True
+                await self.save()
+                return
+        if await self.kick(uid):
+            who = f"@{user.username}" if getattr(user, "username", None) else getattr(user, "first_name", "") or uid
+            log.warning("User %s (%s) joined without subscription — kicked", uid, who)
+            for admin in settings.admin_ids:
+                try:
+                    await self.bot.send_message(admin, f"🚫 Зашёл без подписки и выкинут: "
+                                                       f"{html.escape(str(who))} (<code>{uid}</code>)")
+                except Exception:
+                    pass
+
+    async def _reconcile(self) -> None:
+        """Страховка на случай, если Telegram не прислал событие входа/выхода: всех, у кого доступ
+        закончился, проверяем по факту — если человек всё ещё в канале, выкидываем."""
+        now = time.time()
+        for k, u in list(self.state["users"].items()):
+            uid = int(k)
+            if uid in settings.admin_ids or self._has_access(u):
+                continue
+            if u.get("pending") or not u.get("until"):
+                continue          # ещё не заходил / никогда не было доступа
+            if now - float(u["until"]) > 7 * 86400:
+                continue          # давно закончилась — уже проверяли много раз
+            if now - float(u.get("checked") or 0) < 600:
+                continue          # одного человека проверяем не чаще раза в 10 минут
+            u["checked"] = now
+            status = await self._member_status(uid)
+            if status in ("member", "restricted"):
+                if await self.kick(uid):
+                    async with self._lock:
+                        u["in_chat"] = False
+                        await self.save()
+                    log.warning("Reconcile: user %s still in channel after subscription ended — kicked", uid)
 
     async def kick(self, uid: int) -> bool:
         """Удалить из канала без ЧС: ban → сразу unban. → True, если человека в канале больше нет."""
@@ -323,6 +402,8 @@ class Subscriptions:
                     underpaid.append((inv["uid"], code, value, inv["nano"]))
                     continue
                 inv["paid"], inv["tx"], inv["granted"] = True, h, "inflight"
+                self.state["revenue_nano"] = int(self.state.get("revenue_nano") or 0) + int(inv["nano"])
+                self.state["paid_count"] = int(self.state.get("paid_count") or 0) + 1
                 self.state["seen_tx"].append(h)
                 open_codes.discard(code)
                 paid.append(inv)
@@ -381,6 +462,9 @@ class Subscriptions:
         while True:
             try:
                 await self._expire()
+                await self._remind()
+                if tick % 12 == 0:
+                    await self._reconcile()
             except Exception as e:
                 log.warning("Subscription expiry check failed: %s", e)
             if tick % 6 == 0:
@@ -395,6 +479,40 @@ class Subscriptions:
                     log.warning("TON payment check failed: %s", e)
             tick += 1
             await asyncio.sleep(10)
+
+    async def _remind(self) -> None:
+        """За час до конца подписки — напоминание с кнопкой «Продлить» (один раз на срок)."""
+        now = time.time()
+        for k, u in list(self.state["users"].items()):
+            until = u.get("until")
+            if (not u.get("in_chat") or until in (FOREVER, None) or not until
+                    or not (0 < float(until) - now <= REMIND_BEFORE) or u.get("reminded") == until
+                    or float(until) - float(u.get("started") or 0) <= REMIND_BEFORE):
+                continue          # пробный час и короткие сроки не напоминаем
+            u["reminded"] = until
+            try:
+                await self.bot.send_message(int(k), f"⏳ Подписка закончится через {_fmt_left(float(until))}. "
+                                                    "Продлите, чтобы не потерять доступ 👇",
+                                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                                                InlineKeyboardButton(text="💎 Продлить", callback_data="sub:menu")]]))
+            except Exception:
+                pass
+            await self.save()
+
+    def stats(self) -> dict:
+        now = time.time()
+        paid = [i for i in self.state["invoices"].values() if i.get("paid")]
+        day = [i for i in paid if now - float(i.get("ts", 0)) < 86400]
+        users = self.state["users"].values()
+        return {
+            "active": sum(1 for u in users if u.get("in_chat") and (u.get("until") == FOREVER
+                                                                     or float(u.get("until") or 0) > now)),
+            "forever": sum(1 for u in users if u.get("until") == FOREVER),
+            "trials": sum(1 for u in users if u.get("trial")),
+            "paid_total": int(self.state.get("revenue_nano") or 0) / 1e9,
+            "paid_count": int(self.state.get("paid_count") or 0),
+            "paid_day": sum(i["nano"] for i in day) / 1e9, "paid_day_count": len(day),
+        }
 
     async def _expire(self) -> None:
         now = time.time()
@@ -440,7 +558,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
     tail = Router(name="subscription-tail")
 
     def closed() -> bool:
-        return bool(getattr(getattr(app, "coordinator", None), "paused", False))
+        # /close — закрыто только для пользователей (лоты идут); /off — выключен весь парсер
+        return bool(getattr(app, "users_closed", False)
+                    or getattr(getattr(app, "coordinator", None), "paused", False))
 
     async def welcome(m: Message) -> None:
         await subs.load()
@@ -514,6 +634,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             await q.answer("Пробный период уже использован", show_alert=True)
             return
         subs.user(uid)["trial"] = True
+        subs._remember_who(subs.user(uid), q.from_user)
         try:
             text = await subs.grant(uid, TRIAL_SECONDS, "Пробный час активирован.")
         except Exception as e:
@@ -535,6 +656,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             await q.answer("Оплата временно недоступна", show_alert=True)
             return
         title, price, _ = PLANS[plan]
+        subs._remember_who(subs.user(q.from_user.id), q.from_user)
         code = await subs.new_invoice(q.from_user.id, plan)
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [InlineKeyboardButton(text=f"💎 Оплатить {price:g} TON в Tonkeeper", url=subs.invoice_url(code))],
@@ -578,10 +700,13 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         for k, u in subs.state["users"].items():
             if u.get("in_chat") or u.get("pending"):
                 st = _fmt_left(u["until"]) if u.get("in_chat") else "ждёт входа"
-                rows.append(f"<code>{k}</code> — {st}")
-        paid = sum(1 for i in subs.state["invoices"].values() if i.get("paid"))
+                who = f"@{u['username']}" if u.get("username") else html.escape(u.get("name") or "")
+                rows.append(f"<code>{k}</code> {who} — {st}")
+        st = subs.stats()
         await m.answer("<b>Подписчики</b>\n" + ("\n".join(rows[:80]) or "нет") +
-                       f"\n\nОплаченных счетов: {paid}\n"
+                       f"\n\n👥 Активных: {st['active']} (навсегда: {st['forever']}) · пробных всего: {st['trials']}\n"
+                       f"💰 Выручка: {st['paid_total']:g} TON ({st['paid_count']} оплат) · "
+                       f"за сутки: {st['paid_day']:g} TON ({st['paid_day_count']})\n"
                        "Выдать вручную: <code>/grant ID часы</code> или <code>/grant ID навсегда</code>\n"
                        "Забрать: <code>/revoke ID</code>")
 
