@@ -320,7 +320,9 @@ class App:
             BotCommand(command="test", description="Проверка работы"),
             BotCommand(command="cancel", description="Отменить действие"),
         ]
-        cmds.append(BotCommand(command="subs", description="Подписчики"))
+        cmds.append(BotCommand(command="subs", description="Подписчики и выручка"))
+        cmds.append(BotCommand(command="grant", description="Выдать подписку: /grant ID|@юз 24|3д|навсегда"))
+        cmds.append(BotCommand(command="revoke", description="Забрать подписку: /revoke ID|@юз"))
         try:
             # всем — только /start; полное меню — только админам из ADMIN_IDS
             await self.bot.set_my_commands([BotCommand(command="start", description="Главное меню")],

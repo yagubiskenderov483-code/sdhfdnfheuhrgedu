@@ -153,6 +153,7 @@ class Settings:
     collection_min_floor: int = 4500         # отслеживать только коллекции с флором на маркете от N Stars (0 = все)
     min_ton: float = 0.0
     priority_floor: int = 2500           # коллекции с флором от N ⭐ опрашиваются чаще и первыми (0 = выкл)
+    priority_share: float = 0.8          # какая доля мощности аккаунтов уходит на дорогие коллекции
     priority_poll_interval: float = 1.5  # как часто опрашивать каждую дорогую коллекцию, сек
     auto_remove_dead: bool = True        # сессию, которую снёс Telegram, удалять из трекера автоматически
     max_lot_age: int = 600               # лот, пролежавший в очереди дольше N сек, не отправляется (0 = выкл)
@@ -267,6 +268,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "MIN_TON": ("min_ton", lambda v: float(v.replace(",", "."))),
     "MAX_ABOVE_FLOOR": ("max_above_floor", lambda v: max(0, int(v))),
     "PRIORITY_FLOOR": ("priority_floor", lambda v: max(0, int(v))),
+    "PRIORITY_SHARE": ("priority_share", lambda v: min(0.9, max(0.1, float(v.replace(",", "."))))),
     "PRIORITY_POLL_INTERVAL": ("priority_poll_interval", lambda v: max(0.5, float(v.replace(",", ".")))),
     "ROUTE_BY": ("route_by", lambda v: v.strip().lower() if v.strip().lower() in ("floor", "price") else "floor"),
     "ALLOW_TON_ONLY": ("allow_ton_only", _bool_strict),
@@ -317,6 +319,7 @@ def _from_env() -> Settings:
         max_above_floor=max(0, _int(e("MAX_ABOVE_FLOOR"), 0)),
         priority_floor=max(0, _int(e("PRIORITY_FLOOR"), 2500)),
         priority_poll_interval=max(0.5, _float(e("PRIORITY_POLL_INTERVAL"), 1.5)),
+        priority_share=min(0.9, max(0.1, _float(e("PRIORITY_SHARE"), 0.8))),
         max_lot_age=max(0, _int(e("MAX_LOT_AGE"), 600)),
         auto_remove_dead=_bool(e("AUTO_REMOVE_DEAD"), True),
         route_by=("price" if (e("ROUTE_BY") or "").strip().lower() == "price" else "floor"),

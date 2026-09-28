@@ -713,36 +713,71 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
     @r.message(Command("grant"), F.from_user.func(lambda u: u.id in settings.admin_ids))
     async def cmd_grant(m: Message, command: CommandObject) -> None:
         await subs.load()
+        usage = ("Выдать подписку:\n"
+                 "<code>/grant ID 24</code> — на 24 часа\n"
+                 "<code>/grant @username 3д</code> — на 3 дня (д — дни, ч — часы, м — минуты)\n"
+                 "<code>/grant ID навсегда</code>\n"
+                 "ID человек может узнать, написав боту /start — он покажется у вас в /subs после нажатия кнопки.")
         parts = (command.args or "").split()
-        if len(parts) != 2 or not parts[0].isdigit():
-            await m.answer("Формат: <code>/grant ID часы</code> или <code>/grant ID навсегда</code>")
+        if len(parts) != 2:
+            await m.answer(usage)
             return
-        if parts[1].lower() in ("навсегда", "forever"):
-            secs = FOREVER
-        else:
-            try:
-                secs = float(parts[1].replace(",", ".")) * 3600
-            except ValueError:
-                secs = 0
-            if secs <= 0:
-                await m.answer("Часы — положительное число, например <code>/grant 123 24</code>")
-                return
-        uid = int(parts[0])
+        uid = _resolve_user(parts[0])
+        if uid is None:
+            await m.answer("Не нашёл такого пользователя. Укажите числовой ID, или пусть он сначала "
+                           "напишет боту /start и нажмёт «Подписка».\n\n" + usage)
+            return
+        secs = _parse_duration(parts[1])
+        if secs is None:
+            await m.answer("Не понял срок.\n\n" + usage)
+            return
         try:
             text = await subs.grant(uid, secs, "Вам выдан доступ администратором.")
-            await app.bot.send_message(uid, text)
-            await m.answer(f"✅ Выдано пользователю {uid}")
         except Exception as e:
-            await m.answer(f"❌ {e}")
+            await m.answer(f"❌ Не удалось выдать: {html.escape(str(e))}\nПроверьте, что бот — админ в канале.")
+            return
+        try:
+            await app.bot.send_message(uid, text)
+            await m.answer(f"✅ Выдано пользователю <code>{uid}</code>, ссылка отправлена ему в личку.")
+        except Exception:
+            # человек ещё не писал боту — отдаём ссылку админу, чтобы переслать вручную
+            await m.answer(f"✅ Выдано <code>{uid}</code>, но написать ему бот не может (он не нажимал /start).\n"
+                           f"Перешлите ему это:\n\n{text}")
+
+    def _resolve_user(arg: str) -> int | None:
+        arg = arg.strip()
+        if arg.lstrip("-").isdigit():
+            return int(arg)
+        name = arg.lstrip("@").lower()
+        for k, u in subs.state["users"].items():
+            if (u.get("username") or "").lower() == name:
+                return int(k)
+        return None
+
+    def _parse_duration(arg: str) -> float | None:
+        a = arg.strip().lower()
+        if a in ("навсегда", "forever", "∞"):
+            return FOREVER
+        mult = 3600
+        for suf, k in (("дн", 86400), ("д", 86400), ("d", 86400), ("ч", 3600), ("h", 3600),
+                       ("мин", 60), ("м", 60), ("m", 60)):
+            if a.endswith(suf):
+                a, mult = a[: -len(suf)], k
+                break
+        try:
+            v = float(a.replace(",", ".")) * mult
+        except ValueError:
+            return None
+        return v if v > 0 else None
 
     @r.message(Command("revoke"), F.from_user.func(lambda u: u.id in settings.admin_ids))
     async def cmd_revoke(m: Message, command: CommandObject) -> None:
         await subs.load()
         arg = (command.args or "").strip()
-        if not arg.isdigit():
-            await m.answer("Формат: <code>/revoke ID</code>")
+        uid = _resolve_user(arg) if arg else None
+        if uid is None:
+            await m.answer("Формат: <code>/revoke ID</code> или <code>/revoke @username</code>")
             return
-        uid = int(arg)
         await subs.kick(uid)
         async with subs._lock:
             await subs._revoke_links(uid)

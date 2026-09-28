@@ -189,6 +189,7 @@ SETTING_DESC: dict[str, str] = {
     "COLLECTION_FLOOR_MODE": "что делать с коллекциями ниже порога: skip (не читать) | slow (реже)",
     "MIN_TON": "мин. цена лота в TON (0 = не проверять)",
     "PRIORITY_FLOOR": "коллекции с флором от N ⭐ опрашиваются чаще и первыми (0 = выкл)",
+    "PRIORITY_SHARE": "какая доля аккаунтов работает на дорогих коллекциях (0.1–0.9)",
     "PRIORITY_POLL_INTERVAL": "как часто опрашивать каждую дорогую коллекцию, сек",
     "ROUTE_BY": "в какую тему класть лот: floor (по флору коллекции = цене гифта) | price (по цене лота)",
     "MAX_ABOVE_FLOOR": "не слать лоты дороже флора коллекции больше чем на N% (0 = не проверять)",
@@ -224,12 +225,26 @@ SETTING_GROUPS: list[tuple[str, list[str]]] = [
                             "MAX_SELLER_LEVEL", "MAX_SELLER_NFTS", "SELLER_PHONE_PREFIXES"]),
     ("🔁 Без повторов", ["UNIQUE_GIFTS", "UNIQUE_SELLERS", "MAX_SAME_COLLECTION_STREAK",
                          "SELLER_REPEAT_HOURS"]),
-    ("⚡ Скорость", ["PRIORITY_FLOOR", "PRIORITY_POLL_INTERVAL", "CATALOG_INTERVAL", "COLD_POLL_INTERVAL", "TRACKER_INTERVAL", "PAGE_LIMIT",
+    ("⚡ Скорость", ["PRIORITY_FLOOR", "PRIORITY_SHARE", "PRIORITY_POLL_INTERVAL", "CATALOG_INTERVAL", "COLD_POLL_INTERVAL", "TRACKER_INTERVAL", "PAGE_LIMIT",
                     "SESSION_RPS", "GLOBAL_RPS", "MAX_CONCURRENT_SESSIONS", "LOW_PRIORITY_POLL_INTERVAL"]),
     ("⚙️ Прочее", ["COLLECTION_FLOOR_MODE", "TEST_MODE", "ALLOW_ALL_USERS", "FETCH_FULL_SELLER"]),
     ("📢 Общий и каналы по цене", ["TARGET_CHAT_ID", "PRICE_ROUTES", "ROUTE_BY"]),
     ("🎨 Каналы по фону", ["BACKDROP_ROUTES"]),
 ]
+
+
+async def _answer_long(m: Message, text: str, reply_markup=None) -> None:
+    """Telegram не принимает сообщения длиннее 4096 символов — режем по строкам."""
+    chunks, cur = [], ""
+    for line in text.split("\n"):
+        if len(cur) + len(line) + 1 > 3800:
+            chunks.append(cur)
+            cur = ""
+        cur += line + "\n"
+    if cur.strip():
+        chunks.append(cur)
+    for i, chunk in enumerate(chunks):
+        await m.answer(chunk, reply_markup=reply_markup if i == len(chunks) - 1 else None)
 
 
 def _filters_help() -> str:
@@ -446,7 +461,7 @@ def build_routers(app: "App") -> list[Router]:
             f"⏱ Last sent: {_ago(pipe.last_sent_at)}\n"
             f"🧪 TEST_MODE: {'ON' if settings.test_mode else 'OFF'}"
         )
-        await m.answer(text)
+        await _answer_long(m, text)
 
     def _boot_note() -> str:
         if not app.backup.restore_done:
@@ -748,13 +763,13 @@ def build_routers(app: "App") -> list[Router]:
 
     @users.message(or_f(Command("settings"), Command("filters")))
     async def cmd_settings(m: Message) -> None:
-        await m.answer(_filters_help())
+        await _answer_long(m, _filters_help())
 
     @admin.message(Command("set"))
     async def cmd_set(m: Message, command: CommandObject) -> None:
         parts = (command.args or "").split(maxsplit=1)
         if len(parts) != 2:
-            await m.answer(_filters_help())          # /set без аргументов — весь список
+            await _answer_long(m, _filters_help())   # /set без аргументов — весь список
             return
         try:
             value = set_runtime_value(parts[0], parts[1])

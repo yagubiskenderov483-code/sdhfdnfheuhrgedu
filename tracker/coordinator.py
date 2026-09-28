@@ -659,7 +659,9 @@ class MarketplaceCoordinator:
         capacity = max(1, min(settings.max_concurrent_sessions, max(1, len(self.sessions.usable()))))
         # 1) коллекции, где каталог показал новый лот (hot) — всегда первыми;
         # 2) затем дорогие (флор от PRIORITY_FLOOR); 3) остальные по времени
-        due = sorted((0 if gid in self._hot_since else (1 if self._is_priority(gid) else 2), t, gid)
+        # внутри каждого уровня дорогие коллекции идут раньше дешёвых
+        due = sorted(((0 if gid in self._hot_since else (1 if self._is_priority(gid) else 2)) * 2
+                      + (0 if self._is_priority(gid) else 1), t, gid)
                      for gid, t in self._due.items()
                      if t <= now and gid not in self._running
                      and gid in self.states and self._is_live(self.states[gid]))
@@ -677,11 +679,11 @@ class MarketplaceCoordinator:
         await asyncio.sleep(0.02)
 
     def _priority_interval(self) -> float:
-        """Частый опрос дорогих коллекций, но не больше половины мощности аккаунтов —
+        """Частый опрос дорогих коллекций, но не больше PRIORITY_SHARE мощности аккаунтов —
         иначе остальные коллекции и «горячие» лоты встают в очередь, а аккаунты ловят FloodWait."""
         n = sum(1 for g in self.states if self._is_priority(g))
         usable = max(1, len(self.sessions.usable()))
-        budget = usable * max(0.05, settings.session_rps) * 0.5
+        budget = usable * max(0.05, settings.session_rps) * settings.priority_share
         return max(settings.priority_poll_interval, n / budget if budget else 60.0)
 
     def _is_priority(self, gid: int) -> bool:

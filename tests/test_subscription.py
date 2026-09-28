@@ -299,3 +299,21 @@ def test_cheaters():
     print("CHEATERS OK")
 
 test_cheaters()
+
+
+def test_expensive_first():
+    import asyncio, types
+    from tracker.queue import ListingPipeline, ListingEvent
+    settings.priority_floor = 2500
+    async def run():
+        p = ListingPipeline.__new__(ListingPipeline)
+        p.queue = asyncio.PriorityQueue(); p._qseq = 0
+        mk = lambda n, fl, t: ListingEvent(types.SimpleNamespace(listing_id=n, floor_stars=fl, stars_price=fl), t, "live")
+        await p._enqueue(mk("cheap_new", 500, 5.0))
+        await p._enqueue(mk("rich_old", 3000, 1.0))
+        order = [(await p.queue.get())[2].listing.listing_id for _ in range(2)]
+        assert order == ["rich_old", "cheap_new"], order
+    asyncio.run(run())
+    print("EXPENSIVE FIRST OK")
+
+test_expensive_first()

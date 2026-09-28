@@ -205,7 +205,11 @@ class ListingPipeline:
 
     async def _enqueue(self, ev: ListingEvent) -> None:
         self._qseq += 1
-        prio = 0 if ev.mode == "live" else 1
+        l = ev.listing
+        value = getattr(l, "floor_stars", None) or getattr(l, "stars_price", None) or 0
+        expensive = bool(settings.priority_floor and value >= settings.priority_floor)
+        # дорогие LIVE-лоты — самыми первыми, потом остальные LIVE, потом дообработка после перезапуска
+        prio = (0 if expensive else 1) if ev.mode == "live" else 2
         # внутри приоритета — самый свежий первым
         await self.queue.put((prio * 1e12 - ev.detected_mono, self._qseq, ev))
 
@@ -354,6 +358,9 @@ class ListingPipeline:
         n = settings.max_same_collection_streak
         if n <= 0:
             return None
+        value = l.floor_stars or l.stars_price or 0
+        if settings.priority_floor and value >= settings.priority_floor:
+            return None     # дорогие лоты никогда не режем за «та же коллекция подряд»
         if l.gift_id in self._sending_gift_ids:
             return "same collection is being sent right now"
         if self._last_sent_gift_id == l.gift_id and self._streak >= n:
