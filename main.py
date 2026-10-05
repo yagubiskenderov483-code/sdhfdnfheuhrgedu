@@ -480,9 +480,15 @@ class App:
                  f"👤 Отсеяно по продавцу: {day.get('FILTERED_SELLER', 0)} · повторы: {day.get('FILTERED_DUPLICATE', 0)}",
                  f"💰 Оплат: {sub['paid_day_count']} на {sub['paid_day']:g} TON · активных подписчиков: {sub['active']}",
                  f"👥 Аккаунтов: {len(ws)} · сейчас работают: {len(self.sessions.usable())}"]
-        lat = self.pipeline.latency
-        if "total" in lat:
-            lines.append(f"⏱ Средняя задержка лота: {lat['total']:.1f} с")
+        tot = sorted(t for t, e in getattr(self.pipeline, "totals", []) if e)
+        if len(tot) >= 3:
+            lines.append(f"⏱ Дорогие лоты: обычно {tot[len(tot) // 2]:.1f} с до поста, "
+                         f"9 из 10 быстрее {tot[min(len(tot) - 1, int(len(tot) * 0.9))]:.1f} с")
+        elif "total" in self.pipeline.latency:
+            lines.append(f"⏱ Средняя задержка лота: {self.pipeline.latency['total']:.1f} с")
+        muted = self.backup.flags.get("muted") if hasattr(self.backup, "flags") else None
+        if muted:
+            lines.append(f"🔇 Выключено коллекций: {len(muted)} (/mute)")
         if self.backup.graveyard:
             fresh = [g for g in self.backup.graveyard.values() if time.time() - g.get("ts", 0) < 86400]
             if fresh:
