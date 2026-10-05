@@ -524,10 +524,20 @@ class SessionBackup:
             try:
                 await self._write_pointer("m", [msg.document.file_id, chat, msg.message_id, int(time.time())])
             except Exception as e:
+                # запрос мог дойти (таймаут после применения) — удаляем файл, только если точно не он в указателе
+                self._ptr = None
                 try:
-                    await self.bot.delete_message(chat, msg.message_id)
+                    cur = (await self._read_pointer()).get("m")
                 except Exception:
-                    pass
+                    cur = False
+                if cur and cur[0] == msg.document.file_id:
+                    log.info("Market snapshot pointer applied despite error: %s", e)
+                    return True
+                if cur is not False:
+                    try:
+                        await self.bot.delete_message(chat, msg.message_id)
+                    except Exception:
+                        pass
                 log.warning("Market snapshot pointer write failed: %s", e)
                 return False
             if old and len(old) >= 3 and (old[1], old[2]) != (chat, msg.message_id):
