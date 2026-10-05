@@ -281,7 +281,8 @@ class World:
         bk._save = _save
 
     def decode(self, fid):
-        return json.loads(B._fernet().decrypt(self.bot.files[fid]))
+        raw = B._fernet().decrypt(self.bot.files[fid])
+        return json.loads(__import__("zlib").decompress(raw[2:]) if raw[:2] == b"Z1" else raw)
 
     async def call(self, what, coro):
         try:

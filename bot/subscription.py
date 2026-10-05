@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import asyncio
+from asyncio import get_running_loop as _running_loop, shield as _shield
 import html
 import json
 import re
@@ -82,6 +83,8 @@ class Subscriptions:
         self._loaded = False
         # пока копия подписок не восстановлена после деплоя — никого не кикаем и не выдаём пробный час
         self.ready = asyncio.Event()
+        self._backup_wanted = False
+        self._backup_task: asyncio.Task | None = None
         self.degraded = False          # копия не восстановилась → не кикаем незнакомых, пробный час не даём
         self.on_change: Callable[[], Awaitable[Any]] | None = None   # сохранить копию после оплаты/входа
 
@@ -98,10 +101,29 @@ class Subscriptions:
         self._loaded = True
 
     def _merge(self, data: dict) -> None:
-        for k in ("users", "invoices", "links"):
+        for k in ("invoices", "links"):
             if isinstance(data.get(k), dict):
                 for key, v in data[k].items():
                     self.state[k].setdefault(key, v)
+        if isinstance(data.get("users"), dict):
+            for key, v in data["users"].items():
+                cur = self.state["users"].get(key)
+                if cur is None or not isinstance(v, dict):
+                    self.state["users"].setdefault(key, v)
+                    continue
+                if not cur.pop("tmp", False):
+                    continue                  # своя запись свежее копии — она и верна
+                # запись уже есть (например, создана, пока копия не читалась) — не теряем оплаченное время
+                def _best(a, b):
+                    if FOREVER in (a, b):
+                        return FOREVER
+                    return max(float(a or 0), float(b or 0))
+                cur["until"] = _best(cur.get("until"), v.get("until"))
+                cur["pending"] = _best(cur.get("pending"), v.get("pending"))
+                cur["trial"] = bool(cur.get("trial") or v.get("trial"))
+                for f in ("username", "name", "in_chat", "started", "reminded"):
+                    if cur.get(f) in (None, "", 0, False) and v.get(f):
+                        cur[f] = v[f]
         for k in ("revenue_nano", "paid_count"):
             if isinstance(data.get(k), (int, float)):
                 self.state[k] = max(int(self.state.get(k) or 0), int(data[k]))
@@ -132,6 +154,17 @@ class Subscriptions:
         except Exception as e:
             log.warning("Subscriptions save failed: %s", e)
         if backup and self.on_change:
+            # резервная копия — в фоне и пачкой: загрузка в Telegram идёт секунды (а при лимитах — минуты),
+            # а save(backup=True) часто вызывается под общим локом подписок. При остановке бота копия
+            # всё равно сохраняется (App.stop), так что ничего не теряется.
+            self._backup_wanted = True
+            if self._backup_task is None or self._backup_task.done():
+                self._backup_task = _running_loop().create_task(self._backup_soon())
+
+    async def _backup_soon(self) -> None:
+        await asyncio.sleep(0.5)                  # несколько изменений подряд → одна загрузка
+        while self._backup_wanted:
+            self._backup_wanted = False
             try:
                 await self.on_change()
             except Exception as e:
@@ -149,8 +182,13 @@ class Subscriptions:
         return len(self.state["users"])
 
     def user(self, uid: int) -> dict:
-        return self.state["users"].setdefault(str(uid), {"until": 0, "trial": False, "in_chat": False,
-                                                         "pending": 0})
+        u = self.state["users"].get(str(uid))
+        if u is None:
+            u = {"until": 0, "trial": False, "in_chat": False, "pending": 0}
+            if self.degraded or not self.ready.is_set():
+                u["tmp"] = True        # создана, пока копия не прочитана: при чтении копии её данные важнее
+            self.state["users"][str(uid)] = u
+        return u
 
     # ------------------------------------------------------------------ keyboards
     def main_kb(self) -> InlineKeyboardMarkup:
@@ -183,7 +221,22 @@ class Subscriptions:
         except Exception:
             return False
 
+    async def flush_backup(self) -> None:
+        """Дождаться фоновой резервной копии (вызывается ВНЕ лока — после денег/выдачи доступа)."""
+        t = self._backup_task
+        if t is not None and not t.done():
+            try:
+                await _shield(t)
+            except Exception:
+                pass
+
     async def grant(self, uid: int, seconds: float, reason: str, inv: dict | None = None) -> str:
+        try:
+            return await self._grant(uid, seconds, reason, inv)
+        finally:
+            await self.flush_backup()
+
+    async def _grant(self, uid: int, seconds: float, reason: str, inv: dict | None = None) -> str:
         """Выдать доступ: если человек уже в канале — продлить; иначе — одноразовая ссылка."""
         async with self._lock:
             u = self.user(uid)
@@ -233,6 +286,12 @@ class Subscriptions:
             self.state["links"].pop(link, None)
 
     async def on_join(self, ev: ChatMemberUpdated) -> None:
+        try:
+            await self._on_join(ev)
+        finally:
+            await self.flush_backup()
+
+    async def _on_join(self, ev: ChatMemberUpdated) -> None:
         if ev.chat.id != sub_chat_id():
             return
         new, old = ev.new_chat_member.status, ev.old_chat_member.status
@@ -364,12 +423,14 @@ class Subscriptions:
         """Страховка на случай, если Telegram не прислал событие входа/выхода: всех, у кого доступ
         закончился, проверяем по факту — если человек всё ещё в канале, выкидываем."""
         now = time.time()
+        checks = 0          # не больше 60 проверок «ждёт входа» за проход — иначе проход тянется минутами
         for k, u in list(self.state["users"].items()):
             uid = int(k)
             if uid in settings.admin_ids or self._has_access(u):
                 continue
             if u.get("pending"):
-                if now - float(u.get("checked") or 0) >= 600:
+                if checks < 60 and now - float(u.get("checked") or 0) >= 600:
+                    checks += 1
                     u["checked"] = now
                     if await self._member_status(uid) in ("member", "restricted"):
                         await self._unknown_join(uid, None)
@@ -433,15 +494,35 @@ class Subscriptions:
         return code
 
     async def _fetch_txs(self) -> list[dict]:
+        """Последние входящие переводы. Листаем назад (до 6 страниц по 50), пока не дойдём до уже
+        обработанного перевода или до времени старше самого старого открытого счёта — иначе при
+        простое бота и спаме мелкими переводами настоящая оплата могла выпасть из окна."""
         url = "https://toncenter.com/api/v2/getTransactions"
-        params = {"address": settings.sub_ton_address, "limit": "50", "archival": "false"}
         headers = {"X-API-Key": settings.toncenter_api_key} if settings.toncenter_api_key else {}
+        seen = set(self.state.get("seen_tx") or [])
+        open_ts = [float(i.get("ts") or 0) for i in self.state["invoices"].values() if not i.get("paid")]
+        oldest = min(open_ts) if open_ts else time.time()
+        out: list[dict] = []
+        params = {"address": settings.sub_ton_address, "limit": "50", "archival": "false"}
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
-            async with s.get(url, params=params, headers=headers) as r:
-                data = await r.json(content_type=None)
-        if not data.get("ok"):
-            raise RuntimeError(str(data.get("error") or data)[:200])
-        return data.get("result") or []
+            for _page in range(6):
+                async with s.get(url, params=params, headers=headers) as r:
+                    data = await r.json(content_type=None)
+                if not data.get("ok"):
+                    if out:
+                        break
+                    raise RuntimeError(str(data.get("error") or data)[:200])
+                page = data.get("result") or []
+                out += page
+                if len(page) < 50:
+                    break
+                last = page[-1]
+                tid = last.get("transaction_id") or {}
+                if (tid.get("hash") in seen or float(last.get("utime") or 0) < oldest
+                        or not tid.get("lt")):
+                    break
+                params = {**params, "lt": tid["lt"], "hash": tid["hash"], "archival": "true"}
+        return out
 
     async def check_payments(self) -> int:
         """Найти оплаченные счета по комментарию и сумме. → сколько оплачено сейчас."""
@@ -489,6 +570,7 @@ class Subscriptions:
             self.state["seen_tx"] = self.state["seen_tx"][-1000:]
             if paid or underpaid or extra:
                 await self.save(backup=True)     # оплата — сразу и в резервную копию (деплой не потеряет)
+        await self.flush_backup()
         for uid, code, value in extra:
             for admin in settings.admin_ids:
                 try:
@@ -559,6 +641,7 @@ class Subscriptions:
                 await self._remind()
                 if tick % 12 == 0:
                     await self._reconcile()
+                await self.flush_backup()
             except Exception as e:
                 log.warning("Subscription expiry check failed: %s", e)
             if tick % 6 == 0:
@@ -614,11 +697,24 @@ class Subscriptions:
                if u.get("in_chat") and u.get("until") not in (FOREVER, None) and 0 < float(u["until"]) <= now
                and int(k) not in settings.admin_ids]
         for uid in due:
+            async with self._lock:
+                if self._has_access(self.user(uid)) or self.user(uid).get("pending"):
+                    continue      # пока шли по списку, человек продлил подписку — не трогаем
             if not await self.kick(uid):
                 continue          # не получилось выгнать — попробуем на следующем круге
             async with self._lock:
-                self.user(uid)["in_chat"] = False
+                u = self.user(uid)
+                u["in_chat"] = False
                 await self.save()
+                renewed = self._has_access(u) or u.get("pending")
+            if renewed:
+                # продлил прямо во время кика — выдаём новую ссылку, а не «подписка закончилась»
+                try:
+                    text = await self.grant(uid, 0, "Подписка продлена, держите ссылку для входа.")
+                    await self.bot.send_message(uid, text)
+                except Exception as e:
+                    log.warning("Re-link after renewal during kick failed for %s: %s", uid, e)
+                continue
             log.info("Subscription ended — user %s removed from channel", uid)
             try:
                 await self.bot.send_message(uid, "⌛ Ваша подписка закончилась. Продлить можно здесь 👇",
@@ -626,8 +722,14 @@ class Subscriptions:
             except Exception:
                 pass
         # старые счета и неиспользованные ссылки — чистим
-        for code in [c for c, i in self.state["invoices"].items() if now - i["ts"] > 7 * 86400]:
-            self.state["invoices"].pop(code, None)
+        for code, i in list(self.state["invoices"].items()):
+            if i.get("paid") and i.get("granted") is not True:
+                continue                  # оплачен, но доступ ещё не выдан — не удаляем, пока не выдадим
+            if not i.get("paid") and i.get("got"):
+                continue                  # частичная оплата — ждём доплату, деньги не теряем
+            age_from = float(i.get("paid_at") or i.get("ts") or 0)
+            if now - age_from > 7 * 86400:
+                self.state["invoices"].pop(code, None)
         for link in [l for l, r in self.state["links"].items() if now - r["ts"] > LINK_TTL + 3600]:
             self.state["links"].pop(link, None)
 
@@ -918,6 +1020,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             u = subs.user(uid)
             u.update({"until": 0 if ok else time.time(), "in_chat": not ok, "pending": 0})
             await subs.save(backup=True)
+        await subs.flush_backup()
         await m.answer(f"✅ Доступ {uid} забран")
 
     # ---------------- всё остальное от не-админов → приветствие

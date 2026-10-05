@@ -290,7 +290,15 @@ class SessionBackup:
                    "subs": self.subs_export() if self.subs_export else {},
                    "flags": self.flags,
                    "removed": list(self.graveyard.values())}
-        blob = f.encrypt(json.dumps(payload).encode())
+        # сжатие + потолок размера: Bot API отдаёт на скачивание только файлы до 20 МБ — больший файл
+        # загрузится, но при деплое его уже не скачать (все аккаунты и подписки пропали бы)
+        def _pack(p: dict) -> bytes:
+            return f.encrypt(b"Z1" + zlib.compress(json.dumps(p, separators=(",", ":")).encode(), 6))
+        blob = await asyncio.to_thread(_pack, payload)
+        while len(blob) > MAX_BOT_DOWNLOAD and payload["sent"]:
+            payload["sent"] = payload["sent"][: len(payload["sent"]) // 2]     # свежие — первыми, режем старые
+            log.warning("Backup too big — keeping only %s newest sent listings", len(payload["sent"]))
+            blob = await asyncio.to_thread(_pack, payload)
 
         if self._last_chat is None:
             try:
@@ -419,7 +427,8 @@ class SessionBackup:
         try:
             buf = io.BytesIO()
             await src_bot.download(file_id, destination=buf)
-            data = json.loads(f.decrypt(buf.getvalue()))
+            raw = f.decrypt(buf.getvalue())
+            data = json.loads(zlib.decompress(raw[2:]) if raw[:2] == b"Z1" else raw)   # Z1 = сжатая копия
         except InvalidToken as e:
             # одинаковые байты на всех попытках = реально другой ключ; разные = битая закачка
             # InvalidToken = неверный ключ ЛИБО оборванная/битая закачка. НЕ помечаем restore
