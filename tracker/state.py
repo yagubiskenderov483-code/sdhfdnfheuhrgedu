@@ -34,6 +34,7 @@ first_seen — время ПЕРВОГО ОБНАРУЖЕНИЯ нашим тр�
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 
 from tracker.marketplace import ResaleItem
@@ -85,11 +86,21 @@ class CollectionState:
     partial: bool = False                     # Telegram отдал при синхронизации заметно меньше лотов, чем count
     last_count: int | None = None             # ResaleStarGifts.count при последнем чтении
     baseline_pending: bool = False            # первый live-опрос после полной синхронизации должен быть тихим
+    prev_floor: int | None = None             # флор ДО того, как новый дешёвый лот его опустил (не в БД)
+    prev_floor_at: float = 0.0
+    prev_top: list = field(default_factory=list)   # listing_id верхних лотов прошлого опроса (в БД — в last_cursor)
+
+    def ref_floor(self, now: float) -> int | None:
+        """Флор для поста и темы. Каталог уже показывает флор с учётом только что выставленного
+        дешёвого лота — тогда «ниже флора» и тема по флору считаются от прежнего значения."""
+        if self.prev_floor and now - self.prev_floor_at < 120:
+            return max(self.floor_stars or 0, self.prev_floor)
+        return self.floor_stars
 
     def to_row(self) -> dict:
         return {
             "gift_id": self.gift_id, "title": self.title, "synced": int(self.synced),
-            "complete": int(self.complete), "last_cursor": self.last_cursor,
+            "complete": int(self.complete), "last_cursor": (json.dumps(self.prev_top) if self.prev_top else self.last_cursor),  # верх выдачи — списком
             "last_seen_listing_id": self.last_seen_listing_id,
             "last_seen_timestamp": self.last_seen_timestamp,
             "availability_resale": self.availability_resale, "last_poll": self.last_poll,
@@ -192,4 +203,5 @@ def classify(state: CollectionState, items: list[ResaleItem], known: dict[int, K
         return c
 
     c.reason = "anchor_not_found"
+    c.silent += [(it, "no_anchor") for it in above]      # решение — за координатором
     return c

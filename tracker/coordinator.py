@@ -11,15 +11,19 @@ MarketplaceCoordinator — единая точка, которая решает,
 Sessions — только транспорт: общего состояния у них нет, всё хранится в одной БД.
 
 Планировщик LIVE:
-  • у каждой коллекции есть due-время; каждую коллекцию стараемся опрашивать раз в TRACKER_INTERVAL;
-  • параллельно выполняется не больше min(MAX_CONCURRENT_SESSIONS, активных sessions) опросов;
-  • каждые CATALOG_INTERVAL секунд payments.getStarGifts: если у коллекции изменился
-    availability_resale — она опрашивается вне очереди (hot);
-  • реальная частота опроса = (кол-во коллекций) / (sessions × SESSION_RPS) — видно в /status.
+  • каталог (payments.getStarGifts) каждые CATALOG_INTERVAL, запросы внахлёст: выросло число лотов
+    коллекции или упал её флор → коллекция «горячая» и опрашивается первой;
+  • затем дорогие коллекции (флор от PRIORITY_FLOOR) — раз в PRIORITY_POLL_INTERVAL, но не больше
+    PRIORITY_SHARE реальной мощности аккаунтов; остальные — страховочный обход раз в COLD_POLL_INTERVAL
+    (долго ждущая дешёвая коллекция встаёт в ряд с дорогими);
+  • параллельных опросов — по числу рабочих аккаунтов минус один (под проверку продавцов);
+    темп каждого аккаунта ограничивает сам worker (SESSION_RPS × скорость после FloodWait).
 """
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import json
 import time
 from datetime import datetime, timezone
 
@@ -31,11 +35,12 @@ from database.models import utcnow_iso
 from sessions.manager import SessionManager
 from tracker.marketplace import ResaleItem, fetch_catalog, fetch_resale_page
 from tracker.queue import ListingPipeline
-from tracker.state import CollectionState, KnownItem, MarketState, classify
+from tracker.state import CollectionState, KnownItem, MarketState, classify, is_strong
 from tracker.worker import WorkerUnavailable
 from utils.logger import get_logger, llog
 
 log = get_logger("coordinator")
+_URGENT: contextvars.ContextVar[bool] = contextvars.ContextVar("urgent_poll", default=False)
 
 
 def _price(stars: int | None, ton_nano: int | None) -> str:
@@ -74,6 +79,9 @@ class MarketplaceCoordinator:
         self._last_poll_mono: dict[int, float] = {}
         self._poll_gap: dict[int, float] = {}
         self._tasks: list[asyncio.Task] = []
+        self._polls: set[asyncio.Task] = set()     # живые опросы (сильные ссылки, иначе GC может их съесть)
+        self._cat_applied = 0
+        self._sync_busy = False        # идёт массовая быстрая синхронизация (после запуска)
         self._sync_retry_at: dict[int, float] = {}
         self._hot_since: dict[int, float] = {}
         self._poll_t0: dict[int, float] = {}
@@ -113,6 +121,12 @@ class MarketplaceCoordinator:
                 last_session=row["last_session"],
                 partial=bool(row.get("partial") or 0), last_count=row.get("last_count"),
                 baseline_pending=bool(row.get("baseline") or 0))
+            if st.last_cursor and st.last_cursor.startswith("["):
+                try:
+                    st.prev_top = json.loads(st.last_cursor)
+                except ValueError:
+                    st.prev_top = []
+                st.last_cursor = st.prev_top[0] if st.prev_top else None
             if st.synced and st.last_count is None:
                 # состояние от версии без проверки неполных коллекций → один раз тихо перечитать
                 st.needs_full_sync = True
@@ -133,9 +147,14 @@ class MarketplaceCoordinator:
             await asyncio.sleep(1)
 
     # ------------------------------------------------------------------ catalog
-    async def refresh_catalog(self) -> None:
+    async def refresh_catalog(self, seq: int | None = None) -> None:
         await self._wait_if_paused()
         catalog, _ = await self.sessions.run(fetch_catalog)
+        if seq is not None:
+            # запросы каталога идут внахлёст: более старый ответ, пришедший позже свежего, не применяем
+            if seq <= self._cat_applied:
+                return
+            self._cat_applied = seq
         self.last_catalog_at = time.time()
         added, hot = 0, 0
         skipped_before = set(self.skipped)
@@ -159,9 +178,25 @@ class MarketplaceCoordinator:
             if st.title != c.title:
                 st.title = c.title
                 self._dirty.add(c.gift_id)
+            # заметное падение флора (>1%): мелкие колебания бывают от курса TON у лотов в TON
+            floor_dropped = bool(st.floor_stars and c.resell_min_stars
+                                 and c.resell_min_stars < st.floor_stars * 0.99)
+            if floor_dropped:
+                if not (st.prev_floor and time.monotonic() - st.prev_floor_at < 120):
+                    st.prev_floor = st.floor_stars
+                st.prev_floor_at = time.monotonic()
             st.floor_stars = c.resell_min_stars
-            if c.availability_resale != st.availability_resale:
+            if c.availability_resale != st.availability_resale or floor_dropped:
+                # флор упал при том же числе лотов = кто-то выставил дешевле (и одновременно что-то продано)
+                grew = (c.availability_resale or 0) > (st.availability_resale or 0) or floor_dropped
                 st.availability_resale = c.availability_resale
+                self._dirty.add(c.gift_id)
+                if not grew:
+                    # счётчик уменьшился (продажа / снятие) — срочный опрос не нужен, но новый лот мог
+                    # совпасть с продажами; проверяем в ближайшие секунды обычным (не срочным) опросом
+                    soon = time.monotonic() + 8.0
+                    self._due[c.gift_id] = min(self._due.get(c.gift_id, soon), soon)
+                    continue
                 if c.gift_id in self.low_prio:
                     # дешёвая коллекция: опрос при изменении, но не чаще раза в LOW_PRIORITY_HOT_MIN
                     soon = self._last_poll_mono.get(c.gift_id, 0.0) + settings.low_priority_hot_min
@@ -261,8 +296,10 @@ class MarketplaceCoordinator:
 
     async def _fetch(self, gid: int, offset: str, limit: int):
         await self._wait_if_paused()
+        # опрос коллекции, где каталог только что показал новый лот, не ждёт полную паузу аккаунта
         page, session = await self.sessions.run(lambda c: fetch_resale_page(c, gid, offset, limit),
-                                                prefer=self.shard_owner(gid))
+                                                prefer=self.shard_owner(gid),
+                                                priority=_URGENT.get() and not offset)   # только 1-я страница
         self.stats["scanned"] += len(page.items)
         return page, session
 
@@ -284,8 +321,9 @@ class MarketplaceCoordinator:
         gid = st.gift_id
         seen: set[int] = set()
         session, first_id, reached_end, count, pages, stable = None, None, False, 0, 0, False
-        max_pages = settings.initial_sync_pages or 10**9
-        for pass_no in range(1, settings.sync_passes + 1):
+        fast = settings.sync_mode == "fast"
+        max_pages = settings.fast_sync_pages if fast else (settings.initial_sync_pages or 10**9)
+        for pass_no in range(1, (1 if fast else settings.sync_passes) + 1):
             offset, reached_end, pass_pages = "", False, 0
             seen_before = len(seen)
             while pass_pages < max_pages:
@@ -294,6 +332,7 @@ class MarketplaceCoordinator:
                 count = page.count
                 if pass_no == 1 and pass_pages == 1 and page.items:
                     first_id = page.items[0].listing_id
+                    st.prev_top = [it.listing_id for it in page.items[:settings.page_limit]]
                 fresh = [it for it in page.items if it.unique_id not in seen]
                 seen.update(it.unique_id for it in page.items)
                 await self.db.upsert_market_items(self._row(it, MarketState.KNOWN) for it in fresh)
@@ -315,11 +354,20 @@ class MarketplaceCoordinator:
                      "INITIAL_SYNC" if reason == "initial" else "RESYNC", st.title, pass_no, len(seen), count)
         gap = count - len(seen)
         complete = reached_end and (stable or gap <= max(1, count // 500))
+        if fast:
+            # Быстрый режим: база — верхняя страница рынка (самые свежие лоты по времени выставления/смены цены).
+            # Полное чтение больших коллекций с малым числом аккаунтов идёт часами, а Telegram часто
+            # вообще не отдаёт их целиком — из-за этого половина коллекций НИЧЕГО не слала.
+            # Теперь незнакомый лот над якорем = новый (или старый лот, только что перевыставленный
+            # с новой ценой — он тоже свежий на рынке).
+            complete, gap = True, 0
         # Большие коллекции Telegram иногда отдаёт не целиком (1101 из 10153): повторные проходы
         # ничего не добавляют. Такую коллекцию читаем дальше, но помечаем partial — для неё
         # «незнакомый лот наверху» ещё не значит «новый» (см. _apply: сверка с изменением count).
         partial = complete and gap > max(1, count // 100)
-        if complete:
+        if complete and not fast:
+            # (быстрый режим читает 1-2 страницы за секунды — тихий опрос не нужен, иначе лоты,
+            # выставленные до первого live-опроса, терялись бы)
             # первый опрос сразу после ЛЮБОЙ полной синхронизации — тихий: пока мы листали, рынок
             # менялся, и «незнакомый лот наверху» на первом live-опросе не отличить от старого. Один
             # опрос закрепляет базу, после него уходят только по-настоящему новые лоты. Это важно и
@@ -352,8 +400,6 @@ class MarketplaceCoordinator:
                 return 0
             if st.needs_full_sync or not st.complete:
                 await self.full_sync(st, "collection_incomplete")
-                if not st.complete:
-                    self._due[st.gift_id] = time.monotonic() + settings.resync_retry_seconds
                 return 0
             cls, items, session, count = await self._scan_top(st, mode)
             return await self._apply(st, cls, items, session, mode, count)
@@ -363,7 +409,10 @@ class MarketplaceCoordinator:
         при всплеске — заново крупными страницами до RECOVERY_MAX_PAGES."""
         gid = st.gift_id
         plans = [(settings.page_limit, settings.live_max_pages)] if mode == "live" else []
-        plans.append((100, settings.recovery_max_pages))
+        # в быстром режиме не листаем глубоко: якоря не нашлось за 3 страницы → быстрая пересинхронизация
+        # (иначе после деплоя RECOVERY по всем коллекциям занимала минуты, и новые лоты ждали)
+        deep = min(settings.recovery_max_pages, 3) if settings.sync_mode == "fast" else settings.recovery_max_pages
+        plans.append((100, deep))
         cls, items, session, count = None, [], None, None
         for limit, max_pages in plans:
             items, seen, offset, reached_end = [], set(), "", False
@@ -378,8 +427,19 @@ class MarketplaceCoordinator:
                 reached_end = not page.next_offset or not page.items
                 known = await self._lookup(items)
                 cls = classify(st, items, known, reached_end)
-                if cls.decided or reached_end:
+                if reached_end:
                     break
+                if cls.decided:
+                    # якорь найден, но count вырос больше, чем видно незнакомых лотов → настоящие новые
+                    # ещё ниже (ложный якорь сверху: перевыставление по той же цене) — дочитываем
+                    seen_unknown = len(cls.new) + sum(1 for _, w in cls.silent if w == "first_seen_below_anchor")
+                    more = (st.complete and count is not None and st.last_count is not None
+                            and count - st.last_count > seen_unknown)
+                    if (settings.sync_mode == "fast" and st.prev_top and cls.silent
+                            and not any(it.listing_id in set(st.prev_top) for it in items)):
+                        more = True     # ещё не дошли до прошлого верха — граница «изменилось после опроса» ниже
+                    if not more:
+                        break
                 offset = page.next_offset or ""
             if cls is not None and cls.decided:
                 break
@@ -391,6 +451,23 @@ class MarketplaceCoordinator:
         self.stats["polls"] += 1
         now_iso = utcnow_iso()
 
+        if (cls is not None and not cls.decided and settings.sync_mode == "fast" and st.complete
+                and count is not None and st.last_count is not None):
+            # Быстрый режим: якоря нет даже на 3 страницах (всплеск лотов или массовая смена цен).
+            # Раньше это значило «ничего не шлём + пересинхронизация» — и весь всплеск терялся.
+            # Сколько лотов реально добавилось, видно по счётчику коллекции: столько верхних
+            # незнакомых и считаем новыми, остальное запоминаем молча. Коллекция остаётся в работе.
+            delta = max(0, count - st.last_count)
+            unknown = [it for it, why in cls.silent if why == "no_anchor"]
+            take = unknown[:delta]
+            ids = {id(it) for it in take}
+            cls.silent = [(it, why) for it, why in cls.silent if id(it) not in ids]
+            cls.new = take
+            cls.decided = True
+            cls.reason = "no_anchor_count_delta"
+            log.info('[NO_ANCHOR] collection="%s" scanned=%s count_delta=%s → new=%s',
+                     st.title, len(items), delta, len(take))
+
         if cls is None or not cls.decided:
             # anchor не найден даже после дочитывания → ничего не отправляем, тихо пересинхронизируем
             self.stats["resyncs"] += 1
@@ -400,8 +477,7 @@ class MarketplaceCoordinator:
             st.needs_full_sync = True
             await self.db.upsert_market_items(self._row(it, MarketState.SILENT_OLD) for it in items
 )
-            self._due[gid] = 0.0   # полная синхронизация — при следующем опросе
-            self._dirty.add(gid)
+            self._dirty.add(gid)          # пересинхронизацию сделает фоновая синхронизация (_sync_loop)
             return 0
 
         # 1) PRICE_MOVED — тот же листинг, новая цена: обновить, НЕ отправлять
@@ -445,7 +521,51 @@ class MarketplaceCoordinator:
                     for it in below:
                         llog("NEW_BELOW_ANCHOR", f"listing={it.listing_id} count_delta={count - st.last_count}")
 
-        if cls.new and st.partial:
+        # 2e) владелец скрыт: NFT перепродали другому скрытому продавцу — по ключу это «тот же листинг
+        #     с новой ценой». Если счётчик коллекции вырос больше, чем найдено новых, недостающие
+        #     берём из таких «смен цены» со скрытым продавцом.
+        if (st.complete and not was_baseline and count is not None and st.last_count is not None
+                and cls.moved):
+            missing = (count - st.last_count) - len(cls.new)
+            if missing > 0:
+                # (ключи должны различаться: при одинаковом «n» это тот же listing_id — его не перешлёшь)
+                weak = [(it, k) for it, k in cls.moved
+                        if it.seller_key != k.seller_key
+                        and not (is_strong(it.seller_key) and is_strong(k.seller_key))][:missing]
+                if weak:
+                    ids = {id(it) for it, _ in weak}
+                    cls.moved = [(it, k) for it, k in cls.moved if id(it) not in ids]
+                    cls.new = cls.new + [it for it, _ in weak]
+                    self.stats["price_moves"] -= len(weak)
+                    for it, _ in weak:
+                        llog("NEW_HIDDEN_RESALE", f"listing={it.listing_id}")
+
+        # 2d) «ложный якорь» без роста счётчика (перевыставили по той же цене + продажа рядом):
+        #     всё, что в выдаче ВЫШЕ прошлого верхнего лота, изменилось после прошлого опроса —
+        #     незнакомый лот там новый, даже если оказался под якорем.
+        if st.complete and st.last_cursor and not was_baseline and cls.silent:
+            pos = {it.listing_id: i for i, it in enumerate(items)}
+            # верхний лот прошлого опроса мог быть продан/перепродан → берём первый сохранившийся
+            marks = [l for l in (st.prev_top or [st.last_cursor]) if l in pos]
+            if settings.sync_mode == "fast":
+                # всё, что выше САМОГО НИЖНЕГО сохранившегося лота прошлого верха, менялось после
+                # прошлого опроса (сохранившийся лот мог только подняться, не опуститься)
+                top_idx = max((pos[l] for l in marks), default=None)
+            else:
+                top_idx = pos[marks[0]] if marks else None
+            if top_idx:
+                fresh = {id(it) for it in items[:top_idx]}
+                rescue = [it for it, why in cls.silent if why == "first_seen_below_anchor" and id(it) in fresh]
+                if rescue:
+                    ids = {id(it) for it in rescue}
+                    cls.silent = [(it, why) for it, why in cls.silent if id(it) not in ids]
+                    order = {id(it): i for i, it in enumerate(items)}
+                    cls.new = sorted(cls.new + rescue, key=lambda it: order.get(id(it), 0))
+                    self.stats["silent"] -= len(rescue)
+                    for it in rescue:
+                        llog("NEW_ABOVE_LAST_TOP", f"listing={it.listing_id}")
+
+        if cls.new and st.partial and settings.sync_mode == "full":
             delta = (count - st.last_count) if (count is not None and st.last_count is not None) else 0
             keep = max(delta, 0)
             if len(cls.new) > keep:
@@ -468,11 +588,17 @@ class MarketplaceCoordinator:
         if cls.new:
             if mode == "recover":
                 llog("RECOVERY", f'collection="{st.title}" new_during_downtime={len(cls.new)}')
-            admitted = await self.pipeline.admit(cls.new, session, mode, floor_stars=st.floor_stars,
+            admitted = await self.pipeline.admit(cls.new, session, mode,
+                                                 floor_stars=st.ref_floor(time.monotonic()),
                                                  t_detect=self._poll_t0.get(gid) if mode == "live" else None)
             st.last_seen_listing_id = cls.new[0].listing_id
             st.last_seen_timestamp = now_iso
 
+        if cls.known:
+            try:
+                await self.db.touch_market_items(it.unique_id for it in cls.known)
+            except Exception:
+                pass
         rows = [self._row(it, MarketState.NEW) for it in cls.new]
         rows += [self._row(it, MarketState.PRICE_MOVED) for it, _ in cls.moved]
         rows += [self._row(it, MarketState.SILENT_OLD) for it, _ in cls.silent]
@@ -480,6 +606,7 @@ class MarketplaceCoordinator:
 
         if items:
             st.last_cursor = items[0].listing_id
+            st.prev_top = [it.listing_id for it in items[:settings.page_limit]]
         st.last_poll = now_iso
         st.last_session = session
         self._dirty.add(gid)
@@ -521,7 +648,6 @@ class MarketplaceCoordinator:
         self.paused = (await self.db.kv_get("paused", "0")) == "1"
         if self.paused:
             log.info("Tracker is PAUSED ⏸ (use /resume)")
-        await self.pipeline.resume_unfinished()
         await self._wait_for_sessions()
         log.info("Marketplace tracker started")
 
@@ -532,6 +658,8 @@ class MarketplaceCoordinator:
             except Exception as e:
                 log.error("Catalog fetch failed: %s — retry in 10s", e)
                 await asyncio.sleep(10)
+        # недообработанные лоты прошлого запуска — после каталога, чтобы был известен флор коллекций
+        await self.pipeline.resume_unfinished()
 
         ready = [s for s in self.states.values() if self._is_live(s)]
         pending = self._pending_sync()
@@ -596,7 +724,12 @@ class MarketplaceCoordinator:
 
     def _sync_concurrency(self) -> int:
         # полная синхронизация занимает не больше половины sessions — остальные держат LIVE
-        return max(1, min(settings.max_concurrent_sessions, len(self.sessions.usable()) // 2))
+        n = len(self.sessions.usable())
+        if settings.sync_mode == "fast":
+            # быстрая база — 2 запроса на коллекцию; пока её нет, лоты коллекции не ловятся вообще,
+            # поэтому после запуска синхронизация идёт всеми аккаунтами
+            return max(1, min(settings.max_concurrent_sessions, n))
+        return max(1, min(settings.max_concurrent_sessions, n // 2))
 
     async def _sync_loop(self) -> None:
         while not self._stop.is_set():
@@ -606,6 +739,7 @@ class MarketplaceCoordinator:
             try:
                 pending = self._pending_sync()
                 if pending:
+                    self._sync_busy = settings.sync_mode == "fast" and len(pending) >= 3
                     sem = asyncio.Semaphore(self._sync_concurrency())
 
                     async def one(st: CollectionState) -> None:
@@ -613,16 +747,21 @@ class MarketplaceCoordinator:
                             if self._stop.is_set():
                                 return
                             self._running.add(st.gift_id)
+                            r = None
                             try:
-                                await self._poll_safe(st, "sync")
+                                r = await self._poll_safe(st, "sync")
                             finally:
                                 self._running.discard(st.gift_id)
                                 if not self._is_live(st):
-                                    self._sync_retry_at[st.gift_id] = (time.monotonic()
-                                                                       + settings.resync_retry_seconds)
+                                    # нет свободного аккаунта — повторить через 15 с, а не через 5 минут
+                                    self._sync_retry_at[st.gift_id] = time.monotonic() + (
+                                        15.0 if r is None else settings.resync_retry_seconds)
                                 self._due[st.gift_id] = time.monotonic()
 
-                    await asyncio.gather(*(one(st) for st in pending))
+                    try:
+                        await asyncio.gather(*(one(st) for st in pending))
+                    finally:
+                        self._sync_busy = False
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -631,7 +770,7 @@ class MarketplaceCoordinator:
 
     async def stop(self) -> None:
         self._stop.set()
-        for t in self._tasks:
+        for t in list(self._tasks) + list(self._polls):
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         try:
@@ -656,15 +795,35 @@ class MarketplaceCoordinator:
             await asyncio.sleep(0.5)
             return
         now = time.monotonic()
-        capacity = max(1, min(settings.max_concurrent_sessions, max(1, len(self.sessions.usable()))))
+        # Темп каждого аккаунта уже ограничен в worker (SESSION_RPS × его скорость), поэтому
+        # параллельных опросов — по числу аккаунтов (один оставляем под проверку продавцов).
+        # Больше параллелизма не ускоряет отдельный аккаунт и не добавляет FloodWait.
+        n_usable = len(self.sessions.usable())
+        capacity = max(1, min(settings.max_concurrent_sessions, n_usable - (1 if n_usable > 2 else 0)))
         # 1) коллекции, где каталог показал новый лот (hot) — всегда первыми;
         # 2) затем дорогие (флор от PRIORITY_FLOOR); 3) остальные по времени
         # внутри каждого уровня дорогие коллекции идут раньше дешёвых
-        due = sorted(((0 if gid in self._hot_since else (1 if self._is_priority(gid) else 2)) * 2
-                      + (0 if self._is_priority(gid) else 1), t, gid)
-                     for gid, t in self._due.items()
+        # Обычная коллекция, которая ждёт дольше 3× COLD_POLL_INTERVAL, встаёт в один ряд с дорогими —
+        # иначе при нехватке аккаунтов дешёвые не опрашивались бы никогда.
+        starve = settings.cold_poll_interval * 3
+
+        def key(gid: int, t: float) -> tuple:
+            prio = self._is_priority(gid)
+            if gid in self._hot_since:
+                tier = 0 if prio else 1
+            elif prio or now - t > starve:
+                tier = 2
+            else:
+                tier = 3
+            return (tier, t, gid)
+
+        due = sorted(key(gid, t) for gid, t in self._due.items()
                      if t <= now and gid not in self._running
                      and gid in self.states and self._is_live(self.states[gid]))
+        if self._sync_busy:
+            # идёт быстрая синхронизация новых коллекций: пока у них нет базы, их лоты не ловятся вовсе,
+            # поэтому плановые опросы ждут — опрашиваем только «горячие» (каталог показал новый лот)
+            due = [d for d in due if d[0] <= 1]
         live_running = sum(1 for g in self._running if g in self.states and self._is_live(self.states[g]))
         for _, _, gid in due:
             if live_running >= capacity:
@@ -675,15 +834,17 @@ class MarketplaceCoordinator:
                 self._due.pop(gid, None)
                 continue
             self._running.add(gid)
-            asyncio.create_task(self._live_poll(st), name=f"poll-{gid}")
+            task = asyncio.create_task(self._live_poll(st), name=f"poll-{gid}")
+            self._polls.add(task)
+            task.add_done_callback(self._polls.discard)
         await asyncio.sleep(0.02)
 
     def _priority_interval(self) -> float:
         """Частый опрос дорогих коллекций, но не больше PRIORITY_SHARE мощности аккаунтов —
         иначе остальные коллекции и «горячие» лоты встают в очередь, а аккаунты ловят FloodWait."""
         n = sum(1 for g in self.states if self._is_priority(g))
-        usable = max(1, len(self.sessions.usable()))
-        budget = usable * max(0.05, settings.session_rps) * settings.priority_share
+        eff = max(1.0, self.sessions.effective())
+        budget = eff * max(0.05, settings.session_rps) * settings.priority_share
         return max(settings.priority_poll_interval, n / budget if budget else 60.0)
 
     def _is_priority(self, gid: int) -> bool:
@@ -702,15 +863,18 @@ class MarketplaceCoordinator:
             lat = started - hot_at
             if lat < 120:          # старые отметки (после паузы/синхронизации) не портят среднее
                 self.hot_latency = lat if self.hot_latency is None else self.hot_latency * 0.8 + lat * 0.2
+        token = _URGENT.set(hot_at is not None)
         try:
             found = await self._poll_safe(st, "live")
         finally:
+            _URGENT.reset(token)
             now = time.monotonic()
             prev = self._last_poll_mono.get(gid)
-            if prev is not None:
-                g = now - prev
-                self._poll_gap[gid] = g if gid not in self._poll_gap else self._poll_gap[gid] * 0.8 + g * 0.2
-            self._last_poll_mono[gid] = now
+            if found is not None:
+                if prev is not None:
+                    g = now - prev
+                    self._poll_gap[gid] = g if gid not in self._poll_gap else self._poll_gap[gid] * 0.8 + g * 0.2
+                self._last_poll_mono[gid] = now
             # коллекция, где только что были новые лоты, остаётся «горячей»; остальные — страховочный
             # опрос раз в COLD_POLL_INTERVAL, а мгновенно — когда каталог покажет изменение счётчика
             cold = settings.low_priority_poll_interval if gid in self.low_prio else settings.cold_poll_interval
@@ -734,15 +898,32 @@ class MarketplaceCoordinator:
             self._running.discard(gid)
 
     async def _catalog_loop(self) -> None:
-        # ровный ритм: время самого запроса входит в интервал (раньше интервал + запрос ≈ 2× дольше)
-        while not self._stop.is_set():
-            started = time.monotonic()
-            if not self.paused:
-                try:
-                    await self.refresh_catalog()
-                except Exception as e:
-                    log.warning("Catalog refresh failed: %s", e)
-            await asyncio.sleep(max(0.2, settings.catalog_interval - (time.monotonic() - started)))
+        """Каталог (счётчики лотов всех коллекций) — главный способ мгновенно заметить новый лот.
+        Ответ идёт ~1-5 с (аккаунт может ждать свою очередь), поэтому запросы идут внахлёст:
+        новый стартует каждые CATALOG_INTERVAL, одновременно до 2-3 штук."""
+        seq = 0
+        inflight: set[asyncio.Task] = set()
+
+        async def once(n: int) -> None:
+            try:
+                await self.refresh_catalog(n)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("Catalog refresh failed: %s", e)
+
+        try:
+            while not self._stop.is_set():
+                limit = 1 if len(self.sessions.usable()) < 4 else (2 if len(self.sessions.usable()) < 10 else 3)
+                if not self.paused and len(inflight) < limit:
+                    seq += 1
+                    t = asyncio.create_task(once(seq), name=f"catalog-{seq}")
+                    inflight.add(t)
+                    t.add_done_callback(inflight.discard)
+                await asyncio.sleep(max(0.2, settings.catalog_interval))
+        finally:
+            for t in list(inflight):
+                t.cancel()
 
     async def _persist_loop(self) -> None:
         while not self._stop.is_set():
@@ -753,11 +934,15 @@ class MarketplaceCoordinator:
                 log.exception("Persist failed")
 
     async def _persist(self) -> None:
-        dirty, self._dirty = self._dirty, set()
-        for gid in dirty:
+        for gid in list(self._dirty):
             st = self.states.get(gid)
+            self._dirty.discard(gid)      # до записи: изменение во время записи снова пометит коллекцию
             if st:
-                await self.db.save_collection_state(st.to_row())
+                try:
+                    await self.db.save_collection_state(st.to_row())
+                except Exception:
+                    self._dirty.add(gid)
+                    raise
         latest = max((s for s in self.states.values() if s.last_seen_timestamp),
                      key=lambda s: s.last_seen_timestamp, default=None)
         kv = {"stat_scanned": self.stats["scanned"], "stat_polls": self.stats["polls"],

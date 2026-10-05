@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -153,8 +154,8 @@ class Settings:
     collection_min_floor: int = 4500         # отслеживать только коллекции с флором на маркете от N Stars (0 = все)
     min_ton: float = 0.0
     priority_floor: int = 2500           # коллекции с флором от N ⭐ опрашиваются чаще и первыми (0 = выкл)
-    priority_share: float = 0.8          # какая доля мощности аккаунтов уходит на дорогие коллекции
-    priority_poll_interval: float = 1.5  # как часто опрашивать каждую дорогую коллекцию, сек
+    priority_share: float = 0.65         # какая доля мощности аккаунтов уходит на дорогие коллекции
+    priority_poll_interval: float = 2.5  # как часто опрашивать каждую дорогую коллекцию, сек
     auto_remove_dead: bool = True        # сессию, которую снёс Telegram, удалять из трекера автоматически
     max_lot_age: int = 600               # лот, пролежавший в очереди дольше N сек, не отправляется (0 = выкл)
     route_by: str = "floor"              # тема по: floor (флор коллекции = цена гифта) | price (цена лота)
@@ -175,6 +176,8 @@ class Settings:
     # --- трекер ---
     initial_sync: bool = True
     initial_sync_pages: int = 0              # 0 = все страницы (полная синхронизация, рекомендуется)
+    sync_mode: str = "fast"                  # fast: база = верхняя страница (FAST_SYNC_PAGES), коллекция сразу LIVE | full: читать всё
+    fast_sync_pages: int = 1
     sync_passes: int = 3                     # доп. проходы полной синхронизации, если выдача «уехала»
     resync_retry_seconds: float = 300.0
     max_same_collection_streak: int = 1      # не больше N отправок подряд из одной коллекции (0 = без лимита)
@@ -183,7 +186,7 @@ class Settings:
     live_max_pages: int = 5
     recovery_max_pages: int = 20
     catalog_interval: float = 1.0            # как часто смотреть счётчики всех коллекций (1 запрос); можно 0.3–0.5 для скорости
-    cold_poll_interval: float = 15.0        # страховочный опрос без изменений счётчика; новые лоты и так ловит каталог за 2с
+    cold_poll_interval: float = 30.0        # страховочный опрос без изменений счётчика; новые лоты и так ловит каталог за 2с
     market_backup_minutes: float = 30.0      # как часто сохранять снимок рынка в Telegram
     market_snapshot_max_age_hours: float = 6.0
     collections: list[str] = field(default_factory=list)   # пусто = все коллекции
@@ -270,6 +273,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "PRIORITY_FLOOR": ("priority_floor", lambda v: max(0, int(v))),
     "PRIORITY_SHARE": ("priority_share", lambda v: min(0.9, max(0.1, float(v.replace(",", "."))))),
     "PRIORITY_POLL_INTERVAL": ("priority_poll_interval", lambda v: max(0.5, float(v.replace(",", ".")))),
+    "SYNC_MODE": ("sync_mode", lambda v: _choice(v, {"fast", "full"})),
     "ROUTE_BY": ("route_by", lambda v: v.strip().lower() if v.strip().lower() in ("floor", "price") else "floor"),
     "ALLOW_TON_ONLY": ("allow_ton_only", _bool_strict),
     "RUSSIAN_ONLY": ("russian_only", _bool_strict),
@@ -318,8 +322,8 @@ def _from_env() -> Settings:
         min_ton=_float(e("MIN_TON"), 0.0),
         max_above_floor=max(0, _int(e("MAX_ABOVE_FLOOR"), 0)),
         priority_floor=max(0, _int(e("PRIORITY_FLOOR"), 2500)),
-        priority_poll_interval=max(0.5, _float(e("PRIORITY_POLL_INTERVAL"), 1.5)),
-        priority_share=min(0.9, max(0.1, _float(e("PRIORITY_SHARE"), 0.8))),
+        priority_poll_interval=max(0.5, _float(e("PRIORITY_POLL_INTERVAL"), 2.5)),
+        priority_share=min(0.9, max(0.1, _float(e("PRIORITY_SHARE"), 0.65))),
         max_lot_age=max(0, _int(e("MAX_LOT_AGE"), 600)),
         auto_remove_dead=_bool(e("AUTO_REMOVE_DEAD"), True),
         route_by=("price" if (e("ROUTE_BY") or "").strip().lower() == "price" else "floor"),
@@ -330,7 +334,7 @@ def _from_env() -> Settings:
         require_free_messages=_bool(e("REQUIRE_FREE_MESSAGES"), True),
         max_seller_nfts=max(0, _int(e("MAX_SELLER_NFTS"), 12)),
         max_seller_level=max(0, _int(e("MAX_SELLER_LEVEL"), 5)),
-        cold_poll_interval=max(1.0, _float(e("COLD_POLL_INTERVAL"), 15.0)),
+        cold_poll_interval=max(1.0, _float(e("COLD_POLL_INTERVAL"), 30.0)),
         market_backup_minutes=max(5.0, _float(e("MARKET_BACKUP_MINUTES"), 30.0)),
         market_snapshot_max_age_hours=max(0.5, _float(e("MARKET_SNAPSHOT_MAX_AGE_HOURS"), 6.0)),
         unique_sellers=_bool(e("UNIQUE_SELLERS"), True),
@@ -339,6 +343,8 @@ def _from_env() -> Settings:
         initial_sync=_bool(e("INITIAL_SYNC"), True),
         initial_sync_pages=max(0, _int(e("INITIAL_SYNC_PAGES"), 0)),
         sync_passes=max(1, _int(e("SYNC_PASSES"), 3)),
+        sync_mode=("full" if (e("SYNC_MODE") or "").strip().lower() == "full" else "fast"),
+        fast_sync_pages=max(1, min(20, _int(e("FAST_SYNC_PAGES"), 1))),
         resync_retry_seconds=max(10.0, _float(e("RESYNC_RETRY_SECONDS"), 300.0)),
         max_same_collection_streak=max(0, _int(e("MAX_SAME_COLLECTION_STREAK"), 1)),
         tracker_interval=max(0.2, _float(e("TRACKER_INTERVAL"), 1.0)),
@@ -374,9 +380,10 @@ def _from_env() -> Settings:
 
 def _load_runtime_overrides() -> dict[str, str]:
     try:
-        return json.loads(RUNTIME_SETTINGS_PATH.read_text(encoding="utf-8"))
-    except (FileNotFoundError, json.JSONDecodeError):
+        data = json.loads(RUNTIME_SETTINGS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return {}
+    return data if isinstance(data, dict) else {}
 
 
 def load_settings() -> Settings:
@@ -385,7 +392,10 @@ def load_settings() -> Settings:
         if key in RUNTIME_KEYS:
             attr, conv = RUNTIME_KEYS[key]
             try:
-                setattr(s, attr, conv(str(raw)))
+                v = conv(str(raw))
+                if isinstance(v, float) and not math.isfinite(v):
+                    continue
+                setattr(s, attr, v)
             except (ValueError, TypeError):
                 pass
     return s
@@ -426,6 +436,8 @@ def set_runtime_value(key: str, raw: str) -> Any:
         raise KeyError(key)
     attr, conv = RUNTIME_KEYS[key]
     value = conv(raw)
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("not a finite number")     # inf/nan «вешали» циклы трекера
     setattr(settings, attr, value)
     data = _load_runtime_overrides()
     data[key] = raw

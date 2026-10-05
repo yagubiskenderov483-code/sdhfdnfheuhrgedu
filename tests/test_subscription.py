@@ -317,3 +317,252 @@ def test_expensive_first():
     print("EXPENSIVE FIRST OK")
 
 test_expensive_first()
+
+
+def test_connect_does_not_kill_flooded_account():
+    """FloodWait / сбой Telegram при подключении НЕ должны помечать аккаунт «снесённым» (раньше
+    client.is_user_authorized() превращал любую ошибку в «не авторизован» → аккаунт удалялся)."""
+    import asyncio
+    from pathlib import Path
+    from telethon import errors
+    from tracker.worker import SessionWorker, WorkerStatus
+    from tracker.ratelimit import TokenBucket
+
+    class FakeClient:
+        def __init__(self, exc):
+            self.exc = exc
+        def is_connected(self): return True
+        async def connect(self): pass
+        async def disconnect(self): pass
+        async def __call__(self, req):
+            if self.exc:
+                raise self.exc
+            from types import SimpleNamespace
+            return [SimpleNamespace(id=42)]
+
+    async def run():
+        res = {}
+        for name, exc in (("flood", errors.FloodWaitError(None, capture=600)),
+                          ("server", errors.ServerError(None, "INTERNAL")),
+                          ("dead", errors.AuthKeyUnregisteredError(None)),
+                          ("ok", None)):
+            w = SessionWorker(name, Path("/tmp/x.session"), 1, "h", TokenBucket(0), lambda: 1.0)
+            killed = []
+            async def cb(w, killed=killed): killed.append(w.name)
+            w.on_auth_error = cb
+            w.client = FakeClient(exc)
+            await w.connect()
+            await asyncio.sleep(0)
+            res[name] = (w.status, killed)
+        assert res["flood"][0] == WorkerStatus.ERROR and not res["flood"][1], res["flood"]
+        assert res["server"][0] == WorkerStatus.ERROR and not res["server"][1]
+        assert res["dead"][0] == WorkerStatus.AUTH_ERROR and res["dead"][1] == ["dead"]
+        assert res["ok"][0] == WorkerStatus.ACTIVE
+    asyncio.run(run())
+    print("CONNECT SAFE OK")
+
+test_connect_does_not_kill_flooded_account()
+
+
+def test_graveyard():
+    import tempfile, sqlite3, time as _t
+    from pathlib import Path
+    from sessions.storage import SessionStorage
+    from sessions.backup import SessionBackup
+    from telethon.sessions import SQLiteSession
+    from telethon.crypto import AuthKey
+    d = Path(tempfile.mkdtemp())
+    st = SessionStorage(d, 1, "h")
+    ss = SQLiteSession(str(d / "session_001"))
+    ss.set_dc(2, "149.154.167.51", 443); ss.auth_key = AuthKey(b"\x01" * 256); ss.save(); ss.close()
+    st.save_meta("session_001", 123, "hash", owner_id=7)
+    b = SessionBackup.__new__(SessionBackup)
+    b.storage = st; b.graveyard = {}
+    assert b.bury("session_001", "test")
+    st.remove("session_001")
+    assert not st.session_path("session_001").exists()
+    b.graveyard["old"] = {"name": "old", "string": "x", "ts": _t.time() - 30 * 86400}
+    b._trim_graveyard()
+    assert "old" not in b.graveyard and "session_001" in b.graveyard
+    name = b.unbury("session_001")
+    assert name == "session_001" and st.session_path(name).exists()
+    rec = st.list_sessions()[0]
+    assert rec.api_id == 123 and rec.owner_id == 7 and not b.graveyard
+    print("GRAVEYARD OK")
+
+test_graveyard()
+
+
+def test_split_payment_and_inflight_restore():
+    import asyncio, types, time as _t
+    import bot.subscription as S
+    class DB:
+        def __init__(s): s.kv = {}
+        async def kv_get(s, k, d=None): return s.kv.get(k, d)
+        async def kv_set(s, k, v): s.kv[k] = v
+    class Bot:
+        n = 0; msgs = []
+        async def create_chat_invite_link(s, chat, **kw):
+            s.n += 1; return types.SimpleNamespace(invite_link=f"L{s.n}")
+        async def revoke_chat_invite_link(s, *a): pass
+        async def send_message(s, uid, text, **k): s.msgs.append((uid, text))
+        async def get_chat_member(s, chat, uid): return types.SimpleNamespace(status="left")
+    settings.target_chat_id = -100
+    settings.sub_ton_address = "UQx"
+    subs = S.Subscriptions(types.SimpleNamespace(db=DB(), bot=Bot()))
+    async def run():
+        await subs.load()
+        subs.state["invoices"]["AB"] = {"uid": 3, "plan": "24h", "nano": 2_600_000_000, "ts": _t.time()}
+        txs = [{"transaction_id": {"hash": "p1"}, "in_msg": {"source": "EQ", "value": "1600000000", "message": "AB"}}]
+        async def fake(): return txs
+        subs._fetch_txs = fake
+        assert await subs.check_payments() == 0
+        assert any(u == 3 and "Доплатите" in t for u, t in subs.bot.msgs), "человеку сказали про доплату"
+        txs.append({"transaction_id": {"hash": "p2"}, "in_msg": {"source": "EQ", "value": "1000000000", "message": "AB"}})
+        assert await subs.check_payments() == 1
+        assert subs.state["invoices"]["AB"]["granted"] is True and subs.user(3)["pending"] == 24 * 3600
+        # выдача оборвалась перезапуском («inflight» в копии) → после восстановления повторяется
+        subs2 = S.Subscriptions(types.SimpleNamespace(db=DB(), bot=Bot()))
+        await subs2.import_({"invoices": {"Z": {"uid": 4, "plan": "24h", "nano": 1, "ts": 0,
+                                                "paid": True, "granted": "inflight"}}})
+        assert subs2.state["invoices"]["Z"]["granted"] is False
+        await subs2._retry_undelivered()
+        assert subs2.state["invoices"]["Z"]["granted"] is True
+    asyncio.run(run())
+    print("SPLIT PAYMENT + INFLIGHT OK")
+
+test_split_payment_and_inflight_restore()
+
+
+def test_ton_only_filter():
+    import dataclasses
+    from filters.price_filter import PriceFilter
+    from database.models import Listing
+    from bot.formatter import price_line
+    base = {x.name: None for x in dataclasses.fields(Listing)
+            if x.default is dataclasses.MISSING and x.default_factory is dataclasses.MISSING}
+    l = Listing(**base); l.stars_price = 9000; l.ton_nano = 100 * 10**9; l.ton_only = True; l.floor_stars = 5000
+    settings.collection_min_floor = 400; settings.max_above_floor = 0; settings.min_ton = 0
+    settings.allow_ton_only = False
+    assert not PriceFilter().check(l).passed
+    settings.allow_ton_only = True
+    assert PriceFilter().check(l).passed
+    assert "только TON" in price_line(l) and "⭐" not in price_line(l)
+    settings.max_above_floor = 50
+    assert not PriceFilter().check(l).passed, "TON-only тоже под лимитом «дороже флора»"
+    settings.max_above_floor = 0
+    print("TON-ONLY OK")
+
+test_ton_only_filter()
+
+
+def test_old_inflight_invoice():
+    import asyncio, types, time as _t
+    import bot.subscription as S
+    class DB:
+        def __init__(s): s.kv = {}
+        async def kv_get(s, k, d=None): return s.kv.get(k, d)
+        async def kv_set(s, k, v): s.kv[k] = v
+    subs = S.Subscriptions(types.SimpleNamespace(db=DB(), bot=None))
+    async def run():
+        now = _t.time()
+        await subs.import_({
+            "users": {"1": {"until": now + 86400, "in_chat": True, "pending": 0},
+                      "2": {"until": 0, "in_chat": False, "pending": 0}},
+            "invoices": {"A": {"uid": 1, "plan": "24h", "nano": 1, "ts": now - 60, "paid": True, "granted": "inflight"},
+                         "B": {"uid": 2, "plan": "24h", "nano": 1, "ts": now - 60, "paid": True, "granted": "inflight"}}})
+        assert subs.state["invoices"]["A"]["granted"] is True, "старая версия уже выдала время — второй раз не выдаём"
+        assert subs.state["invoices"]["B"]["granted"] is False, "время не выдано — выдадим"
+    asyncio.run(run())
+    print("OLD INFLIGHT OK")
+
+test_old_inflight_invoice()
+
+
+def test_sender_fallbacks():
+    import asyncio, types
+    from aiogram.exceptions import TelegramBadRequest
+    from aiogram.methods import SendMessage
+    from bot.sender import TelegramSender
+    calls = []
+    class Bot:
+        async def send_message(s, chat, text, **kw):
+            calls.append(("send", kw.get("message_thread_id"), getattr(kw.get("link_preview_options"), "is_disabled", None)))
+            lp = kw.get("link_preview_options")
+            if lp is not None and lp.is_disabled is not True:
+                raise TelegramBadRequest(method=SendMessage(chat_id=chat, text=text), message="WEBPAGE_CURL_FAILED")
+            if kw.get("message_thread_id") == 67:
+                raise TelegramBadRequest(method=SendMessage(chat_id=chat, text=text), message="TOPIC_CLOSED")
+            return types.SimpleNamespace(message_id=5)
+        async def reopen_forum_topic(s, chat, thread):
+            calls.append(("reopen", thread)); raise RuntimeError("no rights")
+        async def close_forum_topic(s, chat, thread):
+            calls.append(("close", thread))
+    settings.test_mode = False; settings.send_interval = 0
+    snd = TelegramSender(Bot())
+    async def run():
+        r = await snd.send_listing("x", "https://t.me/nft/A-1", target=-100, thread=67)
+        assert r.ok, r
+        assert ("close", 67) not in calls, "тему, которую не открывали, не закрываем"
+    asyncio.run(run())
+    print("SENDER FALLBACKS OK")
+
+test_sender_fallbacks()
+
+
+def test_sender_priority_and_rate():
+    import asyncio, types, time as _t
+    from bot.sender import TelegramSender, _PriorityLock
+    async def run():
+        lk = _PriorityLock(); order = []
+        await lk.acquire(1)
+        async def w(name, prio):
+            await lk.acquire(prio); order.append(name); await asyncio.sleep(0); lk.release()
+        ts = [asyncio.create_task(w("cheap1", 1)), asyncio.create_task(w("cheap2", 1)),
+              asyncio.create_task(w("rich", 0))]
+        await asyncio.sleep(0.01); lk.release(); await asyncio.gather(*ts)
+        assert order == ["rich", "cheap1", "cheap2"], order
+        # не больше PER_CHAT_MINUTE сообщений в минуту в одну группу
+        sent = []
+        class Bot:
+            async def send_message(s, chat, text, **kw):
+                sent.append(_t.monotonic()); return types.SimpleNamespace(message_id=1)
+        settings.test_mode = False; settings.send_interval = 0
+        snd = TelegramSender(Bot()); snd.PER_CHAT_MINUTE = 3
+        t0 = _t.monotonic()
+        snd._recent[-1] = __import__("collections").deque([t0 - 59.8, t0 - 59.8, t0 - 59.8])
+        waits = []
+        orig_sleep = asyncio.sleep
+        async def rec(t, *a):
+            waits.append(t); await orig_sleep(0)
+        asyncio.sleep = rec
+        try:
+            await snd.send(-1, "x")
+        finally:
+            asyncio.sleep = orig_sleep
+        assert waits and 0.1 < waits[0] <= 0.2, ("ждёт, пока освободится окно минуты", waits)
+    asyncio.run(run())
+    print("SENDER PRIORITY + RATE OK")
+
+test_sender_priority_and_rate()
+
+
+def test_hidden_owner_resolved():
+    import asyncio, dataclasses, types
+    from tracker.queue import ListingPipeline
+    from database.models import Listing
+    class S:
+        async def run(self, fn, **kw):
+            return types.SimpleNamespace(id=4242, username=None, usernames=[types.SimpleNamespace(active=True, username="coll")],
+                                         first_name="Петя", last_name=None, premium=True, phone=None, min=False,
+                                         send_paid_messages_stars=None, contact_require_premium=False), "s07"
+    p = ListingPipeline.__new__(ListingPipeline); p.sessions = S(); p.stats = {}
+    base = {x.name: None for x in dataclasses.fields(Listing)
+            if x.default is dataclasses.MISSING and x.default_factory is dataclasses.MISSING}
+    l = Listing(**base); l.listing_id = "1:n:Петя"; l.seller_key = "n:Петя"; l.seller_name = "Петя"; l.gift_slug = "X-1"
+    asyncio.run(p._resolve_hidden_owner(l))
+    assert (l.seller_type, l.seller_id, l.seller_key, l.seller_username, l.session_source, l.messages) == \
+        ("user", 4242, "u4242", "coll", "s07", "бесплатно"), l
+    print("HIDDEN OWNER OK")
+
+test_hidden_owner_resolved()

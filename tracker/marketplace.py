@@ -34,7 +34,7 @@ from typing import Any
 from telethon import errors, TelegramClient
 from telethon.tl import types
 from telethon.tl.functions.payments import (GetResaleStarGiftsRequest, GetSavedStarGiftsRequest,
-                                            GetStarGiftsRequest)
+                                            GetStarGiftsRequest, GetUniqueStarGiftRequest)
 from telethon.tl.functions.users import GetFullUserRequest
 from telethon.tl.functions.stories import GetPeerStoriesRequest
 
@@ -180,6 +180,16 @@ def parse_unique_gift(g: Any, users: dict[int, Any], chats: dict[int, Any]) -> R
     )
 
 
+async def fetch_gift_owner(client: TelegramClient, slug: str) -> Any:
+    """Владелец конкретного NFT по ссылке t.me/nft/<slug>. В выдаче маркета владелец бывает скрыт
+    (только имя), а страница самого подарка часто отдаёт его аккаунт. → telethon User или None."""
+    res = await client(GetUniqueStarGiftRequest(slug=slug))
+    p = getattr(getattr(res, "gift", None), "owner_id", None)
+    if isinstance(p, types.PeerUser):
+        return next((u for u in (res.users or []) if getattr(u, "id", None) == p.user_id), None)
+    return None
+
+
 async def fetch_catalog(client: TelegramClient) -> list[CollectionInfo]:
     """Все коллекции, у которых есть вторичный рынок."""
     res = await client(GetStarGiftsRequest(hash=0))
@@ -237,7 +247,9 @@ async def fetch_full_user(client: TelegramClient, user_id: int) -> SellerFull:
     return SellerFull(
         level=level,
         premium=getattr(user, "premium", None) if user else None,
-        username=getattr(user, "username", None) if user else None,
+        username=(getattr(user, "username", None)
+                  or next((u.username for u in (getattr(user, "usernames", None) or [])
+                           if getattr(u, "active", False)), None)) if user else None,
         paid_message_stars=paid,
         contact_require_premium=(getattr(full, "contact_require_premium", None)
                                  or (getattr(user, "contact_require_premium", None) if user else None)),
@@ -256,7 +268,7 @@ async def fetch_full_user_failover(client: TelegramClient, user_id: int, gift_id
     try:
         return await fetch_full_user(client, user_id)
     except (ValueError, TypeError):
-        await client(GetResaleStarGiftsRequest(gift_id=gift_id, offset="", limit=30))
+        await client(GetResaleStarGiftsRequest(gift_id=gift_id, offset="", limit=100))
         return await fetch_full_user(client, user_id)
 
 
@@ -271,9 +283,11 @@ def _business_text(full) -> str | None:
     return "\n".join(p for p in parts if p) or None
 
 
-async def fetch_extra_texts(client: TelegramClient, user_id: int, channel_id: int | None) -> str:
-    """Подписи к историям продавца, адреса на историях и последние посты его личного канала."""
+async def fetch_extra_texts(client: TelegramClient, user_id: int, channel_id: int | None) -> str | None:
+    """Подписи к историям продавца, адреса на историях и последние посты его личного канала.
+    None — ничего не удалось прочитать из-за ошибки (такой результат не кэшируем)."""
     parts: list[str] = []
+    failed = False
     entity = await client.get_input_entity(types.PeerUser(user_id))
     try:
         res = await client(GetPeerStoriesRequest(peer=entity))
@@ -295,7 +309,7 @@ async def fetch_extra_texts(client: TelegramClient, user_id: int, channel_id: in
             errors.AuthKeyUnregisteredError, errors.SessionRevokedError):
         raise                     # FloodWait / обрыв должны дойти до session — она отдохнёт / переподключится
     except Exception:
-        pass
+        failed = True
     if channel_id:
         try:
             ch = await client.get_input_entity(types.PeerChannel(channel_id))
@@ -306,22 +320,28 @@ async def fetch_extra_texts(client: TelegramClient, user_id: int, channel_id: in
                 errors.AuthKeyUnregisteredError, errors.SessionRevokedError):
             raise
         except Exception:
-            pass
-    return "\n".join(p for p in parts if p)
+            failed = True
+    text = "\n".join(p for p in parts if p)
+    return None if (failed and not text) else text
 
 
-async def fetch_gift_texts(client: TelegramClient, user_id: int, limit: int = 50) -> str:
+async def fetch_gift_texts(client: TelegramClient, user_id: int, limit: int = 50) -> tuple[str, int | None]:
     """Тексты, приложенные к подаркам продавца (например поздравление от дарившего).
-    Объективный признак языка — как bio, но из сообщений к подаркам. Скрытые подарки Telegram не отдаёт."""
+    Объективный признак языка — как bio, но из сообщений к подаркам. Скрытые подарки Telegram не отдаёт.
+    Заодно → число NFT в профиле, если все подарки поместились в ответ (экономит отдельный запрос)."""
     entity = await client.get_input_entity(types.PeerUser(user_id))
     res = await client(GetSavedStarGiftsRequest(peer=entity, offset="", limit=limit))
     parts: list[str] = []
-    for g in getattr(res, "gifts", []) or []:
+    gifts = getattr(res, "gifts", []) or []
+    for g in gifts:
         msg = getattr(g, "message", None)
         text = getattr(msg, "text", None)
         if text:
             parts.append(text)
-    return "\n".join(parts)
+    nfts = None
+    if int(getattr(res, "count", 0) or 0) <= len(gifts):
+        nfts = sum(1 for g in gifts if isinstance(getattr(g, "gift", None), types.StarGiftUnique))
+    return "\n".join(parts), nfts
 
 
 async def fetch_nft_count(client: TelegramClient, user_id: int) -> int:

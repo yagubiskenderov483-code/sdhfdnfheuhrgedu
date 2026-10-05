@@ -27,8 +27,10 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, LinkPreviewOptions, Message,
                            ReplyKeyboardMarkup)
 from telethon import TelegramClient, errors
+from telethon.sessions import StringSession
 
 from config import DATA_DIR, RUNTIME_KEYS, reload_settings, set_runtime_value, settings
+from sessions.backup import string_to_session_file
 from sessions.storage import SessionRecord
 from utils.proxy import mask_proxy, normalize_proxy, parse_proxy, split_lines
 from utils.logger import get_logger
@@ -128,15 +130,50 @@ class AddSession(StatesGroup):
     password = State()
 
 
+_REJ = {"PAID_MESSAGES": "платные сообщения / только Premium", "TOO_MANY_NFTS": "много NFT",
+        "LEVEL_TOO_HIGH": "Level выше лимита", "UNKNOWN_BLOCKED": "нет признаков русского",
+        "PHONE_MISMATCH": "номер не +7/+375/+380", "FOREIGN_TEXT": "профиль на чужом языке",
+        "LOOKUP_FAILED": "профиль не прочитался (аккаунты заняты)", "BLACKLIST": "blacklist"}
+
+
+def _human_reason(status: str, reason: str, code: str | None) -> str:
+    if status == "FILTERED_SELLER" and code:
+        return _REJ.get(code, code)
+    r = reason or ""
+    if r.startswith("stale"):
+        return "устарел, пока ждал очереди"
+    if "seller was already sent" in r:
+        return "этот продавец уже был"
+    if "gift was already sent" in r:
+        return "этот NFT уже был"
+    if "in a row" in r:
+        return "та же коллекция подряд"
+    if "TON-only" in r:
+        return "продаётся только за TON"
+    if "Stars <" in r:
+        return "дешевле порога"
+    return r
+
+
+_ST = {"SENT": "✅ отправлено", "FILTERED_SELLER": "👤 отсеяно по продавцу", "FILTERED_PRICE": "💲 отсеяно по цене",
+       "FILTERED_DUPLICATE": "🔁 повтор", "ERROR": "⌛ устарел / ошибка", "SEND_FAILED": "⚠️ не отправилось",
+       "NEW": "⏳ в обработке", "SENDING": "📤 отправлялся во время перезапуска", "TEST_ONLY": "🧪 тест"}
+
+
+def _proxies_on() -> bool:
+    import os
+    return os.getenv("USE_PROXIES", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _ago(ts: float | None) -> str:
     if not ts:
         return "—"
     d = int(time.time() - ts)
     if d < 60:
-        return f"{d} sec ago"
+        return f"{d} с назад"
     if d < 3600:
-        return f"{d // 60} min ago"
-    return f"{d // 3600} h ago"
+        return f"{d // 60} мин назад"
+    return f"{d // 3600} ч назад"
 
 
 async def _delete(m: Message) -> None:
@@ -147,22 +184,24 @@ async def _delete(m: Message) -> None:
 
 
 HELP = (
-    "<b>Gift Marketplace Live Tracker</b>\n\n"
-    "/status — состояние трекера\n"
-    "/sessions — состояние sessions\n"
-    "/add_session — добавить Telegram-аккаунт\n"
-    "/remove_session — удалить аккаунт (кнопками)\n"
-    "/stats — статистика листингов\n"
-    "/last — последние найденные лоты и почему не отправлены\n"
-    "/collections — какие коллекции отслеживаются\n"
-    "/settings или /filters — все настраиваемые фильтры со значениями\n"
-    "/set &lt;KEY&gt; &lt;VALUE&gt; — изменить фильтр (без аргументов — весь список)\n"
-    "/pause — остановить парсинг (аккаунты не делают запросов)\n"
-    "/proxies — прокси для аккаунтов (свой IP каждому)\n"
-    "/resume — продолжить парсинг\n"
-    "/reload — перечитать .env, шаблон, списки продавцов, новые *.session\n"
-    "/test — проверка API/фильтров/БД/формата (без рассылки); /test channel — тестовый пост в канал\n"
-    "/cancel — отменить текущий диалог"
+    "<b>🎁 Gift Tracker · панель админа</b>\n\n"
+    "<b>Состояние</b>\n"
+    "/status — трекер, скорость, задержки\n"
+    "/stats — статистика лотов · /last — последние лоты и почему не ушли\n"
+    "/top — самые активные коллекции за сутки · /find имя — всё о коллекции\n"
+    "/collections — какие коллекции отслеживаются\n\n"
+    "<b>Управление</b>\n"
+    "/off · /on — выключить / включить парсер\n"
+    "/close · /open — закрыть / открыть для пользователей (лоты идут)\n"
+    "/settings — все настройки · /set КЛЮЧ ЗНАЧЕНИЕ — изменить\n\n"
+    "<b>Аккаунты</b>\n"
+    "/sessions — список, пинг, риск · /add_session — добавить\n"
+    "/removed — удалённые за 14 дней · /revive ИМЯ|all — вернуть\n"
+    "/proxies — прокси для аккаунтов\n\n"
+    "<b>Подписки</b>\n"
+    "/subs — подписчики и выручка\n"
+    "/grant ID|@юз 24|3д|навсегда — выдать · /revoke ID|@юз — забрать\n\n"
+    "/test — проверка работы · /reload — перечитать .env и файлы · /cancel — отменить диалог"
 )
 
 
@@ -191,6 +230,7 @@ SETTING_DESC: dict[str, str] = {
     "PRIORITY_FLOOR": "коллекции с флором от N ⭐ опрашиваются чаще и первыми (0 = выкл)",
     "PRIORITY_SHARE": "какая доля аккаунтов работает на дорогих коллекциях (0.1–0.9)",
     "PRIORITY_POLL_INTERVAL": "как часто опрашивать каждую дорогую коллекцию, сек",
+    "SYNC_MODE": "fast — коллекция начинает слать лоты сразу (база = верхние 100 лотов) | full — сперва читает ВСЕ лоты (медленно)",
     "ROUTE_BY": "в какую тему класть лот: floor (по флору коллекции = цене гифта) | price (по цене лота)",
     "MAX_ABOVE_FLOOR": "не слать лоты дороже флора коллекции больше чем на N% (0 = не проверять)",
     "ALLOW_TON_ONLY": "слать лоты, которые продаются только за TON (true/false)",
@@ -226,7 +266,7 @@ SETTING_GROUPS: list[tuple[str, list[str]]] = [
     ("🔁 Без повторов", ["UNIQUE_GIFTS", "UNIQUE_SELLERS", "MAX_SAME_COLLECTION_STREAK",
                          "SELLER_REPEAT_HOURS"]),
     ("⚡ Скорость", ["PRIORITY_FLOOR", "PRIORITY_SHARE", "PRIORITY_POLL_INTERVAL", "CATALOG_INTERVAL", "COLD_POLL_INTERVAL", "TRACKER_INTERVAL", "PAGE_LIMIT",
-                    "SESSION_RPS", "GLOBAL_RPS", "MAX_CONCURRENT_SESSIONS", "LOW_PRIORITY_POLL_INTERVAL"]),
+                    "SESSION_RPS", "GLOBAL_RPS", "MAX_CONCURRENT_SESSIONS", "LOW_PRIORITY_POLL_INTERVAL", "SYNC_MODE"]),
     ("⚙️ Прочее", ["COLLECTION_FLOOR_MODE", "TEST_MODE", "ALLOW_ALL_USERS", "FETCH_FULL_SELLER"]),
     ("📢 Общий и каналы по цене", ["TARGET_CHAT_ID", "PRICE_ROUTES", "ROUTE_BY"]),
     ("🎨 Каналы по фону", ["BACKDROP_ROUTES"]),
@@ -237,7 +277,12 @@ async def _answer_long(m: Message, text: str, reply_markup=None) -> None:
     """Telegram не принимает сообщения длиннее 4096 символов — режем по строкам."""
     chunks, cur = [], ""
     for line in text.split("\n"):
-        if len(cur) + len(line) + 1 > 3800:
+        while len(line) > 3800:                    # одна очень длинная строка
+            if cur.strip():
+                chunks.append(cur)
+            chunks.append(line[:3800])
+            line, cur = line[3800:], ""
+        if len(cur) + len(line) + 1 > 3800 and cur.strip():
             chunks.append(cur)
             cur = ""
         cur += line + "\n"
@@ -245,6 +290,17 @@ async def _answer_long(m: Message, text: str, reply_markup=None) -> None:
         chunks.append(cur)
     for i, chunk in enumerate(chunks):
         await m.answer(chunk, reply_markup=reply_markup if i == len(chunks) - 1 else None)
+
+
+async def _edit_or_send(q: CallbackQuery, text: str) -> None:
+    """Сообщение с кнопками могло устареть (48+ ч) — тогда отвечаем новым сообщением."""
+    try:
+        await q.message.edit_text(text)
+    except Exception:
+        try:
+            await q.bot.send_message(q.from_user.id, text)
+        except Exception:
+            pass
 
 
 def _filters_help() -> str:
@@ -262,7 +318,8 @@ def _filters_help() -> str:
             elif k == "BACKDROP_ROUTES":
                 val = (", ".join(f"{name}→{chat}{('/'+str(th)) if th else ''}"
                                  for name, chat, th in val) or "не задано")
-            cur = html.escape(str(val))
+            raw = str(val)
+            cur = html.escape(raw[:500] + ("…" if len(raw) > 500 else ""))
             desc = SETTING_DESC.get(k, "")
             lines.append(f"<code>{k}</code> = <b>{cur}</b>\n  <i>{desc}</i>")
         lines.append("")
@@ -330,29 +387,55 @@ def build_routers(app: "App") -> list[Router]:
         original = msg.html_text or ""
         links = kb.inline_keyboard[1:]
         rows = [[InlineKeyboardButton(text="Отменить", callback_data=f"untake:{u.id}")]]
-        # запоминаем пост, чтобы занявший мог отменить и вернуть лот в канал
+
+        async def release() -> None:
+            async with claim_lock:
+                claimed.discard(key)
+
+        # 1) сначала лот — в личку тому, кто занял. Не дошло (человек не запускал бота) → лот не трогаем,
+        #    иначе он пропал бы и из канала, и у человека
         try:
-            await app.db.kv_set(f"taken:{key[0]}:{key[1]}", json.dumps(
-                {"uid": u.id, "html": original, "kb": kb.model_dump(mode="json", exclude_none=True)}))
-        except Exception as e:
-            log.warning("Could not save taken lot: %s", e)
+            dm = await app.bot.send_message(
+                u.id, "Вы заняли лот:\n\n" + original,
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=links) if links else None)
+        except Exception:
+            await release()
+            try:
+                me = await app.bot.me()
+                name = f"@{me.username}" if me.username else "бота"
+            except Exception:
+                name = "бота"
+            await q.answer(f"Сначала откройте {name} и нажмите «Старт», затем «Занять»", show_alert=True)
+            return
+        # 2) потом пост в канале: остаётся только отметка «занят»
+        edited = False
         try:
-            # в канале от лота остаётся только отметка «занят» — сам лот уходит занявшему в личку
             await msg.edit_text(f"<i>Данный лот занят</i>\n{html.escape(who)}",
                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
                                 link_preview_options=LinkPreviewOptions(is_disabled=True))
+            edited = True
         except Exception:
             try:
                 await msg.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+                edited = True
             except Exception:
                 pass
-        # лот — в личку тому, кто занял
+        if not edited:
+            await release()
+            try:
+                await dm.delete()
+            except Exception:
+                pass
+            await q.answer("Не получилось занять, нажмите ещё раз", show_alert=True)
+            return
+        # запоминаем пост, чтобы можно было отменить и вернуть лот в канал
         try:
-            await app.bot.send_message(u.id, "Вы заняли лот:\n\n" + original,
-                                       reply_markup=InlineKeyboardMarkup(inline_keyboard=links) if links else None)
-            await q.answer("Лот ваш, отправил его вам в личку")
-        except Exception:
-            await q.answer("Лот ваш. Чтобы лоты приходили в личку, напишите боту /start", show_alert=True)
+            await app.db.kv_set(f"taken:{key[0]}:{key[1]}", json.dumps(
+                {"uid": u.id, "html": original, "kb": kb.model_dump(mode="json", exclude_none=True),
+                 "ts": int(time.time())}))
+        except Exception as e:
+            log.warning("Could not save taken lot: %s", e)
+        await q.answer("Лот ваш, отправил его вам в личку")
 
     @public.callback_query(F.data == "taken")
     async def cb_taken(q: CallbackQuery) -> None:
@@ -362,18 +445,33 @@ def build_routers(app: "App") -> list[Router]:
     async def cb_untake(q: CallbackQuery) -> None:
         """«Отменить»: тот, кто занял лот, возвращает его в канал. Остальным — «Данный лот занят»."""
         msg = q.message
-        owner = int(q.data.split(":", 1)[1] or 0)
-        if q.from_user.id != owner:
+        try:
+            owner = int(q.data.split(":", 1)[1] or 0)
+        except ValueError:
+            await q.answer()
+            return
+        if q.from_user.id != owner and not is_manager(q.from_user.id):
             await q.answer("Данный лот занят", show_alert=True)
             return
         kv_key = f"taken:{msg.chat.id}:{msg.message_id}"
         raw = await app.db.kv_get(kv_key)
         if not raw:
-            await q.answer("Не получилось вернуть лот: пост слишком старый", show_alert=True)
+            # бот перезапускался — исходного текста поста нет; убираем мёртвую кнопку
+            try:
+                await msg.edit_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await q.answer("Вернуть нельзя: бот перезапускался после того, как лот заняли", show_alert=True)
             return
         data = json.loads(raw)
+        # превью гифта как в исходном посте (ссылка t.me/nft/... из кнопок)
+        nft_url = next((b.get("url") for row in data["kb"].get("inline_keyboard", []) for b in row
+                        if str(b.get("url") or "").startswith("https://t.me/nft/")), None)
+        preview = (LinkPreviewOptions(url=nft_url, prefer_small_media=True) if nft_url
+                   else LinkPreviewOptions(is_disabled=True))
         try:
-            await msg.edit_text(data["html"], reply_markup=InlineKeyboardMarkup.model_validate(data["kb"]))
+            await msg.edit_text(data["html"], reply_markup=InlineKeyboardMarkup.model_validate(data["kb"]),
+                                link_preview_options=preview)
         except Exception as e:
             log.warning("Untake failed: %s", e)
             await q.answer("Не получилось вернуть лот", show_alert=True)
@@ -410,9 +508,8 @@ def build_routers(app: "App") -> list[Router]:
                 await p["client"].disconnect()
             except Exception:
                 pass
-            app.storage.discard(p["name"])
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -423,44 +520,69 @@ def build_routers(app: "App") -> list[Router]:
         c = app.sessions.counts()
         coord, pipe = app.coordinator, app.pipeline
         running = coord.mode == "LIVE" and not coord.paused
-        icon = "⏸" if coord.paused else "🟢" if running else ("🟡" if coord.mode in ("INITIALIZING", "INITIAL_SYNC", "RECOVERY") else "🔴")
+        if coord.paused:
+            head = "⏸ <b>Парсер выключен</b> · включить: /on"
+        elif running:
+            head = "🟢 <b>Трекер работает</b>"
+        else:
+            head = f"🟡 <b>Запуск: {coord.mode}</b>"
+        if getattr(app, "users_closed", False):
+            head += "\n🔒 Для пользователей закрыто (/open)"
         cycle = coord.avg_cycle_seconds()
-        text = _boot_note() + (
-            f"{icon} TRACKER: {'⏸ PAUSED (/resume)' if coord.paused else ('RUNNING' if running else coord.mode)}\n"
-            f"👥 Sessions: {len(app.sessions.workers)}\n"
-            f"🟢 Active: {c.get('ACTIVE', 0)}\n"
-            f"🔴 Errors: {c.get('ERROR', 0) + c.get('AUTH_ERROR', 0)}\n"
-            f"⏳ FloodWait: {c.get('FLOOD_WAIT', 0)}\n"
-            f"🟡 Connecting: {c.get('CONNECTING', 0)}\n"
-            f"📚 Collections LIVE: {coord.sync_progress()[0]}/{coord.sync_progress()[1]} "
-            f"(остальные в тихой синхронизации)\n"
-            + (f"🐢 Из них дешёвых (флор ниже {settings.collection_min_floor}⭐, реже): {len(coord.low_prio)}\n"
-               if settings.collection_floor_mode == "slow" else
-               f"🚫 Пропущено коллекций (флор ниже {settings.collection_min_floor}⭐): {len(coord.skipped)}\n") +
-            f"⚡ Реакция на новый лот: {f'{coord.hot_latency:.1f}s' if coord.hot_latency is not None else '—'} "
-            f"(+ до {settings.catalog_interval:g}s на проверку каталога)\n"
-            + ((lambda b: f"📈 За минуту: {b['req']} запросов, FloodWait {b['flood']}, ошибок {b['err']}, "
-                          f"пинг {b['ping']:.0f}ms, замедлено аккаунтов {b['slow']}\n" if b.get('ping') else
-                          f"📈 За минуту: {b['req']} запросов, FloodWait {b['flood']}, ошибок {b['err']}\n")
-               (app.bench) if getattr(app, "bench", None) else "")
-            + (("⏱ Задержка лота (среднее): " + " · ".join(
-                f"{n} {app.pipeline.latency[k]:.2f}s" for k, n in
-                (("request", "запрос"), ("queue", "очередь"), ("check", "проверка"), ("send", "отправка"),
-                 ("total", "итого")) if k in app.pipeline.latency) + "\n")
-               if app.pipeline.latency else "")
-            +
-            f"🔁 Страховочный обход: {f'{cycle:.0f}s' if cycle else '—'} (цель {settings.cold_poll_interval:g}s)\n"
-            f"📦 Scanned: {coord.stats['scanned']}\n"
-            f"🎁 New listings: {pipe.stats['new']}\n"
-            f"📨 Sent: {pipe.stats['sent']}\n"
-            f"🧮 Дубли: {pipe.stats.get('duplicates', 0)} · смена цены: {coord.stats.get('price_moves', 0)} · "
-            f"старые (не шлём): {coord.stats.get('silent', 0)} · ошибки опроса: {coord.stats.get('poll_errors', 0)} · "
-            f"автозамена аккаунта: {pipe.stats.get('failover', 0)} · устаревшие в очереди: {pipe.stats.get('stale', 0)}\n"
-            f"📥 Queue: {pipe.queue.qsize()}\n"
-            f"⏱ Last listing: {_ago(pipe.last_new_at)}\n"
-            f"⏱ Last sent: {_ago(pipe.last_sent_at)}\n"
-            f"🧪 TEST_MODE: {'ON' if settings.test_mode else 'OFF'}"
-        )
+        live, total = coord.sync_progress()
+        eff = app.sessions.effective()
+        slow = sum(1 for w in app.sessions.workers.values() if w.speed < 1.0)
+        lat = pipe.latency
+        sec = lambda v: f"{v:.1f} с" if v is not None else "—"     # noqa: E731
+        lines = [
+            _boot_note() + head, "",
+            f"<b>👥 Аккаунты: {len(app.sessions.workers)}</b>",
+            f"🟢 {c.get('ACTIVE', 0)} · ⏳ FloodWait {c.get('FLOOD_WAIT', 0)} · "
+            f"🔴 {c.get('ERROR', 0) + c.get('AUTH_ERROR', 0)} · 🟡 {c.get('CONNECTING', 0)}",
+            f"Мощность: {eff:.1f} из {len(app.sessions.workers)}" + (f" (замедлено {slow})" if slow else ""),
+            "",
+            "<b>📚 Рынок</b>",
+            f"Коллекций в работе: {live}/{total}" + (f" · синхронизируются: {total - live}" if total > live else ""),
+            (f"Дешёвых (реже): {len(coord.low_prio)}" if settings.collection_floor_mode == "slow"
+             else f"Пропущено по флору (&lt;{settings.collection_min_floor}⭐): {len(coord.skipped)}"),
+            f"Реакция на новый лот: {sec(coord.hot_latency)} · обход всех: "
+            f"{f'{cycle:.0f} с' if cycle else '—'} (цель {settings.cold_poll_interval:g} с)",
+        ]
+        b = getattr(app, "bench", None)
+        if b:
+            lines.append(f"За минуту: {b['req']} запросов · FloodWait {b['flood']} · ошибок {b['err']}"
+                         + (f" · пинг {b['ping']:.0f} мс" if b.get("ping") else ""))
+        if lat:
+            lines += ["", "<b>⏱ Задержка лота</b>",
+                      " · ".join(f"{n} {lat[k]:.1f} с" for k, n in
+                                 (("request", "запрос"), ("queue", "очередь"), ("check", "проверка"),
+                                  ("send", "отправка")) if k in lat)]
+            if "total" in lat:
+                lines.append(f"<b>Итого: {lat['total']:.1f} с</b> от появления до поста")
+            tot = list(pipe.totals)
+
+            def _q(xs: list[float], p: float) -> float:
+                xs = sorted(xs)
+                return xs[min(len(xs) - 1, int(len(xs) * p))]
+            for title, xs in (("дорогие", [t for t, e in tot if e]), ("остальные", [t for t, e in tot if not e])):
+                if len(xs) >= 3:
+                    lines.append(f"{title}: обычно {_q(xs, .5):.1f} с, 9 из 10 быстрее {_q(xs, .9):.1f} с "
+                                 f"(последние {len(xs)})")
+        lines += [
+            "", "<b>🎁 Лоты</b>",
+            f"Найдено: {pipe.stats['new']} · отправлено: {pipe.stats['sent']} · в очереди: {pipe.queue.qsize()}",
+            f"Последний найден: {_ago(pipe.last_new_at)} · отправлен: {_ago(pipe.last_sent_at)}",
+            f"Повторы {pipe.stats.get('duplicates', 0)} · смена цены {coord.stats.get('price_moves', 0)} · "
+            f"старые {coord.stats.get('silent', 0)} · устаревшие {pipe.stats.get('stale', 0)} · "
+            f"автозамена аккаунта {pipe.stats.get('failover', 0)} · ошибки опроса {coord.stats.get('poll_errors', 0)}",
+            f"Просмотрено лотов всего: {coord.stats['scanned']}",
+            *([f"Скрытые продавцы: найдено {pipe.stats.get('hidden_owner_found', 0)}, "
+               f"не раскрыты {pipe.stats.get('hidden_owner_unknown', 0)}"]
+              if pipe.stats.get('hidden_owner_found') or pipe.stats.get('hidden_owner_unknown') else []),
+        ]
+        if settings.test_mode:
+            lines += ["", "🧪 <b>Тестовый режим</b>: в канал ничего не уходит"]
+        text = "\n".join(lines)
         await _answer_long(m, text)
 
     def _boot_note() -> str:
@@ -497,7 +619,7 @@ def build_routers(app: "App") -> list[Router]:
             if w.status.value not in ("ACTIVE", "CONNECTING"):
                 line += f"\n    Reason: {html.escape((w.reason or '—')[:120])}"
             lines.append(line)
-            if can_manage(uid, owners.get(name)):
+            if can_manage(uid, owners.get(name)) and len(f"rmsess_ok:{name}".encode()) <= 64:
                 btn = InlineKeyboardButton(text=f"🗑 {name}", callback_data=f"rmsess:{name}")
                 if rows and len(rows[-1]) < 3:
                     rows[-1].append(btn)
@@ -528,6 +650,7 @@ def build_routers(app: "App") -> list[Router]:
             return f"❌ Не найдена: {html.escape(name)}"
         if not can_manage(uid, owners.get(name)):
             return "⛔ Удалять можно только свои аккаунты (или если вы админ)."
+        app.backup.bury(name, "удалён вручную")
         await app.sessions.remove(name)
         saved = await app.backup.save(allow_shrink=True)
         return (f"✅ {html.escape(name)} удалена" +
@@ -545,26 +668,29 @@ def build_routers(app: "App") -> list[Router]:
 
     @users.callback_query(F.data.startswith("rmsess_ok:"))
     async def cb_rmsess_ok(q: CallbackQuery) -> None:
-        text = await _remove_session(q.from_user.id, q.data.split(":", 1)[1])
-        await q.message.edit_text(text)
         await q.answer()
+        text = await _remove_session(q.from_user.id, q.data.split(":", 1)[1])
+        await _edit_or_send(q, text)
 
     @users.callback_query(F.data == "rmsess_no")
     async def cb_rmsess_no(q: CallbackQuery) -> None:
-        await q.message.edit_text("Отменено.")
         await q.answer()
+        await _edit_or_send(q, "Отменено.")
 
     @users.message(Command("remove_session"))
     async def cmd_remove(m: Message, command: CommandObject) -> None:
         name = (command.args or "").strip()
         if not re.fullmatch(r"[\w\-]+", name or ""):
             text, kb = _sessions_view(m.from_user.id)
-            await m.answer("Выберите аккаунт для удаления:\n\n" + text, reply_markup=kb)
+            await _answer_long(m, "Выберите аккаунт для удаления:\n\n" + text, reply_markup=kb)
             return
         await m.answer(await _remove_session(m.from_user.id, name))
 
     @admin.message(or_f(Command("pause", "off"), F.text == BTN_PAUSE))
     async def cmd_pause(m: Message) -> None:
+        if not app.subs.ready.is_set():
+            await m.answer("⏳ Бот ещё восстанавливает данные после запуска — повторите через минуту.")
+            return
         await app.coordinator.set_paused(True)
         await app.backup.save()          # чтобы выключение сохранилось и после деплоя
         await m.answer("🔒 Парсер выключен. Лоты не ищутся, пользователям бот пишет «Парсер закрыт».\n"
@@ -572,6 +698,9 @@ def build_routers(app: "App") -> list[Router]:
 
     @admin.message(Command("close"))
     async def cmd_close(m: Message) -> None:
+        if not app.subs.ready.is_set():
+            await m.answer("⏳ Бот ещё восстанавливает данные после запуска — повторите через минуту.")
+            return
         app.users_closed = True
         app.backup.flags["users_closed"] = 1
         await app.backup.save()
@@ -580,6 +709,9 @@ def build_routers(app: "App") -> list[Router]:
 
     @admin.message(Command("open"))
     async def cmd_open(m: Message) -> None:
+        if not app.subs.ready.is_set():
+            await m.answer("⏳ Бот ещё восстанавливает данные после запуска — повторите через минуту.")
+            return
         app.users_closed = False
         app.backup.flags["users_closed"] = 0
         await app.backup.save()
@@ -587,6 +719,9 @@ def build_routers(app: "App") -> list[Router]:
 
     @admin.message(or_f(Command("resume", "on"), F.text == BTN_RESUME))
     async def cmd_resume(m: Message) -> None:
+        if not app.subs.ready.is_set():
+            await m.answer("⏳ Бот ещё восстанавливает данные после запуска — повторите через минуту.")
+            return
         await app.coordinator.set_paused(False)
         await app.backup.save()
         await m.answer("🟢 Парсер включён.")
@@ -595,6 +730,13 @@ def build_routers(app: "App") -> list[Router]:
     async def cmd_proxies(m: Message, command: CommandObject) -> None:
         """/proxies — список; /proxies + прокси с новой строки — заменить пул и раздать аккаунтам."""
         arg = (command.args or "").strip().lower()
+        if command.args and arg not in ("off", "clear", "нет", "-", "выкл", "очистить"):
+            await _delete(m)                       # в сообщении логины/пароли прокси
+        if not _proxies_on() and arg not in ("off", "clear", "нет", "-", "выкл", "очистить"):
+            await m.answer("🌐 Прокси выключены: все аккаунты работают напрямую.\n"
+                           "Чтобы включить: <code>USE_PROXIES=1</code> в .env и перезапуск, потом "
+                           "<code>/proxies</code> со списком.")
+            return
         if arg in ("off", "clear", "нет", "-", "выкл", "очистить"):
             app.storage.save_pool([])                  # очистить пул прокси
             cleared = 0
@@ -656,6 +798,10 @@ def build_routers(app: "App") -> list[Router]:
 
     @admin.message(Command("proxy"))
     async def cmd_proxy(m: Message, command: CommandObject) -> None:
+        await _delete(m)                           # в сообщении может быть пароль прокси
+        if not _proxies_on():
+            await m.answer("Прокси выключены (USE_PROXIES=0 в .env). Включите USE_PROXIES=1 и перезапустите.")
+            return
         parts = (command.args or "").split(maxsplit=1)
         if len(parts) != 2 or parts[0] not in app.sessions.workers:
             await m.answer("Использование: <code>/proxy session_001 socks5://user:pass@host:port</code> "
@@ -673,8 +819,110 @@ def build_routers(app: "App") -> list[Router]:
         await m.answer(f"{'✅' if ok else '⚠️'} {html.escape(name)}: {html.escape(mask_proxy(proxy))}"
                        + ("" if ok else f"\nНе подключился: {html.escape(app.sessions.workers[name].reason or '')}"))
 
+    @admin.message(Command("top"))
+    async def cmd_top(m: Message) -> None:
+        """Самые активные коллекции за сутки: сколько новых лотов нашлось и сколько ушло в канал."""
+        since = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 86400))
+        rows = await app.db.top_collections(since)
+        if not rows:
+            await m.answer("За сутки новых лотов ещё не было.")
+            return
+        floors = {st.title: st.floor_stars for st in app.coordinator.states.values()}
+        lines = ["<b>🔥 Топ коллекций за сутки</b>", "найдено → отправлено · флор", ""]
+        for i, (name, n, sent) in enumerate(rows, 1):
+            fl = floors.get(name)
+            lines.append(f"{i}. {html.escape(name)} — {n} → {sent}" + (f" · {fl:,}⭐".replace(",", " ") if fl else ""))
+        await _answer_long(m, "\n".join(lines))
+
+    @admin.message(Command("find"))
+    async def cmd_find(m: Message, command: CommandObject) -> None:
+        """/find Plush Pepe — что трекер знает о коллекции: в работе ли, флор, как часто опрашивается."""
+        q = (command.args or "").strip().lower()
+        coord = app.coordinator
+        if not q:
+            await m.answer("Использование: <code>/find название коллекции</code>, например <code>/find pepe</code>")
+            return
+        found = [st for st in coord.states.values() if q in (st.title or "").lower()][:5]
+        if not found:
+            await m.answer(f"Коллекция «{html.escape(q[:64])}» не найдена. Список: /collections")
+            return
+        since = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 86400))
+        now = time.monotonic()
+        out = []
+        for st in found:
+            if st.gift_id in coord.skipped:
+                state = f"🚫 пропущена (флор ниже {settings.collection_min_floor}⭐)"
+            elif coord._is_live(st):
+                state = "🟢 в работе"
+            else:
+                state = "🟡 синхронизируется"
+            prio = "⭐ дорогая (опрашивается чаще)" if coord._is_priority(st.gift_id) else "обычная"
+            last = coord._last_poll_mono.get(st.gift_id)
+            gap = coord._poll_gap.get(st.gift_id)
+            c = await app.db.collection_counts(st.gift_id, since)
+            out.append("\n".join([
+                f"<b>{html.escape(st.title)}</b>",
+                f"{state} · {prio}",
+                f"Флор: {st.floor_stars or '—'}⭐ · лотов на рынке: {st.availability_resale or 0}",
+                f"Последний опрос: {f'{now - last:.0f} с назад' if last else '—'}"
+                + (f" · обычно раз в {gap:.1f} с" if gap and gap < 10 else (f" · обычно раз в {gap:.0f} с" if gap else "")),
+                f"За сутки: найдено {sum(c.values())}, отправлено {c.get('SENT', 0)}, "
+                f"отсеяно по продавцу {c.get('FILTERED_SELLER', 0)}",
+            ]))
+        await _answer_long(m, "\n\n".join(out))
+
+    @admin.message(Command("removed"))
+    async def cmd_removed(m: Message) -> None:
+        g = sorted(app.backup.graveyard.values(), key=lambda x: x.get("ts", 0), reverse=True)
+        if not g:
+            await m.answer("Удалённых аккаунтов нет (хранятся 14 дней).")
+            return
+        now = time.time()
+        lines = [f"🗑 Удалённые аккаунты ({len(g)}), хранятся 14 дней:\n"]
+        for x in g:
+            ago = int((now - x.get("ts", now)) // 3600)
+            lines.append(f"• <code>{html.escape(x['name'])}</code> — {ago} ч назад — "
+                         f"{html.escape((x.get('reason') or '—')[:90])}")
+        lines.append("\nВернуть: /revive ИМЯ или /revive all (по-настоящему мёртвые снова удалятся сами)")
+        await _answer_long(m, "\n".join(lines))
+
+    @admin.message(Command("revive"))
+    async def cmd_revive(m: Message, command: CommandObject) -> None:
+        if app.booting:
+            await m.answer("⏳ Идёт запуск — повторите через минуту.")
+            return
+        arg = (command.args or "").strip()
+        names = list(app.backup.graveyard) if arg.lower() == "all" else [arg]
+        if not arg or not names or not all(n in app.backup.graveyard for n in names):
+            await m.answer("Использование: /revive ИМЯ или /revive all. Список — /removed")
+            return
+        await m.answer(f"⏳ Возвращаю {len(names)} акк. и проверяю подключение...")
+        ok, dead, wait = [], [], []
+        for n in names:
+            try:
+                target = app.backup.unbury(n)
+            except Exception as e:
+                log.warning("Revive %s failed: %s", n, e)
+                continue
+            rec = next((r for r in app.storage.list_sessions() if r.name == target), None) if target else None
+            if rec is None:
+                continue
+            w = await app.sessions.add_record(rec)
+            st = w.status.value
+            (ok if st == "ACTIVE" else dead if st == "AUTH_ERROR" else wait).append(target)
+        await app.backup.save()
+        await _answer_long(m, f"✅ Работают: {len(ok)}" + (f" ({', '.join(ok)})" if ok else "") +
+                       f"\n⏳ Переподключаются (FloodWait/сеть): {len(wait)}" +
+                       (f" ({', '.join(wait)})" if wait else "") +
+                       f"\n❌ Действительно мёртвые (удалятся снова): {len(dead)}" +
+                       (f" ({', '.join(dead)})" if dead else ""))
+
     @admin.message(Command("reload"))
     async def cmd_reload(m: Message) -> None:
+        if app.booting:
+            # во время STARTUP_DELAY старая копия бота ещё может работать: подключать аккаунты рано
+            await m.answer("⏳ Идёт запуск — повторите через минуту.")
+            return
         reload_settings()
         app.sessions.limiter.set_rate(settings.global_rps)
         app.formatter.template_path = settings.path(settings.template_path)
@@ -709,8 +957,7 @@ def build_routers(app: "App") -> list[Router]:
         lines.append(", ".join(cheap) + (f" и ещё {len(skipped) - 40}" if len(skipped) > 40 else ""))
         lines += ["", "Изменить порог: <code>/set COLLECTION_MIN_FLOOR 3000</code>"]
         text = "\n".join(lines)
-        for i in range(0, len(text), 3900):          # лимит длины сообщения Telegram
-            await m.answer(text[i:i + 3900])
+        await _answer_long(m, text)
 
     @users.message(or_f(Command("last"), F.text == BTN_LAST))
     async def cmd_last(m: Message) -> None:
@@ -720,16 +967,14 @@ def build_routers(app: "App") -> list[Router]:
             await m.answer("Новых лотов пока не найдено. Проверьте /status — сколько коллекций уже в LIVE.")
             return
         icons = {"SENT": "✅", "FILTERED_PRICE": "💲", "FILTERED_SELLER": "👤", "FILTERED_DUPLICATE": "🔁",
-                 "SEND_FAILED": "❌", "NEW": "⏳", "TEST_ONLY": "🧪", "ERROR": "⚠️"}
-        lines = ["<b>Последние новые лоты</b> (✅ отправлен, 💲 цена, 👤 продавец, 🔁 повтор):", ""]
+                 "SEND_FAILED": "❌", "NEW": "⏳", "TEST_ONLY": "🧪", "ERROR": "⌛", "SENDING": "📤"}
+        lines = ["<b>Последние новые лоты</b> (✅ отправлен, 💲 цена, 👤 продавец, 🔁 повтор, ⌛ устарел):", ""]
         for r in rows:
             price = f"{r['stars_price']}⭐" if r["stars_price"] is not None else "TON"
-            reason = r["reason"] or ""
-            if r["status"] == "FILTERED_SELLER" and r["seller_filter_result"]:
-                reason = r["seller_filter_result"]
+            reason = _human_reason(r["status"], r["reason"] or "", r["seller_filter_result"])
             lines.append(f"{icons.get(r['status'], '•')} {html.escape(r['gift_name'] or '?')} #{r['gift_num'] or ''} "
                          f"— {price}" + (f" — {html.escape(reason[:60])}" if r["status"] != "SENT" else ""))
-        await m.answer("\n".join(lines))
+        await _answer_long(m, "\n".join(lines))
 
     @users.message(or_f(Command("stats"), F.text == BTN_STATS))
     async def cmd_stats(m: Message) -> None:
@@ -748,18 +993,15 @@ def build_routers(app: "App") -> list[Router]:
                  f"Повтор NFT/продавца: {p['filtered_repeat']} | дубликатов: {p['duplicates']}",
                  f"Ошибок отправки: {p['failed']}", "",
                  "<b>Всего в БД:</b>"]
-        lines += [f"{k}: {v}" for k, v in sorted(counts.items())] or ["—"]
+        lines += [f"{_ST.get(k, k)}: {v}" for k, v in sorted(counts.items(), key=lambda x: -x[1])] or ["—"]
         rej = await app.db.seller_reject_counts()
         if rej:
-            names = {"PAID_MESSAGES": "платные сообщения / только Premium", "TOO_MANY_NFTS": "много NFT",
-                     "LEVEL_TOO_HIGH": "Level выше лимита",
-                     "UNKNOWN_BLOCKED": "не русский (нет данных)", "PHONE_MISMATCH": "номер не +7",
-                     "BLACKLIST": "blacklist"}
+            names = _REJ
             lines += ["", "<b>Почему отсеяны продавцы:</b>"]
             lines += [f"{names.get(k, k)}: {v}" for k, v in sorted(rej.items(), key=lambda x: -x[1])]
         lines += ["", "<b>За 24 часа:</b>"]
-        lines += [f"{k}: {v}" for k, v in sorted(day.items())] or ["—"]
-        await m.answer("\n".join(lines))
+        lines += [f"{_ST.get(k, k)}: {v}" for k, v in sorted(day.items(), key=lambda x: -x[1])] or ["—"]
+        await _answer_long(m, "\n".join(lines))
 
     @users.message(or_f(Command("settings"), Command("filters")))
     async def cmd_settings(m: Message) -> None:
@@ -767,6 +1009,9 @@ def build_routers(app: "App") -> list[Router]:
 
     @admin.message(Command("set"))
     async def cmd_set(m: Message, command: CommandObject) -> None:
+        if not app.subs.ready.is_set():
+            await m.answer("⏳ Бот ещё восстанавливает данные после запуска — повторите через минуту.")
+            return
         parts = (command.args or "").split(maxsplit=1)
         if len(parts) != 2:
             await _answer_long(m, _filters_help())   # /set без аргументов — весь список
@@ -787,7 +1032,8 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
         await app.backup.save()                           # чтобы настройка пережила деплой
-        await m.answer(f"✅ {parts[0].upper()} = {html.escape(str(value))} (сохранено)")
+        shown = str(value)
+        await m.answer(f"✅ {parts[0].upper()} = {html.escape(shown[:300] + ('…' if len(shown) > 300 else ''))} (сохранено)")
 
     @users.message(Command("test"))
     async def cmd_test(m: Message, command: CommandObject) -> None:
@@ -826,7 +1072,7 @@ def build_routers(app: "App") -> list[Router]:
                 await m.answer("В .env нет API_ID. Отправьте число.")
                 return
             api_id = settings.api_id
-        elif t.isdigit():
+        elif t.isascii() and t.isdigit() and len(t) < 12:
             api_id = int(t)
         else:
             await m.answer("API ID — это число. Попробуйте ещё раз.")
@@ -861,14 +1107,21 @@ def build_routers(app: "App") -> list[Router]:
         if not re.fullmatch(r"\+?\d{8,15}", phone):
             await m.answer("Некорректный номер. Пример: +79991234567")
             return
+        if not app.subs.ready.is_set():
+            # пока аккаунты не восстановлены из копии, имя session_00N может совпасть с ещё не
+            # восстановленным аккаунтом — и тот потерялся бы
+            await m.answer("⏳ Бот ещё восстанавливает аккаунты после запуска — отправьте номер через минуту.")
+            return
+        await _cleanup_pending(m.from_user.id)       # повторная отправка номера — старый вход закрываем
         data = await state.get_data()
         await m.answer("⏳ Подключаюсь к Telegram и запрашиваю код…")
-        name = app.storage.next_name()
+        name = "pending"
         proxy = app.storage.pick_proxy(settings.accounts_per_proxy)   # вход сразу через прокси аккаунта
 
         def _mk(px: str | None) -> TelegramClient:
-            return TelegramClient(str(app.storage.session_path(name).with_suffix("")),
-                                  data["api_id"], data["api_hash"], proxy=parse_proxy(px),
+            # Вход идёт в памяти (StringSession): файл аккаунта появится только после успешного входа.
+            # Иначе недоделанный .session подхватывали /reload и резервная копия.
+            return TelegramClient(StringSession(), data["api_id"], data["api_hash"], proxy=parse_proxy(px),
                                   connection_retries=1, timeout=10,
                                   device_model="GiftTracker", system_version="1.0", app_version="1.0")
 
@@ -879,29 +1132,37 @@ def build_routers(app: "App") -> list[Router]:
             await asyncio.wait_for(client.connect(), 15)
             sent = await asyncio.wait_for(client.send_code_request(phone), 30)
         except errors.ApiIdInvalidError:
-            await client.disconnect(); app.storage.discard(name)
+            await client.disconnect()
             await state.clear()
             await m.answer("❌ Неверные API ID / API HASH. Начните заново: /add_session")
             return
         except (errors.PhoneNumberInvalidError, errors.PhoneNumberBannedError) as e:
-            await client.disconnect(); app.storage.discard(name)
+            await client.disconnect()
             await m.answer(f"❌ {type(e).__name__}. Отправьте другой номер или /cancel")
             return
         except errors.FloodWaitError as e:
-            await client.disconnect(); app.storage.discard(name)
+            await client.disconnect()
             await state.clear()
             await m.answer(f"❌ Telegram просит подождать {e.seconds} сек. Попробуйте позже.")
             return
         except Exception as e:
-            await client.disconnect(); app.storage.discard(name)
+            await client.disconnect()
             await state.clear()
             log.warning("add_session: send_code failed: %r", e)
             await m.answer(f"❌ Ошибка: {html.escape(type(e).__name__)} {html.escape(str(e)[:200])}\n"
                            "Попробуйте ещё раз: /add_session")
             return
-        pending[m.from_user.id] = {"client": client, "name": name, "phone": phone,
-                                   "hash": sent.phone_code_hash, "api_id": data["api_id"],
-                                   "api_hash": data["api_hash"], "proxy": proxy}
+        uid0 = m.from_user.id
+        stamp = time.monotonic()
+        pending[uid0] = {"client": client, "phone": phone, "ts": stamp,
+                         "hash": sent.phone_code_hash, "api_id": data["api_id"],
+                         "api_hash": data["api_hash"], "proxy": proxy}
+
+        async def _expire_login() -> None:
+            await asyncio.sleep(600)               # бросили вход на полпути — через 10 минут закрываем
+            if pending.get(uid0, {}).get("ts") == stamp:
+                await _cleanup_pending(uid0)
+        asyncio.get_running_loop().create_task(_expire_login())
         await state.set_state(AddSession.code)
         await m.answer("Шаг 2/3. Отправьте <b>код входа</b>, который пришёл в Telegram.\n\n"
                        "⚠️ Вводите код <b>с пробелами или дефисами</b>, например <code>1 2 3 4 5</code> — "
@@ -912,12 +1173,37 @@ def build_routers(app: "App") -> list[Router]:
         if p is None:                          # двойная отправка кода/пароля — второй вызов без данных
             return
         client: TelegramClient = p["client"]
-        me = await client.get_me()
-        await client.disconnect()
+        dup = None
+        try:
+            me = await client.get_me()
+            string = client.session.save()
+            # тот же аккаунт уже в трекере → вторая копия удвоила бы запросы и FloodWait
+            dup = next((w.name for w in app.sessions.workers.values()
+                        if me is not None and w.me_id and w.me_id == getattr(me, "id", None)), None)
+            if dup:
+                try:
+                    await client.log_out()       # не оставлять лишний вход в «Устройствах»
+                except Exception:
+                    pass
+        finally:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        await state.clear()
         uid = m.from_user.id
+        if dup:
+            await m.answer(f"ℹ️ Этот аккаунт уже добавлен как <b>{html.escape(dup)}</b>.")
+            return
+        taken = set(app.backup.backup_names or set()) | set(app.backup.graveyard)
+        name = app.storage.next_name()
+        while name in taken:                   # имя не должно совпасть с аккаунтом из копии / удалённых
+            n = int(name.rsplit("_", 1)[1]) + 1
+            name = f"session_{n:03d}"
+        string_to_session_file(string, app.storage.session_path(name))
+        p["name"] = name
         app.storage.save_meta(p["name"], p["api_id"], p["api_hash"], p["phone"], owner_id=uid,
                               proxy=p.get("proxy") or "")
-        await state.clear()
         if not all_admins():
             save_admins({uid})           # первый, кто добавил аккаунт, становится админом
         rec = SessionRecord(p["name"], app.storage.session_path(p["name"]), p["api_id"], p["api_hash"], uid,
@@ -937,6 +1223,9 @@ def build_routers(app: "App") -> list[Router]:
     @users.message(AddSession.code, F.text)
     async def add_code(m: Message, state: FSMContext) -> None:
         code = re.sub(r"\D", "", m.text)
+        if not code:
+            await m.answer("Код — это цифры из сообщения Telegram, например <code>1 2 3 4 5</code>. Отправьте ещё раз.")
+            return
         await _delete(m)
         p = pending.get(m.from_user.id)
         if not p:

@@ -27,6 +27,20 @@ class PriceFilter:
         min_ton = settings.min_ton
         ton = l.ton_price
 
+        # Лот только за TON: Telegram всё равно присылает и пересчитанную цену в Stars,
+        # поэтому смотрим на флаг, а не на наличие цены в Stars
+        if getattr(l, "ton_only", False):
+            if not settings.allow_ton_only:
+                return FilterResult(False, "TON-only listing (ALLOW_TON_ONLY=false)")
+            if ton is not None and ton < min_ton:
+                return FilterResult(False, f"{ton:g} TON < {min_ton:g}")
+            if l.stars_price is not None and l.stars_price < min_stars:
+                return FilterResult(False, f"≈{l.stars_price} Stars < {min_stars}")
+            cap = settings.max_above_floor
+            if cap and l.floor_stars and l.stars_price and l.stars_price > l.floor_stars * (1 + cap / 100):
+                return FilterResult(False, f"≈{l.stars_price} Stars дороже флора {l.floor_stars} больше чем на {cap}%")
+            return FilterResult(True, f"TON-only {ton:g} TON" if ton is not None else "TON-only")
+
         if l.stars_price is not None:
             if l.stars_price < min_stars:
                 return FilterResult(False, f"{l.stars_price} Stars < {min_stars}")

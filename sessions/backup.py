@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from aiogram import Bot
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import BufferedInputFile
 from cryptography.fernet import Fernet, InvalidToken
 from telethon.crypto import AuthKey
@@ -118,6 +119,44 @@ class SessionBackup:
         self._save_lock = asyncio.Lock()
         self.subs_import: Callable[[dict], Awaitable[int]] | None = None
         self.restored_paused: bool = False
+        # удалённые аккаунты (снёс Telegram или удалили вручную) — хранятся в копии 14 дней,
+        # чтобы ошибочно удалённый аккаунт можно было вернуть командой /revive
+        self.graveyard: dict[str, dict] = {}
+        self._prev_items: dict[str, dict] = {}      # аккаунты из последней копии (имя → запись)
+
+    GRAVE_DAYS = 14
+    GRAVE_MAX = 300
+
+    def bury(self, name: str, reason: str | None) -> bool:
+        """Запомнить аккаунт перед удалением (вызывать ДО storage.remove)."""
+        rec = next((r for r in self.storage.list_sessions() if r.name == name), None)
+        if rec is None:
+            return False
+        string = session_file_to_string(rec.path)
+        if not string:
+            return False
+        self.graveyard[name] = {"name": name, "string": string, "api_id": rec.api_id,
+                                "api_hash": rec.api_hash, "owner_id": rec.owner_id,
+                                "reason": (reason or "")[:200], "ts": int(time.time())}
+        self._trim_graveyard()
+        return True
+
+    def _trim_graveyard(self) -> None:
+        cutoff = time.time() - self.GRAVE_DAYS * 86400
+        items = sorted((g for g in self.graveyard.values() if g.get("ts", 0) >= cutoff),
+                       key=lambda g: g.get("ts", 0), reverse=True)[:self.GRAVE_MAX]
+        self.graveyard = {g["name"]: g for g in items}
+
+    def unbury(self, name: str) -> str | None:
+        """Вернуть аккаунт из удалённых в папку sessions. → имя, под которым он восстановлен."""
+        g = self.graveyard.get(name)
+        if not g:
+            return None
+        target = name if not self.storage.session_path(name).exists() else self.storage.next_name()
+        string_to_session_file(g["string"], self.storage.session_path(target))
+        self.storage.save_meta(target, int(g["api_id"]), g["api_hash"], owner_id=g.get("owner_id"))
+        self.graveyard.pop(name, None)
+        return target
 
     # ------------------------------------------------------------------ pointer (bot description)
     async def _read_pointer(self) -> dict:
@@ -155,15 +194,23 @@ class SessionBackup:
         async with self._ptr_lock:
             ptr = dict(await self._read_pointer())  # BackupUnavailable → не затираем чужие ключи
             ptr[key] = value
-            await self.bot.set_my_description(description=POINTER_PREFIX2 + json.dumps(ptr, separators=(",", ":")),
-                                              language_code=POINTER_LANG)
+            text = POINTER_PREFIX2 + json.dumps(ptr, separators=(",", ":"))
+            for attempt in range(3):
+                try:
+                    await self.bot.set_my_description(description=text, language_code=POINTER_LANG)
+                    break
+                except TelegramRetryAfter as e:      # описание бота часто менять нельзя — подождать
+                    if attempt == 2 or e.retry_after > 120:
+                        raise
+                    await asyncio.sleep(e.retry_after + 1)
             self._ptr = ptr
 
     # ------------------------------------------------------------------ save
     def candidate_chats(self, hint: int | None = None) -> list[int]:
         out: list[int] = []
-        for c in ([hint, settings.sessions_backup_chat_id, self._last_chat] + sorted(self._admins())
-                  + [settings.target_chat_id]):
+        # общий канал — только в самом крайнем случае (подписчикам служебные файлы ни к чему)
+        for c in ([hint, settings.sessions_backup_chat_id] + sorted(self._admins())
+                  + [self._last_chat, settings.target_chat_id]):
             if c and c not in out:
                 out.append(c)
         return out
@@ -190,11 +237,16 @@ class SessionBackup:
             if s:
                 items.append({"name": rec.name, "string": s, "api_id": rec.api_id,
                               "api_hash": rec.api_hash, "owner_id": rec.owner_id, "proxy": rec.proxy})
-        if not allow_shrink and self.backup_names and len(items) < len(self.backup_names):
-            self.last_error = (f"в копии {len(self.backup_names)} аккаунтов, сейчас доступно {len(items)} — "
-                               "старая копия сохранена без изменений")
-            log.warning("Backup NOT overwritten: %s", self.last_error)
-            return False
+        if not allow_shrink and self.backup_names:
+            # каких-то аккаунтов сейчас нет на диске (не успели восстановиться / файл недоступен) —
+            # не теряем их и не отказываемся от сохранения (иначе не сохранились бы оплаты подписок):
+            # берём их из прошлой копии как есть
+            have = {it["name"] for it in items}
+            missing = [self._prev_items[n] for n in sorted(self.backup_names - have - set(self.graveyard))
+                       if n in self._prev_items]
+            if missing:
+                log.info("Backup: %s account(s) not on disk now — kept from the previous copy", len(missing))
+                items += missing
         history = []
         if self._history_export:
             try:
@@ -206,7 +258,8 @@ class SessionBackup:
                    "settings": export_runtime_overrides(),
                    "paused": bool(self.paused_getter()) if self.paused_getter else False,
                    "subs": self.subs_export() if self.subs_export else {},
-                   "flags": self.flags}
+                   "flags": self.flags,
+                   "removed": list(self.graveyard.values())}
         blob = f.encrypt(json.dumps(payload).encode())
 
         if self._last_chat is None:
@@ -225,13 +278,20 @@ class SessionBackup:
                     chat, BufferedInputFile(blob, BACKUP_FILENAME),
                     caption=f"🔐 Служебная копия трекера: аккаунтов {len(items)}. Зашифрована, не удаляйте.",
                     disable_notification=True)
-                await self._write_pointer("s", [msg.document.file_id, chat, msg.message_id])
-            except BackupUnavailable as e:
-                self.last_error = str(e)
-                return False
             except Exception as e:
                 errors.append(f"{chat}: {e}")
                 continue
+            try:
+                await self._write_pointer("s", [msg.document.file_id, chat, msg.message_id])
+            except Exception as e:
+                # файл ушёл, а указатель не записался — проблема не в чате; не рассылаем копию дальше
+                try:
+                    await self.bot.delete_message(chat, msg.message_id)
+                except Exception:
+                    pass
+                self.last_error = f"pointer: {e}"
+                log.warning("Backup pointer write failed: %s", e)
+                return False
             # удалить предыдущую копию (новая уже записана)
             if self._last_chat and self._last_msg and (self._last_chat, self._last_msg) != (chat, msg.message_id):
                 try:
@@ -240,6 +300,7 @@ class SessionBackup:
                     pass
             self._last_chat, self._last_msg = chat, msg.message_id
             self.backup_names = {it["name"] for it in items}
+            self._prev_items = {it["name"]: it for it in items}
             self.last_error = None
             log.info("Backup saved (chat %s): %s account(s), %s sent listing(s)", chat, len(items), len(history))
             return True
@@ -324,6 +385,11 @@ class SessionBackup:
                 await old_bot.session.close()
 
         self.restored_paused = bool(data.get("paused"))
+        if isinstance(data.get("removed"), list):
+            for g in data["removed"]:
+                if isinstance(g, dict) and g.get("name") and g.get("string"):
+                    self.graveyard.setdefault(g["name"], g)
+            self._trim_graveyard()
         if isinstance(data.get("flags"), dict):
             self.flags.update(data["flags"])
         if self._set_admins and data.get("admins"):
@@ -352,6 +418,7 @@ class SessionBackup:
             self.storage.save_pool(list(data["proxies"]))
         restored = 0
         self.backup_names = {it.get("name") for it in data.get("sessions", [])}
+        self._prev_items = {it["name"]: it for it in data.get("sessions", []) if it.get("name")}
         for it in data.get("sessions", []):
             path = self.storage.session_path(it["name"])
             if path.exists():
@@ -375,7 +442,8 @@ class SessionBackup:
         try:
             snap = await self.market_export()
             snap["ts"] = time.time()
-            blob = f.encrypt(zlib.compress(json.dumps(snap, separators=(",", ":")).encode(), 6))
+            blob = await asyncio.to_thread(
+                lambda: f.encrypt(zlib.compress(json.dumps(snap, separators=(",", ":")).encode(), 6)))
         except Exception as e:
             log.warning("Market snapshot export failed: %s", e)
             return False
@@ -392,12 +460,18 @@ class SessionBackup:
                     chat, BufferedInputFile(blob, MARKET_FILENAME),
                     caption="🗂 Служебный снимок рынка трекера (ускоряет запуск после деплоя). Не удаляйте.",
                     disable_notification=True)
-                await self._write_pointer("m", [msg.document.file_id, chat, msg.message_id, int(time.time())])
-            except BackupUnavailable:
-                return False
             except Exception as e:
                 log.warning("Market snapshot upload to %s failed: %s", chat, e)
                 continue
+            try:
+                await self._write_pointer("m", [msg.document.file_id, chat, msg.message_id, int(time.time())])
+            except Exception as e:
+                try:
+                    await self.bot.delete_message(chat, msg.message_id)
+                except Exception:
+                    pass
+                log.warning("Market snapshot pointer write failed: %s", e)
+                return False
             if old and len(old) >= 3 and (old[1], old[2]) != (chat, msg.message_id):
                 try:
                     await self.bot.delete_message(old[1], old[2])
@@ -423,7 +497,8 @@ class SessionBackup:
         try:
             buf = io.BytesIO()
             await self.bot.download(ptr[0], destination=buf)
-            snap = json.loads(zlib.decompress(f.decrypt(buf.getvalue())))
+            raw = buf.getvalue()
+            snap = await asyncio.to_thread(lambda: json.loads(zlib.decompress(f.decrypt(raw))))
             n = await self.market_import(snap)
             log.info("Market snapshot restored: %s items (%.1f h old) — no full resync needed", n, age_h)
             return n

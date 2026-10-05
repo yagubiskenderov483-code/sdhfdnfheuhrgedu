@@ -15,6 +15,7 @@ class ListingStatus:
     FILTERED_SELLER = "FILTERED_SELLER"
     FILTERED_DUPLICATE = "FILTERED_DUPLICATE"   # этот NFT / продавец уже отправлялся
     SENT = "SENT"
+    SENDING = "SENDING"                # уходит в канал прямо сейчас (если процесс упал — не переотправляем)
     TEST_ONLY = "TEST_ONLY"            # TEST_MODE: только лог / тестовый чат
     SEND_FAILED = "SEND_FAILED"
     ERROR = "ERROR"

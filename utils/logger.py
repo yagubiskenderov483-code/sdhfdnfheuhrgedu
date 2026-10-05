@@ -41,6 +41,16 @@ class _SecretFilter(logging.Filter):
                     changed = True
             if changed:
                 record.msg, record.args = msg, ()
+            # текст исключения (traceback) тоже может содержать токен — например URL Bot API
+            if record.exc_info:
+                try:
+                    text = logging.Formatter().formatException(record.exc_info)
+                    for s in _secrets:
+                        if s:
+                            text = text.replace(s, "***")
+                    record.exc_text, record.exc_info = text, None
+                except Exception:
+                    pass
         return True
 
 
@@ -70,9 +80,10 @@ def setup_logging(logs_dir: Path, level: str = "INFO") -> None:
         handler.addFilter(_SecretFilter())
         return handler
 
-    console = _mk(logging.StreamHandler(sys.stdout), fmt, logging.INFO)
+    lvl = root.level                      # LOG_LEVEL=DEBUG действительно включает отладку
+    console = _mk(logging.StreamHandler(sys.stdout), fmt, lvl)
     app = _mk(RotatingFileHandler(logs_dir / "app.log", maxBytes=20_000_000, backupCount=5, encoding="utf-8"),
-              file_fmt, logging.INFO)
+              file_fmt, lvl)
     errors = _mk(RotatingFileHandler(logs_dir / "errors.log", maxBytes=10_000_000, backupCount=5, encoding="utf-8"),
                  file_fmt, logging.WARNING)
     listings = _mk(RotatingFileHandler(logs_dir / "listings.log", maxBytes=20_000_000, backupCount=5, encoding="utf-8"),

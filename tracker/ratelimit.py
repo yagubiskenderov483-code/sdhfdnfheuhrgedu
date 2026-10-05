@@ -33,7 +33,8 @@ class TokenBucket:
                 if self.tokens >= 1:
                     self.tokens -= 1
                     return
-                await asyncio.sleep((1 - self.tokens) / self.rate)
+                # спим короткими шагами: если лимит подняли через /set, ждущие сразу это заметят
+                await asyncio.sleep(min(1.0, (1 - self.tokens) / self.rate))
 
 
 def backoff_delay(attempt: int, base: float = 2.0, cap: float = 300.0) -> float:

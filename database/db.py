@@ -135,7 +135,19 @@ class Database:
     async def kv_set(self, key: str, value: Any) -> None:
         await self.kv_set_many({key: value})
 
-    async def housekeeping(self, keep_days: int = 14) -> int:
+    async def touch_market_items(self, unique_ids: Iterable[int]) -> None:
+        """Отметить, что лоты всё ещё на рынке (якоря, которые не менялись)."""
+        assert self.conn
+        ids = list({int(u) for u in unique_ids})
+        if not ids:
+            return
+        now = utcnow_iso()
+        async with self._write_lock:
+            await self.conn.executemany("UPDATE market_items SET last_seen=? WHERE unique_id=?",
+                                        [(now, u) for u in ids])
+            await self.conn.commit()
+
+    async def housekeeping(self, keep_days: int = 14, market_days: int = 0) -> int:
         """Чистка: старые отсеянные лоты (не отправленные) и пустые служебные записи.
         Отправленные лоты не трогаем — по ним проверяется «этот продавец/NFT уже был»."""
         assert self.conn
@@ -143,8 +155,14 @@ class Database:
         async with self._write_lock:
             cur = await self.conn.execute(
                 "DELETE FROM listings WHERE sent=0 AND status!='NEW' "
-                "AND first_seen < datetime(?, ?)", (cutoff, f"-{keep_days} days"))
+                "AND datetime(first_seen) < datetime(?, ?)", (cutoff, f"-{keep_days} days"))
             n = cur.rowcount or 0
+            if market_days > 0:
+                # лоты, которых давно нет в выдаче (проданы/сняты) — иначе таблица и снимок растут вечно
+                cur = await self.conn.execute(
+                    "DELETE FROM market_items WHERE datetime(last_seen) < datetime(?, ?)",
+                    (cutoff, f"-{market_days} days"))
+                n += cur.rowcount or 0
             await self.conn.execute("DELETE FROM kv WHERE value IS NULL")
             await self.conn.commit()
         return n
@@ -355,6 +373,21 @@ class Database:
     async def status_counts(self) -> dict[str, int]:
         assert self.conn
         cur = await self.conn.execute("SELECT status, COUNT(*) FROM listings GROUP BY status")
+        return {r[0]: r[1] for r in await cur.fetchall()}
+
+    async def top_collections(self, since_iso: str, limit: int = 15) -> list[tuple[str, int, int]]:
+        """[(коллекция, найдено новых, отправлено)] за период — самые активные первыми."""
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT gift_name, COUNT(*) AS n, SUM(CASE WHEN status='SENT' THEN 1 ELSE 0 END) AS s "
+            "FROM listings WHERE first_seen >= ? GROUP BY gift_name ORDER BY n DESC LIMIT ?", (since_iso, limit))
+        return [(r[0] or "?", int(r[1] or 0), int(r[2] or 0)) for r in await cur.fetchall()]
+
+    async def collection_counts(self, gift_id: int, since_iso: str) -> dict[str, int]:
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT status, COUNT(*) FROM listings WHERE gift_id=? AND first_seen >= ? GROUP BY status",
+            (gift_id, since_iso))
         return {r[0]: r[1] for r in await cur.fetchall()}
 
     async def counts_since(self, since_iso: str) -> dict[str, int]:

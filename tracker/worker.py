@@ -1,7 +1,7 @@
 """
 SessionWorker — одна Telegram-сессия (аккаунт).
 
-• Сам никаких запросов не планирует: запросы ему выдаёт MarketplaceCoordinator.
+• Сам никаких запросов не планирует: запросы ему выдаёт SessionManager (опросы рынка, проверки продавцов).
 • Соблюдает минимальный интервал между своими запросами (SESSION_RPS) и глобальный лимит.
 • FloodWait: session помечается FLOOD до истечения ожидания; задача уходит другой session.
 • Разрыв соединения: reconnect с экспоненциальным backoff, остальные workers работают дальше.
@@ -15,7 +15,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-from telethon import TelegramClient, errors
+from telethon import TelegramClient, errors, functions, types
 
 from tracker.ratelimit import TokenBucket, backoff_delay
 from utils.proxy import mask_proxy, parse_proxy
@@ -80,6 +80,7 @@ class SessionWorker:
         self.ok_streak = 0                 # успешных запросов подряд
         self.ping_ms: float | None = None  # среднее время ответа Telegram, мс
         self.recent_floods: list[float] = []   # моменты FloodWait за последний час
+        self._last_up = 0.0
         self.requests = 0
         self.errors = 0
         self.floods = 0
@@ -115,16 +116,23 @@ class SessionWorker:
                 self.client = self._make_client()
             if not self.client.is_connected():
                 await self.client.connect()
-            if not await self.client.is_user_authorized():
-                self.status = WorkerStatus.AUTH_ERROR
-                self.reason = ("сессия не авторизована: Telegram завершил её (закрыли в «Устройствах» / "
-                               "прежний владелец / две копии бота одновременно)")
-                if self.on_auth_error:
-                    asyncio.get_running_loop().create_task(self.on_auth_error(self))
+            # ВАЖНО: не client.is_user_authorized() — он считает «не авторизован» ЛЮБУЮ ошибку Telegram,
+            # включая FloodWait и сбой сервера. Из-за этого живые аккаунты в FloodWait при переподключении
+            # помечались «снесёнными» и удалялись. Проверяем сами и различаем причины.
+            try:
+                users = await self.client(functions.users.GetUsersRequest([types.InputUserSelf()]))
+            except errors.FloodError as e:
+                seconds = int(getattr(e, "seconds", 0) or 30)
+                self.flood_until = time.monotonic() + seconds + 1
+                self.status = WorkerStatus.ERROR
+                self.reason = f"FloodWait {seconds}s при подключении — аккаунт живой, переподключусь позже"
                 log.warning("Session %s: %s", self.name, self.reason)
+                return False
+            except (errors.UnauthorizedError, errors.AuthKeyDuplicatedError) as e:
+                self._auth_failed(e)
                 await self._safe_disconnect()
                 return False
-            me = await self.client.get_me()
+            me = users[0] if users else None
             self.me_id = getattr(me, "id", None)
             self.status = WorkerStatus.ACTIVE
             self._reconnect_attempt = 0
@@ -156,7 +164,8 @@ class SessionWorker:
                     self.status = WorkerStatus.ERROR
                     self.reason = "disconnected"
                 if self.status == WorkerStatus.ERROR:
-                    delay = backoff_delay(self._reconnect_attempt, base=5, cap=300)
+                    delay = max(backoff_delay(self._reconnect_attempt, base=5, cap=300),
+                                self.flood_until - time.monotonic())
                     self._reconnect_attempt += 1
                     log.info("Session %s reconnect in %.0fs (attempt %s)", self.name, delay, self._reconnect_attempt)
                     await asyncio.sleep(delay)
@@ -251,11 +260,19 @@ class SessionWorker:
         self.busy = True
         try:
             wait = self.next_allowed - time.monotonic()
+            calm = not (self.recent_floods and time.monotonic() - self.recent_floods[-1] < 600)
+            # без «долга»: сократить можно только обычную паузу, а не накопленную прошлым сокращением
+            if priority and self.speed >= 0.99 and calm and wait <= 1.0 / max(0.05, self._rps() * self.speed):
+                # проверка продавца не ждёт полную паузу после опроса рынка: 2 быстрых запроса подряд
+                # Telegram не смущают, а лот уходит на секунды раньше. Средний темп аккаунта тот же —
+                # следующий опрос рынка на этом аккаунте подождёт.
+                wait = min(wait, 0.6)
             if wait > 0:
                 await asyncio.sleep(wait)
             await self.limiter.acquire()
             rps = max(0.05, self._rps() * self.speed)
-            self.next_allowed = time.monotonic() + 1.0 / rps
+            # сокращённая пауза не теряется: следующий запрос подождёт её остаток плюс свою обычную
+            self.next_allowed = max(time.monotonic(), self.next_allowed) + 1.0 / rps
             self.requests += 1
             if self.status == WorkerStatus.FLOOD:
                 self.status = WorkerStatus.ACTIVE
@@ -264,9 +281,13 @@ class SessionWorker:
             ms = (time.monotonic() - t0) * 1000
             self.ping_ms = ms if self.ping_ms is None else self.ping_ms * 0.9 + ms * 0.1
             self.ok_streak += 1
-            if self.speed < 1.0 and self.ok_streak >= 60:
-                self.speed = min(1.0, self.speed * 1.25)   # долго без проблем → понемногу разгоняем
-                self.ok_streak = 0
+            # долго без FloodWait → понемногу разгоняем (по времени, а не по числу запросов:
+            # замедленный аккаунт делает мало запросов и иначе восстанавливался бы часами)
+            now = time.monotonic()
+            last_flood = self.recent_floods[-1] if self.recent_floods else 0.0
+            if self.speed < 1.0 and now - last_flood > 180 and now - self._last_up > 90:
+                self.speed = min(1.0, self.speed * 1.3)
+                self._last_up = now
             return result
         except errors.FloodError as e:
             seconds = int(getattr(e, "seconds", 0) or 30)

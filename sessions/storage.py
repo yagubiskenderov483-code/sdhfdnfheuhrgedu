@@ -81,11 +81,13 @@ class SessionStorage:
             if meta.exists():
                 try:
                     data = json.loads(meta.read_text(encoding="utf-8"))
+                    if not isinstance(data, dict):
+                        data = {}
                     api_id = int(data.get("api_id") or api_id)
                     api_hash = str(data.get("api_hash") or api_hash)
                     owner = int(data["owner_id"]) if data.get("owner_id") else None
                     proxy = (data.get("proxy") or None) if _proxies_enabled() else None
-                except (ValueError, json.JSONDecodeError):
+                except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
                     pass
             out.append(SessionRecord(name, p, api_id, api_hash, owner, proxy))
         return out
@@ -102,9 +104,10 @@ class SessionStorage:
 
     def _read_meta(self, name: str) -> dict:
         try:
-            return json.loads((self.dir / f"{name}.json").read_text(encoding="utf-8"))
+            data = json.loads((self.dir / f"{name}.json").read_text(encoding="utf-8"))
         except (FileNotFoundError, ValueError, json.JSONDecodeError):
             return {}
+        return data if isinstance(data, dict) else {}
 
     def save_meta(self, name: str, api_id: int, api_hash: str, phone: str | None = None,
                   owner_id: int | None = None, proxy: str | None = None) -> None:

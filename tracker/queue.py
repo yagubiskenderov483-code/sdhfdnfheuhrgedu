@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -31,9 +32,9 @@ from config import settings
 from database.db import Database
 from database.models import Listing, ListingStatus
 from filters.price_filter import PriceFilter
-from filters.seller_filter import SellerFilter
+from filters.seller_filter import SellerFilter, SellerResult
 from sessions.manager import SessionManager
-from tracker.marketplace import (ResaleItem, SellerFull, fetch_extra_texts, fetch_full_user,
+from tracker.marketplace import (ResaleItem, SellerFull, fetch_extra_texts, fetch_full_user, fetch_gift_owner,
                                  fetch_full_user_failover, fetch_gift_texts,
                                  fetch_nft_count)
 from utils.links import gift_link, username_link
@@ -131,6 +132,9 @@ class ListingEvent:
     mode: str
 
 
+_IN_FLIGHT = ("this seller is being sent right now", "same collection is being sent right now")
+
+
 class _Stale(Exception):
     """Лот устарел, пока проверялся продавец — не отправляем."""
 
@@ -156,6 +160,9 @@ class ListingPipeline:
                       "filtered_repeat": 0, "duplicates": 0, "failed": 0}
         # защита от повторов NFT / продавца между параллельными обработчиками
         self._repeat_lock = asyncio.Lock()
+        self._released = asyncio.Condition(self._repeat_lock)   # «отправка закончилась» для ждущих
+        self._seller_locks: dict[int, asyncio.Lock] = {}
+        self._retries: set[asyncio.Task] = set()      # отложенные повторные проверки продавца
         self._reserved_gifts: set[int] = set()
         self._reserved_sellers: set[str] = set()
         # «подряд из одной коллекции»
@@ -164,6 +171,7 @@ class ListingPipeline:
         self._sending_gift_ids: set[int] = set()
         self.last_new_at: float | None = None      # time.time()
         self.latency: dict[str, float] = {}
+        self.totals: deque[tuple[float, bool]] = deque(maxlen=300)   # (секунд до поста, дорогой ли) — для медианы
         self.paused_getter = None                  # задаёт App: lambda: coordinator.paused
         self.floor_getter = None                   # задаёт App: gift_id → флор коллекции
         self._seen_ids: dict[str, None] = {}       # недавние listing_id (RAM-кэш дедупа, по порядку)
@@ -203,11 +211,14 @@ class ListingPipeline:
             await self._enqueue(ListingEvent(listing, time.monotonic(), mode))
         return admitted
 
+    @staticmethod
+    def _is_expensive(l) -> bool:
+        value = getattr(l, "floor_stars", None) or getattr(l, "stars_price", None) or 0
+        return bool(settings.priority_floor and value >= settings.priority_floor)
+
     async def _enqueue(self, ev: ListingEvent) -> None:
         self._qseq += 1
-        l = ev.listing
-        value = getattr(l, "floor_stars", None) or getattr(l, "stars_price", None) or 0
-        expensive = bool(settings.priority_floor and value >= settings.priority_floor)
+        expensive = self._is_expensive(ev.listing)
         # дорогие LIVE-лоты — самыми первыми, потом остальные LIVE, потом дообработка после перезапуска
         prio = (0 if expensive else 1) if ev.mode == "live" else 2
         # внутри приоритета — самый свежий первым
@@ -239,7 +250,7 @@ class ListingPipeline:
             self._workers.append(asyncio.create_task(self._worker_loop(i), name=f"processor-{i}"))
 
     async def stop(self) -> None:
-        for t in self._workers:
+        for t in list(self._workers) + list(self._retries):
             t.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
@@ -286,6 +297,7 @@ class ListingPipeline:
                     self.stats["failover"] = self.stats.get("failover", 0) + 1
                 except Exception as e2:
                     log.debug("getFullUser %s failover failed: %s", uid, e2)
+                    l.seller_lookup_failed = True
                     return
             self._seller_cache[uid] = (time.monotonic(), full)
             if len(self._seller_cache) > 50_000:
@@ -311,7 +323,7 @@ class ListingPipeline:
             return cached[1]
         try:
             n, _ = await self.sessions.run(lambda c: fetch_nft_count(c, uid),
-                                           only=l.session_source, priority=True, attempts=2, timeout=45)
+                                           only=l.session_source, priority=True, attempts=2, timeout=10)
         except Exception as e:
             log.debug("getSavedStarGifts %s failed: %s", uid, e)
             return None          # сбой не кэшируем — в следующий раз спросим снова
@@ -326,12 +338,15 @@ class ListingPipeline:
         if cached and time.monotonic() - cached[0] < settings.seller_cache_ttl:
             return cached[1]
         try:
-            txt, _ = await self.sessions.run(lambda c: fetch_gift_texts(c, uid),
-                                             only=l.session_source, priority=True, attempts=1, timeout=20)
+            (txt, nfts), _ = await self.sessions.run(lambda c: fetch_gift_texts(c, uid),
+                                                     only=l.session_source, priority=True, attempts=1, timeout=10)
         except Exception as e:
             log.debug("getSavedStarGifts(texts) %s failed: %s", uid, e)
             return None
-        self._gift_text_cache[uid] = (time.monotonic(), txt)
+        now = time.monotonic()
+        self._gift_text_cache[uid] = (now, txt)
+        if nfts is not None:
+            self._nft_cache[uid] = (now, nfts)     # все подарки уже в ответе — число NFT известно
         if len(self._gift_text_cache) > 50_000:
             self._gift_text_cache.clear()
         return txt
@@ -344,10 +359,12 @@ class ListingPipeline:
         ch = l.seller_channel_id
         try:
             txt, _ = await self.sessions.run(lambda c: fetch_extra_texts(c, uid, ch),
-                                             only=l.session_source, priority=True, attempts=1, timeout=20)
+                                             only=l.session_source, priority=True, attempts=1, timeout=10)
         except Exception as e:
             log.debug("stories/channel %s failed: %s", uid, e)
             return None
+        if txt is None:
+            return None              # частичный сбой — не кэшируем
         self._extra_text_cache[uid] = (time.monotonic(), txt)
         if len(self._extra_text_cache) > 50_000:
             self._extra_text_cache.clear()
@@ -387,7 +404,7 @@ class ListingPipeline:
         while self.paused_getter and self.paused_getter():
             await asyncio.sleep(1)          # /off: не делаем запросов и не шлём, пока парсер выключен
         t_start = time.monotonic()
-        # защита от завала: если лот пролежал в очереди слишком долго, он уже не «свежий» — не шлём
+        # защита от завала: если с момента обнаружения прошло слишком много, лот уже не «свежий» — не шлём
         base = min(ev.detected_mono, l.t_detect) if l.t_detect is not None else ev.detected_mono
         age = t_start - base
         if ev.mode == "resume":
@@ -416,7 +433,104 @@ class ListingPipeline:
             return
         llog("FILTER", f"#{l.listing_id} price passed")
 
+        await self._resolve_hidden_owner(l)          # скрытый в выдаче продавец → ищем его аккаунт
+        # повтор NFT/продавца, который уже отправлялся, видно по БД — без лишних запросов в Telegram
+        early = await self._sent_before(l)
+        if early:
+            l.status, l.reason = ListingStatus.FILTERED_DUPLICATE, early
+            self.stats["filtered_repeat"] += 1
+            llog("FILTER", f"#{l.listing_id} repeat skipped: {early}")
+            await self.db.update_listing(l)
+            return
+
+        # несколько лотов одного продавца проверяются по очереди: второй берёт всё из кэша
+        lk = self._seller_locks.setdefault(l.seller_id or 0, asyncio.Lock())
+        if len(self._seller_locks) > 20_000:
+            self._seller_locks.clear()
+        async with lk:
+            sr = await self._check_seller(l)
+        if sr.code == "LOOKUP_FAILED" and not getattr(l, "lookup_retried", False):
+            # все аккаунты были заняты/во FloodWait — не выбрасываем лот, а пробуем ещё раз через 15 с
+            l.lookup_retried = True
+            l.seller_lookup_failed = False
+            self.stats["lookup_retry"] = self.stats.get("lookup_retry", 0) + 1
+            llog("FILTER", f"#{l.listing_id} seller profile unavailable — retry in 15s")
+
+            async def _later() -> None:
+                await asyncio.sleep(15)
+                await self._enqueue(ListingEvent(l, ev.detected_mono, ev.mode))
+            t = asyncio.get_running_loop().create_task(_later())
+            self._retries.add(t)                       # сильная ссылка, иначе задачу может съесть GC
+            t.add_done_callback(self._retries.discard)
+            return
+        l.seller_filter_result = sr.code
+        if not sr.passed:
+            l.status, l.reason = ListingStatus.FILTERED_SELLER, sr.reason
+            self.stats["filtered_seller"] += 1
+            llog("FILTER", f"#{l.listing_id} seller rejected: {sr.code}")
+            await self.db.update_listing(l)
+            return
+        llog("FILTER", f"#{l.listing_id} seller passed ({sr.code})")
+        await self._send_stage(ev, l, base, t_start)
+
+    async def _sent_before(self, l: Listing) -> str | None:
+        if settings.unique_gifts and await self.db.gift_already_sent(l.gift_unique_id):
+            return "this gift was already sent"
+        if settings.unique_sellers and l.seller_key not in ("n", ""):
+            since = None
+            if settings.seller_repeat_hours > 0:
+                since = (datetime.now(timezone.utc) - timedelta(hours=settings.seller_repeat_hours)
+                         ).isoformat(timespec="seconds")
+            if await self.db.seller_already_sent(l.seller_key, since):
+                return "this seller was already sent"
+        return None
+
+    async def _resolve_hidden_owner(self, l: Listing) -> None:
+        """Продавец скрыт в выдаче маркета (видно только имя) — ищем его аккаунт через страницу подарка,
+        чтобы были @username / ссылка на профиль и обычная проверка продавца."""
+        if l.seller_type is not None or not l.gift_slug:
+            return
+        slug = l.gift_slug
+        try:
+            user, session = await self.sessions.run(lambda c: fetch_gift_owner(c, slug), priority=True,
+                                                    prefer=l.session_source, attempts=2, timeout=10)
+        except Exception as e:
+            log.debug("hidden owner of %s: %s", slug, e)
+            return
+        uid = getattr(user, "id", None)
+        if not uid:
+            self.stats["hidden_owner_unknown"] = self.stats.get("hidden_owner_unknown", 0) + 1
+            return
+        self.stats["hidden_owner_found"] = self.stats.get("hidden_owner_found", 0) + 1
+        l.session_source = session                 # доступ к этому продавцу есть у этой session
+        l.seller_type, l.seller_id, l.seller_key = "user", uid, f"u{uid}"
+        l.seller_username = _username_of(user) or l.seller_username
+        l.seller_profile_link = username_link(l.seller_username)
+        name = " ".join(x for x in (getattr(user, "first_name", None), getattr(user, "last_name", None)) if x)
+        l.seller_name = name or l.seller_name
+        l.premium = getattr(user, "premium", None)
+        l.seller_phone = getattr(user, "phone", None)
+        if not getattr(user, "min", False):
+            l.messages = _messages_status(getattr(user, "send_paid_messages_stars", None),
+                                          getattr(user, "contact_require_premium", None))
+        llog("FILTER", f"#{l.listing_id} hidden owner resolved → u{uid}"
+                       + (f" @{l.seller_username}" if l.seller_username else ""))
+
+    async def _check_seller(self, l: Listing) -> SellerResult:
+        # Платные сообщения / только Premium видны уже на странице маркета — тот же фильтр, просто без
+        # лишнего запроса профиля (на этом отсеивается заметная часть лотов)
+        if l.seller_type == "user" and l.messages is not None and l.messages != "бесплатно":
+            pre = self.seller_filter.check(l)
+            if pre.code in ("BLACKLIST", "PAID_MESSAGES"):
+                return pre
+
+        return await self._check_seller_inner(l)
+
+    async def _check_seller_inner(self, l: Listing) -> SellerResult:
         await self._enrich_seller(l)
+        if getattr(l, "seller_lookup_failed", False) and settings.max_seller_level > 0:
+            # профиль не прочитался ни с одного аккаунта → Level неизвестен; не шлём вслепую
+            return SellerResult(False, "LOOKUP_FAILED", "seller profile unavailable (all accounts busy)")
 
         # Сначала проверяем то, что уже известно (сообщения, Level, язык), и только если продавец
         # прошёл — отдельный запрос за количеством его NFT. Отсеянным продавцам лишний запрос не нужен.
@@ -429,28 +543,34 @@ class ListingPipeline:
             l.seller_gift_text = await self._gift_texts(l)
             sr = self.seller_filter.check(l)
         # всё ещё непонятно — смотрим истории и посты личного канала
-        if sr.code == "UNKNOWN_BLOCKED" and l.seller_type == "user" and l.seller_id:
+        # (2-3 лишних запроса на продавца — только для дорогих лотов, чтобы не перегружать аккаунты)
+        if (sr.code == "UNKNOWN_BLOCKED" and l.seller_type == "user" and l.seller_id
+                and self._is_expensive(l)):
             l.seller_extra_text = await self._extra_texts(l)
             sr = self.seller_filter.check(l)
         # продавец прошёл только по текстам/историям — лимит NFT ещё не проверяли
         if (sr.passed and l.seller_nfts is None and settings.max_seller_nfts > 0
                 and l.seller_type == "user" and l.seller_id):
-            l.seller_nfts = await self._nft_count(l)
+            l.seller_nfts = await self._nft_count(l)      # часто уже в кэше из запроса текстов подарков
             sr = self.seller_filter.check(l)
-        l.seller_filter_result = sr.code
-        if not sr.passed:
-            l.status, l.reason = ListingStatus.FILTERED_SELLER, sr.reason
-            self.stats["filtered_seller"] += 1
-            llog("FILTER", f"#{l.listing_id} seller rejected: {sr.code}")
-            await self.db.update_listing(l)
-            return
-        llog("FILTER", f"#{l.listing_id} seller passed ({sr.code})")
+        return sr
 
+    async def _send_stage(self, ev: ListingEvent, l: Listing, base: float, t_start: float) -> None:
         # повторы: тот же NFT или тот же продавец уже отправлялись → не отправляем
-        async with self._repeat_lock:
-            repeat = await self._repeat_reason(l)
-            if repeat is None:
-                repeat = self._streak_reason(l)
+        async with self._released:
+            # тот же продавец / коллекция отправляется прямо сейчас — ждём, чем кончится, а не выбрасываем
+            # (если та отправка сорвётся, этот лот всё равно уйдёт)
+            deadline = time.monotonic() + 30
+            while True:
+                repeat = await self._repeat_reason(l)
+                if repeat is None:
+                    repeat = self._streak_reason(l)
+                if repeat not in _IN_FLIGHT or time.monotonic() > deadline:
+                    break
+                try:
+                    await asyncio.wait_for(self._released.wait(), timeout=max(0.1, deadline - time.monotonic()))
+                except asyncio.TimeoutError:
+                    pass
             if repeat is None:
                 self._reserved_gifts.add(l.gift_unique_id)
                 self._reserved_sellers.add(l.seller_key)
@@ -470,14 +590,18 @@ class ListingPipeline:
             if ev.mode != "resume" and settings.max_lot_age > 0 and t_checked - base > settings.max_lot_age:
                 raise _Stale(f"stale: {t_checked - base:.0f}s after detection (slow seller check)")
             if l.t_detect is not None:
-                l.detect_secs = t_checked - l.t_detect
+                # «Обнаружен за» — от появления лота до того, как трекер его увидел (без проверки продавца)
+                l.detect_secs = max(0.0, (l.t_found or t_checked) - l.t_detect)
             text = self.formatter.render(l)
+            l.status = ListingStatus.SENDING          # если процесс упадёт во время отправки — не дублируем
+            await self.db.update_listing(l)
             # тема по реальной стоимости гифта (флор коллекции), а не по цене, которую поставил продавец
             _value = l.floor_stars if (settings.route_by == "floor" and l.floor_stars) else l.stars_price
             _chat, _thread = settings.route_chat(_value, l.backdrop)
             res = await self.sender.send_listing(text, l.gift_link, listing_keyboard(l),
                                                  listing_keyboard(l, with_seller=False),
-                                                 target=_chat, thread=_thread)
+                                                 target=_chat, thread=_thread,
+                                                 priority=self._is_expensive(l))
             if res.ok:
                 l.sent = not res.test_only
                 l.message_id = res.message_id
@@ -493,6 +617,7 @@ class ListingPipeline:
                     parts = {"request": l.t_found - l.t_detect, "queue": t_start - l.t_found,
                              "check": t_checked - t_start, "send": t_sent - t_checked,
                              "total": t_sent - l.t_detect}
+                    self.totals.append((parts["total"], self._is_expensive(l)))
                     for k, v in parts.items():
                         old = self.latency.get(k)
                         self.latency[k] = v if old is None else old * 0.8 + v * 0.2
@@ -508,7 +633,8 @@ class ListingPipeline:
             llog("FILTER", f"#{l.listing_id} skipped: {e}")
             await self.db.update_listing(l)
         finally:
-            async with self._repeat_lock:
+            async with self._released:
+                self._released.notify_all()
                 self._reserved_gifts.discard(l.gift_unique_id)
                 self._reserved_sellers.discard(l.seller_key)
                 self._sending_gift_ids.discard(l.gift_id)

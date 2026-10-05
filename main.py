@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import os
 import html
+import json
 import re
 import signal
 import time
@@ -83,6 +84,9 @@ class App:
         self.pipeline.paused_getter = lambda: self.coordinator.paused
         self.pipeline.floor_getter = lambda gid: getattr(self.coordinator.states.get(gid), "floor_stars", None)
         self.dp = Dispatcher(storage=MemoryStorage())
+        self._alerts: dict[str, float] = {}
+        self._bad_since: dict[str, float] = {}
+        self._started_at = time.time()
         self.subs = Subscriptions(self)
         sub_router, sub_tail = build_sub_router(self, self.subs, is_manager)
         self.sub_welcome = sub_router.welcome
@@ -186,6 +190,10 @@ class App:
                 log.exception("Startup step failed: %s (continuing)", name)
         # после деплоя папка telegram_sessions/ может быть пустой → восстановить из Telegram
         await step("restore backup", self.backup.restore())
+        # копия подписок на месте — можно обрабатывать входы и оплаты; если копию прочитать не удалось,
+        # никого не кикаем «за отсутствие подписки» (данных о подписках просто нет)
+        self.subs.degraded = not self.backup.restore_done
+        self.subs.ready.set()
         await step("restore market snapshot", self.backup.restore_market())
         # разовая миграция: убрать старые ценовые /set (555, фильтр дороже флора, лимит аккаунтов) —
         # теперь действуют значения из .env (порог 400, все аккаунты параллельно)
@@ -206,6 +214,13 @@ class App:
             drop_runtime_overrides(["CATALOG_INTERVAL", "GLOBAL_RPS", "PRIORITY_POLL_INTERVAL", "SESSION_RPS",
                                     "MAX_CONCURRENT_SESSIONS", "TRACKER_INTERVAL", "COLD_POLL_INTERVAL"])
             await self._set_flag("migr_speed_v4")
+        if not await self._flag("migr_speed_v5"):
+            # спокойные скорости вместо старых /set (из-за них был шторм FloodWait)
+            from config import drop_runtime_overrides
+            drop_runtime_overrides(["PRIORITY_SHARE", "PRIORITY_POLL_INTERVAL", "SESSION_RPS", "GLOBAL_RPS",
+                                    "COLD_POLL_INTERVAL", "SYNC_MODE"])
+            await self._set_flag("migr_speed_v5")
+        self.sessions.limiter.set_rate(settings.global_rps)     # значения после восстановления /set
         if os.getenv("USE_PROXIES", "0").strip().lower() not in ("1", "true", "yes", "on"):
             n = self.storage.wipe_proxies()          # прокси выключены — стираем пул и привязки
             if n:
@@ -221,8 +236,11 @@ class App:
             log.info("Waiting %ss before connecting accounts (old instance shutdown)...", settings.startup_delay)
             await asyncio.sleep(settings.startup_delay)
         await step("connect sessions", self.sessions.start_all())
+        await step("restore account speeds", self._restore_speeds())
         self.booting = False
         await step("menu", self._set_menu())      # админы из копии получают полное меню
+        if run_bot:
+            self._tasks.append(asyncio.create_task(self._startup_report(), name="startup-report"))
         if getattr(self, "_flags_dirty", False):
             await step("save flags", self.backup.save())   # чтобы разовые сбросы не повторились
         await step("backup sync", self.backup.sync_if_needed())
@@ -242,6 +260,7 @@ class App:
             await asyncio.sleep(3)
             try:
                 if w.name in self.sessions.workers and w.status.value == "AUTH_ERROR":
+                    self.backup.bury(w.name, w.reason)      # можно вернуть через /revive
                     await self.sessions.remove(w.name)
                     await self.backup.save(allow_shrink=True)
                     removed = True
@@ -250,7 +269,7 @@ class App:
                 log.warning("Auto-remove of %s failed: %s", w.name, e)
         text = (f"⚠️ Аккаунт <b>{html.escape(w.name)}</b> отключён Telegram.\n"
                 f"Причина: {html.escape(w.reason or '—')}\n\n"
-                + ("🗑 Удалён из трекера автоматически. Чтобы вернуть — добавьте заново через /add_session."
+                + ("🗑 Удалён из трекера автоматически. Если это ошибка — /removed, вернуть: /revive ИМЯ."
                    if removed else "Удалите его в /sessions и добавьте заново через /add_session."))
         for chat in targets:
             try:
@@ -275,7 +294,9 @@ class App:
             tick += 1
             if tick % 360 == 1:          # раз в 6 часов — чистка базы от старого мусора
                 try:
-                    n = await self.db.housekeeping()
+                    # чистку рынка — не в первые часы после запуска (сначала опросы обновят «последний раз видели»)
+                    n = await self.db.housekeeping(
+                        market_days=30 if (settings.sync_mode == "fast" and tick > 1) else 0)
                     if n:
                         log.info("Housekeeping: removed %s old filtered listing(s)", n)
                 except Exception as e:
@@ -300,6 +321,146 @@ class App:
                 prev = cur
             except Exception as e:
                 log.debug("bench failed: %s", e)
+            try:
+                await self._save_speeds()
+                await self._watchdog()
+                await self._daily_report()
+            except Exception as e:
+                log.debug("watchdog failed: %s", e)
+
+    async def _save_speeds(self) -> None:
+        """Выученный темп каждого аккаунта (после FloodWait) — чтобы после перезапуска аккаунты не
+        начинали снова с полной скорости и не ловили FloodWait заново."""
+        if self.booting:
+            return                 # аккаунты ещё не подключены — не затирать сохранённое
+        now = time.time()
+        sp = {w.name: [round(w.speed, 3), now] for w in self.sessions.workers.values() if w.speed < 1.0}
+        self.backup.flags["speeds"] = sp           # попадёт в резервную копию при следующем сохранении
+        await self.db.kv_set("speeds", json.dumps(sp))
+
+    async def _restore_speeds(self) -> None:
+        raw = await self.db.kv_get("speeds")
+        try:
+            sp = json.loads(raw) if raw else (self.backup.flags.get("speeds") or {})
+        except ValueError:
+            sp = {}
+        now, n = time.time(), 0
+        for name, (speed, ts) in (sp or {}).items():
+            w = self.sessions.workers.get(name)
+            age = now - float(ts)
+            if w is None or age > 6 * 3600:
+                continue
+            # за время простоя аккаунт «остыл» — немного разгоняем, но не до полной скорости
+            w.speed = min(1.0, max(0.15, float(speed) * (1.2 if age > 1800 else 1.0)))
+            n += 1
+        if n:
+            log.info("Restored learned speed for %s account(s)", n)
+
+    async def _startup_report(self) -> None:
+        """После запуска/деплоя — короткий отчёт админам: всё ли поднялось."""
+        await asyncio.sleep(60)          # даём коллекциям выйти в работу
+        try:
+            c = self.sessions.counts()
+            live, total = self.coordinator.sync_progress()
+            ok = c.get("ACTIVE", 0)
+            head = "✅ <b>Бот запущен</b>" if ok and live else "⚠️ <b>Бот запущен, но есть проблемы</b>"
+            lines = [head, "",
+                     f"👥 Аккаунтов: {len(self.sessions.workers)} · работают: {ok}"
+                     + (f" · FloodWait: {c.get('FLOOD_WAIT', 0)}" if c.get("FLOOD_WAIT") else "")
+                     + (f" · ошибки: {c.get('ERROR', 0) + c.get('AUTH_ERROR', 0)}"
+                        if c.get("ERROR") or c.get("AUTH_ERROR") else ""),
+                     f"📚 Коллекций в работе: {live}/{total}",
+                     f"⏸ Парсер выключен (/on)" if self.coordinator.paused else "🟢 Парсер работает"]
+            if getattr(self, "users_closed", False):
+                lines.append("🔒 Для пользователей закрыто (/open)")
+            for admin in (settings.admin_ids or all_admins()):
+                try:
+                    await self.bot.send_message(admin, "\n".join(lines))
+                except Exception:
+                    pass
+        except Exception as e:
+            log.debug("startup report failed: %s", e)
+
+    async def _alert(self, kind: str, text: str, every: float = 3600) -> None:
+        """Сообщение админам, но одно и то же не чаще раза в `every` секунд."""
+        now = time.monotonic()
+        last = self._alerts.get(kind, -1e9)
+        if now - last < every:
+            return
+        self._alerts[kind] = now
+        for admin in (settings.admin_ids or all_admins()):
+            try:
+                await self.bot.send_message(admin, text)
+            except Exception:
+                pass
+
+    async def _watchdog(self) -> None:
+        """Сам сообщает админам, если трекер перестал нормально работать."""
+        coord = self.coordinator
+        if self.booting or coord.paused or coord.mode != "LIVE":
+            self._bad_since.clear()
+            return
+        now = time.monotonic()
+        total = len(self.sessions.workers)
+        usable = len(self.sessions.usable())
+
+        def lasting(kind: str, cond: bool, secs: float) -> bool:
+            if not cond:
+                if kind in self._bad_since and now - self._bad_since[kind] >= secs:
+                    self._alerts.pop(kind, None)
+                self._bad_since.pop(kind, None)
+                return False
+            self._bad_since.setdefault(kind, now)
+            return now - self._bad_since[kind] >= secs
+
+        if lasting("no_accounts", total > 0 and usable == 0, 180):
+            await self._alert("no_accounts", f"🚨 <b>Нет рабочих аккаунтов</b> ({total} всего: FloodWait/ошибки).\n"
+                                             "Лоты сейчас не ищутся. Подробнее: /sessions", 1800)
+        elif lasting("few_accounts", total >= 4 and usable < total * 0.4, 600):
+            await self._alert("few_accounts", f"⚠️ Работает только <b>{usable} из {total}</b> аккаунтов уже 10+ минут.\n"
+                                              "Лоты идут медленнее. Подробнее: /sessions", 3600)
+        last_new = self.pipeline.last_new_at
+        quiet = time.time() - (last_new or self._started_at)
+        if lasting("no_lots", usable > 0 and quiet > 1800, 0):
+            await self._alert("no_lots", f"⚠️ <b>{int(quiet // 60)} минут ни одного нового лота.</b>\n"
+                                         "Обычно лоты идут каждые несколько минут — проверьте /status", 3600)
+
+    async def _daily_report(self) -> None:
+        """Итоги за сутки админам — раз в день в 10:00 (TIMEZONE)."""
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo
+        try:
+            local = _dt.now(ZoneInfo(settings.timezone))
+        except Exception:
+            local = _dt.utcnow()
+        if local.hour != 10:
+            return
+        today = local.strftime("%Y-%m-%d")
+        if await self.db.kv_get("daily_report") == today:
+            return
+        await self.db.kv_set("daily_report", today)
+        since = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 86400))
+        day = await self.db.counts_since(since)
+        found = sum(day.values())
+        ws = list(self.sessions.workers.values())
+        sub = self.subs.stats()
+        lines = [f"📊 <b>Итоги за сутки</b> · {local.strftime('%d.%m.%Y')}", "",
+                 f"🎁 Найдено лотов: {found} · отправлено: {day.get('SENT', 0)}",
+                 f"👤 Отсеяно по продавцу: {day.get('FILTERED_SELLER', 0)} · повторы: {day.get('FILTERED_DUPLICATE', 0)}",
+                 f"💰 Оплат: {sub['paid_day_count']} на {sub['paid_day']:g} TON · активных подписчиков: {sub['active']}",
+                 f"👥 Аккаунтов: {len(ws)} · сейчас работают: {len(self.sessions.usable())}"]
+        lat = self.pipeline.latency
+        if "total" in lat:
+            lines.append(f"⏱ Средняя задержка лота: {lat['total']:.1f} с")
+        if self.backup.graveyard:
+            fresh = [g for g in self.backup.graveyard.values() if time.time() - g.get("ts", 0) < 86400]
+            if fresh:
+                lines.append(f"🗑 Удалено аккаунтов за сутки: {len(fresh)} (/removed)")
+        for admin in (settings.admin_ids or all_admins()):
+            try:
+                await self.bot.send_message(admin, "\n".join(lines))
+            except Exception:
+                pass
 
     async def _set_menu(self) -> None:
         """Команды в синей кнопке «Меню» рядом с полем ввода."""
@@ -315,6 +476,9 @@ class App:
             BotCommand(command="on", description="Включить парсер"),
             BotCommand(command="close", description="Закрыть для пользователей (лоты идут)"),
             BotCommand(command="open", description="Открыть для пользователей"),
+            BotCommand(command="top", description="Самые активные коллекции за сутки"),
+            BotCommand(command="find", description="Всё о коллекции: /find название"),
+            BotCommand(command="removed", description="Удалённые аккаунты (вернуть: /revive)"),
             BotCommand(command="proxies", description="Прокси для аккаунтов"),
             BotCommand(command="settings", description="Настройки"),
             BotCommand(command="test", description="Проверка работы"),
@@ -396,6 +560,9 @@ class App:
 
     async def stop(self) -> None:
         log.info("Shutting down...")
+        for t in self._tasks:
+            if t.get_name() == "boot" and not t.done():
+                t.cancel()             # SIGTERM во время запуска — не стартуем трекер на выходе
         try:
             await self.dp.stop_polling()
         except Exception:

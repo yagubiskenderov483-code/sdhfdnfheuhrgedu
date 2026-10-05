@@ -89,6 +89,8 @@ def floor_line(l: Listing) -> str:
 
 
 def price_line(l: Listing) -> str:
+    if getattr(l, "ton_only", False) and l.ton_price is not None:
+        return f"{fmt_ton(l.ton_price)} {settings.ton_label} (только TON)"
     parts = []
     if l.stars_price is not None:
         parts.append(f"{_n(l.stars_price)} ⭐")
@@ -128,11 +130,13 @@ class MessageFormatter:
             handle = f"@{l.seller_username}"
             seller_line = f'<a href="{html.escape(l.seller_profile_link or f"https://t.me/{l.seller_username}")}">{html.escape(handle)}</a>'
         elif l.seller_type == "user" and l.seller_id:
-            seller_line = f'<a href="tg://user?id={l.seller_id}">{html.escape(l.seller_name or "user")}</a>'
+            # без @username — ссылка на профиль по ID и сам ID (можно скопировать и найти)
+            seller_line = (f'<a href="tg://user?id={l.seller_id}">{html.escape(l.seller_name or "профиль")}</a>'
+                           f' · ID <code>{l.seller_id}</code>')
         elif l.seller_type == "address":
             seller_line = "TON-кошелёк"
         else:
-            seller_line = html.escape(l.seller_name or DASH)
+            seller_line = html.escape(l.seller_name or DASH) + (" (скрыт)" if l.seller_name else "")
 
         if l.seller_profile_link:
             seller_profile = html.escape(l.seller_profile_link)

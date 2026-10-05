@@ -11,7 +11,7 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 _SCHEMES = {"socks5", "socks4", "http"}
 
@@ -31,8 +31,8 @@ def parse_proxy(line: str | None) -> dict | None:
             s = f"socks5://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
         else:
             return None
-    u = urlparse(s)
     try:
+        u = urlparse(s)
         port = u.port           # бросает ValueError на нечисловом порту (напр. host:abc)
     except ValueError:
         return None
@@ -53,8 +53,11 @@ def normalize_proxy(line: str | None) -> str | None:
     p = parse_proxy(line)
     if not p:
         return None
-    auth = f"{p['username']}:{p['password']}@" if p["username"] else ""
-    return f"{p['proxy_type']}://{auth}{p['addr']}:{p['port']}"
+    auth = ""
+    if p["username"]:
+        auth = quote(p["username"], safe="") + (f":{quote(p['password'], safe='')}" if p["password"] else "") + "@"
+    host = f"[{p['addr']}]" if ":" in p["addr"] else p["addr"]       # IPv6
+    return f"{p['proxy_type']}://{auth}{host}:{p['port']}"
 
 
 def mask_proxy(line: str | None) -> str:

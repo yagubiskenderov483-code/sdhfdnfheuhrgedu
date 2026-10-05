@@ -48,8 +48,13 @@ Bot.__call__ = fake_call
 
 # ---- имитация Telethon для /add_session
 class FakeTC:
-    def __init__(self, path, api_id, api_hash, proxy=None, **kw):
-        self.path, self.proxy = path, proxy
+    def __init__(self, session, api_id, api_hash, proxy=None, **kw):
+        from telethon.sessions import StringSession
+        from telethon.crypto import AuthKey
+        self.proxy = proxy
+        self.session = StringSession()
+        self.session.set_dc(2, "149.154.167.51", 443)
+        self.session.auth_key = AuthKey(b"\x01" * 256)
     async def connect(self): pass
     async def disconnect(self): pass
     async def send_code_request(self, phone): return NS(phone_code_hash="h")
@@ -58,7 +63,6 @@ class FakeTC:
         if code and code != "12345": raise errors.PhoneCodeInvalidError(request=None)
         if code: raise errors.SessionPasswordNeededError(request=None)
         if password != "pw": raise errors.PasswordHashInvalidError(request=None)
-        Path(self.path + ".session").write_bytes(b"")
     async def get_me(self): return NS(id=424242)
 admin_mod.TelegramClient = FakeTC
 
@@ -105,7 +109,7 @@ async def run():
         return await fn(None), "session_001"
     app.sessions.run = fake_run
     fsend = t.FakeSender()
-    async def capture(text, preview, markup=None, fallback_markup=None, target=None, thread=None):
+    async def capture(text, preview, markup=None, fallback_markup=None, target=None, thread=None, priority=False):
         check_html(text, "LISTING POST"); return await fsend.send_listing(text, preview, markup, fallback_markup, target, thread)
     app.pipeline.sender.send_listing = capture
     await app.start()
@@ -117,7 +121,7 @@ async def run():
         r = await say(app, OWNER, step); print(f"add_session {step!r:18} -> {r[:1]}")
     print("sessions after add:", list(app.sessions.workers), "owner admin:", admin_mod.is_manager(OWNER))
     # 2) все команды и кнопки владельцем и чужим
-    cmds = ["/start","/status","/sessions","/stats","/settings","/last","/collections","/test","/cancel",
+    cmds = ["/start","/top","/status","/sessions","/stats","/settings","/last","/collections","/test","/cancel",
             "/pause","/resume","/proxies","/reload","/set MIN_STARS 5000","/set BAD 1","/set MIN_STARS abc",
             "/proxy session_001 socks5://u:p@1.2.3.4:1080","/proxy session_001 off","/remove_session",
             "📊 Статус","📈 Статистика","⏸ Пауза","▶️ Продолжить","👥 Аккаунты","🕘 Последние лоты","📚 Коллекции",
@@ -138,6 +142,12 @@ async def run():
     newit = market.item(9000); market.list_new(newit)
     await app.coordinator.refresh_catalog(); await asyncio.sleep(2)
     print("posts sent:", len(fsend.sent))
+    await say(app, 8852171067, "/find c1")
+    print("FIND:", [x for m, x, _ in sent if m == "SendMessage"])
+    await say(app, 8852171067, "/top")
+    print("TOP:", [x for m, x, _ in sent if m == "SendMessage"])
+    await say(app, 8852171067, "/status")
+    print("STATUS:\n" + "\n".join(x for m, x, _ in sent if m == "SendMessage"))
     if len(fsend.sent) != 1: problems.append("new lot was not posted to the channel")
     # 4) кнопки под постом
     from bot.formatter import listing_keyboard

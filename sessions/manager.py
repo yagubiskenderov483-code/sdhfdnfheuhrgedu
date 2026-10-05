@@ -81,6 +81,11 @@ class SessionManager:
     def usable(self) -> list[SessionWorker]:
         return [w for w in self.workers.values() if w.is_usable()]
 
+    def effective(self) -> float:
+        """Реальная мощность аккаунтов с учётом замедления после FloodWait:
+        24 аккаунта на x0.3 — это ~7 «полных», а не 24."""
+        return sum(max(0.15, w.speed) for w in self.usable())
+
     async def run(self, fn, only: str | None = None, attempts: int = 6,
                   timeout: float | None = 60, prefer: str | None = None,
                   priority: bool = False) -> tuple[Any, str]:

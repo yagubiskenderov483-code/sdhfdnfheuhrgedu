@@ -73,6 +73,9 @@ class FakeSessions:
         from types import SimpleNamespace
         return [SimpleNamespace(name=n) for n in self.workers]
 
+    def effective(self):
+        return float(len(self.workers))
+
     async def run(self, fn, **kw):
         return await fn(None), "session_001"
 
@@ -81,7 +84,7 @@ class FakeSender:
     def __init__(self):
         self.sent: list[str] = []
 
-    async def send_listing(self, text, preview_url, markup=None, fallback_markup=None, target=None, thread=None):
+    async def send_listing(self, text, preview_url, markup=None, fallback_markup=None, target=None, thread=None, priority=False):
         self.sent.append(text)
         return SendResult(True, len(self.sent))
 
@@ -145,6 +148,9 @@ def reset_settings():
     settings.recovery_max_pages = 20
     settings.initial_sync_pages = 0
     settings.sync_passes = 3
+    settings.sync_mode = "full"
+    settings.fast_sync_pages = 2
+    settings.old_bot_token = ""          # тесты не ходят в настоящий Telegram
     settings.collections = []
 
 
@@ -445,8 +451,10 @@ async def test_13_backup_survives_deploy():
     assert "COLLECTION_MIN_FLOOR" in RUNTIME_SETTINGS_PATH.read_text() and settings.collection_min_floor == 3000
     # защита: если аккаунтов стало меньше (файл не готов / не восстановился) — старая копия не затирается
     (d2 / "session_002.session").unlink()
-    assert not await b2.save() and "старая копия" in b2.last_error
+    assert await b2.save() and b2.backup_names == {"session_001", "session_002"}, \
+        "недоступный аккаунт берётся из прошлой копии, сохранение не блокируется"
     assert await b2.save(allow_shrink=True), "удаление аккаунта — разрешено"
+    assert b2.backup_names == {"session_001"}
     # указатель не читается (сбой Telegram) — ничего не затираем
     class Broken(FakeBackupBot):
         async def get_my_description(self, language_code=None):
@@ -909,6 +917,125 @@ async def test_31_baseline_survives_restart():
     print("✔ TEST 31 baseline переживает рестарт: RECOVERY не выбрасывает накопленное как новое")
 
 
+async def test_32_fast_sync():
+    """SYNC_MODE=fast: большая коллекция (1000 лотов, из них 300 Telegram «не отдаёт»)
+    становится LIVE за 2 запроса и сразу шлёт новые лоты."""
+    reset_settings()
+    settings.sync_mode = "fast"
+    tmp = Path(tempfile.mkdtemp())
+    market = FakeMarket()
+    for _ in range(1000):
+        market.list_new(market.item())
+    market.hidden = 300
+    patch_market(market)
+    calls = {"n": 0}
+    orig = coord_mod.fetch_resale_page
+
+    def counting(c, g, o, l):
+        calls["n"] += 1
+        return orig(c, g, o, l)
+    coord_mod.fetch_resale_page = counting
+    e = await Env(tmp, market).boot()
+    st = e.coord.states[GID]
+    assert st.complete and calls["n"] <= 3, f"быстрая база: {calls['n']} запросов"
+    assert e.pipe.stats["new"] == 0 and not e.sender.sent, "база тихая"
+    market.list_new(market.item(9000))
+    market.list_new(market.item(9100))
+    await e.poll()
+    assert e.pipe.stats["new"] == 2 and len(e.sender.sent) == 2, e.pipe.stats
+    # продажа одновременно с новым лотом (count не растёт) — новый всё равно уходит
+    market.lots[GID].pop(500)
+    market.list_new(market.item(9200))
+    await e.poll()
+    assert e.pipe.stats["new"] == 3, "продажа не глушит новый лот"
+    # смена цены известного лота — не новый
+    market.change_price(market.lots[GID][10].unique_id, 15000)
+    await e.poll()
+    assert e.pipe.stats["new"] == 3
+    await e.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 32 SYNC_MODE=fast: коллекция LIVE за 2 запроса, новые лоты идут сразу, продажи не глушат")
+
+
+async def test_33_same_seller_failed_send_not_lost():
+    """Два лота одного продавца одновременно: первая отправка сорвалась → второй лот всё равно уходит
+    (раньше второй выбрасывался как «продавец отправляется прямо сейчас»)."""
+    e, tmp = await fresh(20)
+    settings.unique_sellers = True
+    fails = {"n": 1}
+    orig = e.sender.send_listing
+
+    async def flaky(*a, **kw):
+        await asyncio.sleep(0.05)
+        if fails["n"]:
+            fails["n"] -= 1
+            return SendResult(False, error="boom")
+        return await orig(*a, **kw)
+    e.sender.send_listing = flaky
+    e.market.list_new(e.market.item(9000, seller=777))
+    e.market.list_new(e.market.item(9000, seller=777))
+    await e.poll()
+    assert len(e.sender.sent) == 1, (e.pipe.stats, e.sender.sent)
+    # третий лот того же продавца — уже повтор (проверка по БД, без запросов в Telegram)
+    e.market.list_new(e.market.item(9000, seller=777))
+    await e.poll()
+    assert len(e.sender.sent) == 1 and e.pipe.stats["filtered_repeat"] >= 1
+    await e.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 33 сорвалась отправка — второй лот того же продавца не теряется; повтор режется по БД")
+
+
+async def test_34_fast_burst_and_false_anchor():
+    """Быстрый режим: всплеск больше окна сканирования не теряется; перевыставление по той же цене
+    (ложный якорь) при одновременной продаже не глушит новый лот под ним."""
+    reset_settings()
+    settings.sync_mode, settings.fast_sync_pages = "fast", 1
+    tmp = Path(tempfile.mkdtemp())
+    market = FakeMarket()
+    for _ in range(250):
+        market.list_new(market.item())
+    patch_market(market)
+    e = await Env(tmp, market).boot()
+    for _ in range(350):
+        market.list_new(market.item(9000))
+    await e.poll()
+    st = e.coord.states[GID]
+    assert len(e.sender.sent) == 300 and st.complete and not st.needs_full_sync, (len(e.sender.sent), st.complete)
+    market.list_new(market.item(9000))
+    await e.poll()
+    assert len(e.sender.sent) == 301, "после всплеска коллекция в работе без пересинхронизации"
+    # ложный якорь: новый лот, потом старый лот сняли и выставили по той же цене (он сверху), и продажа
+    new = market.item(9100)
+    market.list_new(new)
+    old = market.lots[GID][5]
+    market.sell(old.unique_id); market.list_new(old)
+    market.sell(market.lots[GID][50].unique_id)
+    await e.poll()
+    assert len(e.sender.sent) == 302, "новый лот под ложным якорем не потерян"
+    await e.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 34 быстрый режим: всплеск 350 лотов не теряется, ложный якорь не глушит новый лот")
+
+
+async def test_35_resold_top_and_false_anchor():
+    """Верхний лот перепродан другому продавцу + старый лот перевыставлен по той же цене (ложный якорь)
+    → перепроданный лот всё равно уходит (раньше граница «прошлый верх» терялась вместе с ним)."""
+    reset_settings()
+    settings.sync_mode, settings.fast_sync_pages = "fast", 1
+    tmp = Path(tempfile.mkdtemp())
+    market = FakeMarket()
+    for _ in range(5):
+        market.list_new(market.item())
+    patch_market(market)
+    e = await Env(tmp, market).boot()
+    top = market.lots[GID][0]
+    market.sell(top.unique_id)
+    market.list_new(ResaleItem(**{**top.__dict__, "seller_key": "u900001", "owner_id": 900001, "stars": 54650}))
+    third = market.lots[GID][3]
+    market.sell(third.unique_id); market.list_new(third)
+    await e.poll()
+    assert len(e.sender.sent) == 1, len(e.sender.sent)
+    await e.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 35 перепродажа верхнего лота + ложный якорь: лот не теряется")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
@@ -919,7 +1046,9 @@ async def run() -> None:
               test_22_log_regressions, test_23_cheap_collections_slow, test_24_partial_collection,
               test_25_post_deploy_baseline, test_26_floor_is_single_threshold,
               test_27_reinclude_after_skip_no_burst,
-              test_31_baseline_survives_restart):
+              test_31_baseline_survives_restart, test_32_fast_sync,
+              test_33_same_seller_failed_send_not_lost, test_34_fast_burst_and_false_anchor,
+              test_35_resold_top_and_false_anchor):
         await t()
     test_15_seller_rules()
     test_20_proxies()
