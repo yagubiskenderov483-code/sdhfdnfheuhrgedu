@@ -455,8 +455,11 @@ class App:
             await self._alert("no_accounts", f"🚨 <b>Нет рабочих аккаунтов</b> ({total} всего: FloodWait/ошибки).\n"
                                              "Лоты сейчас не ищутся. Подробнее: /sessions", 1800)
         elif lasting("few_accounts", total >= 4 and usable < total * 0.4, 600):
+            hint = ("" if os.getenv("USE_PROXIES", "0").strip().lower() in ("1", "true", "yes", "on") else
+                    "\nСовет: все аккаунты на одном IP — подключите прокси (USE_PROXIES=1 и /proxies), "
+                    "это сильнее всего снижает FloodWait.")
             await self._alert("few_accounts", f"⚠️ Работает только <b>{usable} из {total}</b> аккаунтов уже 10+ минут.\n"
-                                              "Лоты идут медленнее. Подробнее: /sessions", 3600)
+                                              "Лоты идут медленнее. Подробнее: /sessions" + hint, 3600)
         last_new = self.pipeline.last_new_at
         quiet = time.time() - (last_new or self._started_at)
         if lasting("no_lots", usable > 0 and quiet > 1800, 0):
