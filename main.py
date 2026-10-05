@@ -347,12 +347,19 @@ class App:
             if self.backup.restore_done:
                 log.info("Backup restored in background — connecting restored accounts and saving")
                 self.subs.degraded = False
+                # применить восстановленное состояние, как при обычном запуске
+                if self.backup.restored_paused:
+                    self.coordinator.paused = True
+                    await self.db.kv_set("paused", 1)
+                self.users_closed = bool(self.backup.flags.get("users_closed"))
+                self.sessions.limiter.set_rate(settings.global_rps)
+                found = bool(self.backup.backup_names) or self.backup.restored_count
                 try:
                     await self.sessions.rescan()
                     await self.backup.save()      # теперь в копию попадут и аккаунты, добавленные за это время
                 except Exception as e:
                     log.warning("After background restore: %s", e)
-                for admin in (settings.admin_ids or all_admins()):
+                for admin in (settings.admin_ids or all_admins()) if found else ():
                     try:
                         await self.bot.send_message(admin, "✅ Резервная копия прочитана — аккаунты и подписки "
                                                            "восстановлены, копия снова сохраняется.")

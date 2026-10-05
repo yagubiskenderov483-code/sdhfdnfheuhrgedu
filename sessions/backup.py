@@ -384,7 +384,7 @@ class SessionBackup:
             self.backup_names = set()
             # старую копию не удаляем и указатель на неё сохраняем — вдруг ключ вернут
             if self._ptr and self._ptr.get("s"):
-                self._ptr["s_old"] = self._ptr["s"]
+                self._ptr["s_old"] = self._ptr.pop("s")     # иначе первое сохранение удалило бы старую копию
             self._last_chat = self._last_msg = None
             return 0
         log.error("Backup could not be read (download failing) — saving disabled this run to protect the old copy")
@@ -436,13 +436,20 @@ class SessionBackup:
                 await old_bot.session.close()
 
         self.restored_paused = bool(data.get("paused"))
+        # удалённые В ЭТОМ запуске (до чтения копии) — их не возвращаем; список удалённых из самой копии
+        # тут не учитываем: в старой копии аккаунт мог быть и в удалённых, и уже возвращённым
+        buried = {g.get("string") for g in self.graveyard.values()}
         if isinstance(data.get("removed"), list):
             for g in data["removed"]:
                 if isinstance(g, dict) and g.get("name") and g.get("string"):
                     self.graveyard.setdefault(g["name"], g)
             self._trim_graveyard()
         if isinstance(data.get("flags"), dict):
-            self.flags.update(data["flags"])
+            mine_muted = set(self.flags.get("muted") or [])
+            for k, v in data["flags"].items():
+                self.flags.setdefault(k, v)        # изменённое уже в этом запуске (например /mute) не затираем
+            if mine_muted:
+                self.flags["muted"] = sorted(mine_muted | set(data["flags"].get("muted") or []))
         if self._set_admins and data.get("admins"):
             self._set_admins(set(int(a) for a in data["admins"]))
         if self._history_import and data.get("sent"):
@@ -473,6 +480,8 @@ class SessionBackup:
         local_strings = {session_file_to_string(r.path) for r in self.storage.list_sessions()}
         for it in data.get("sessions", []):
             name = it["name"]
+            if it.get("string") in buried:
+                continue                       # аккаунт удалили (вручную или его снёс Telegram) — не возвращаем
             path = self.storage.session_path(name)
             if it.get("string") in local_strings:
                 continue                       # этот аккаунт уже есть на диске (под любым именем)
