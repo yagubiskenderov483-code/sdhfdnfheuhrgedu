@@ -174,6 +174,7 @@ class ListingPipeline:
         self.totals: deque[tuple[float, bool]] = deque(maxlen=300)   # (секунд до поста, дорогой ли) — для медианы
         self.paused_getter = None                  # задаёт App: lambda: coordinator.paused
         self.floor_getter = None                   # задаёт App: gift_id → флор коллекции
+        self.muted_getter = None                   # задаёт App: названия выключенных коллекций (lower)
         self._seen_ids: dict[str, None] = {}       # недавние listing_id (RAM-кэш дедупа, по порядку)
         self.last_sent_at: float | None = None
 
@@ -423,6 +424,14 @@ class ListingPipeline:
             f"{l.stars_price} Stars" if l.stars_price is not None else "",
             f"{l.ton_price:g} TON" if l.ton_price is not None else "") if x) or "no price"
         llog("PRICE", f"#{l.listing_id} {price_txt}")
+
+        muted = self.muted_getter() if self.muted_getter else set()
+        if muted and (l.gift_name or "").lower() in muted:
+            l.status, l.reason = ListingStatus.FILTERED_PRICE, "коллекция выключена (/mute)"
+            self.stats["muted"] = self.stats.get("muted", 0) + 1
+            llog("FILTER", f"#{l.listing_id} skipped: collection muted")
+            await self.db.update_listing(l)
+            return
 
         pr = self.price_filter.check(l)
         if not pr.passed:

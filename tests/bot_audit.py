@@ -142,6 +142,9 @@ async def run():
     newit = market.item(9000); market.list_new(newit)
     await app.coordinator.refresh_catalog(); await asyncio.sleep(2)
     print("posts sent:", len(fsend.sent))
+    for c in ("/mute c1", "/mute", "/unmute c1", "/mute zzz"):
+        await say(app, 8852171067, c)
+        print("MUTE", c, [x[:80] for m, x, _ in sent if m == "SendMessage"])
     await say(app, 8852171067, "/find c1")
     print("FIND:", [x for m, x, _ in sent if m == "SendMessage"])
     await say(app, 8852171067, "/top")

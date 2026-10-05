@@ -83,6 +83,8 @@ class App:
         self.coordinator = MarketplaceCoordinator(self.db, self.sessions, self.pipeline)
         self.pipeline.paused_getter = lambda: self.coordinator.paused
         self.pipeline.floor_getter = lambda gid: getattr(self.coordinator.states.get(gid), "floor_stars", None)
+        # коллекции, выключенные админом через /mute (хранятся в резервной копии)
+        self.pipeline.muted_getter = lambda: set(self.backup.flags.get("muted") or [])
         self.dp = Dispatcher(storage=MemoryStorage())
         self._alerts: dict[str, float] = {}
         self._bad_since: dict[str, float] = {}
@@ -507,6 +509,7 @@ class App:
             BotCommand(command="open", description="Открыть для пользователей"),
             BotCommand(command="top", description="Самые активные коллекции за сутки"),
             BotCommand(command="find", description="Всё о коллекции: /find название"),
+            BotCommand(command="mute", description="Выключить лоты коллекции: /mute название"),
             BotCommand(command="removed", description="Удалённые аккаунты (вернуть: /revive)"),
             BotCommand(command="proxies", description="Прокси для аккаунтов"),
             BotCommand(command="settings", description="Настройки"),

@@ -189,6 +189,7 @@ HELP = (
     "/status — трекер, скорость, задержки\n"
     "/stats — статистика лотов · /last — последние лоты и почему не ушли\n"
     "/top — самые активные коллекции за сутки · /find имя — всё о коллекции\n"
+    "/mute имя · /unmute имя — выключить / включить лоты коллекции\n"
     "/collections — какие коллекции отслеживаются\n\n"
     "<b>Управление</b>\n"
     "/off · /on — выключить / включить парсер\n"
@@ -509,7 +510,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -833,6 +834,41 @@ def build_routers(app: "App") -> list[Router]:
             fl = floors.get(name)
             lines.append(f"{i}. {html.escape(name)} — {n} → {sent}" + (f" · {fl:,}⭐".replace(",", " ") if fl else ""))
         await _answer_long(m, "\n".join(lines))
+
+    def _match_collections(q: str) -> list[str]:
+        titles = sorted({st.title for st in app.coordinator.states.values() if st.title})
+        exact = [t for t in titles if t.lower() == q]
+        return exact or [t for t in titles if q in t.lower()]
+
+    @admin.message(Command("mute", "unmute"))
+    async def cmd_mute(m: Message, command: CommandObject) -> None:
+        """/mute название — не присылать лоты этой коллекции (опрос продолжается); /unmute — вернуть."""
+        unmute = (m.text or "").lstrip("/").lower().startswith("unmute")
+        q = (command.args or "").strip().lower()[:64]
+        muted = set(app.backup.flags.get("muted") or [])
+        if not q:
+            lst = ", ".join(sorted(muted)) or "нет"
+            await m.answer(f"🔇 Выключенные коллекции: {html.escape(lst)}\n\n"
+                           "Выключить: <code>/mute название</code> · включить: <code>/unmute название</code>")
+            return
+        found = [t for t in sorted(muted) if q in t] if unmute else _match_collections(q)
+        if not found:
+            await m.answer(f"Не нашёл «{html.escape(q)}». Список: /collections" if not unmute
+                           else f"«{html.escape(q)}» не выключена.")
+            return
+        if len(found) > 1 and not any(t.lower() == q for t in found):
+            await m.answer("Подходит несколько, уточните:\n" + "\n".join(html.escape(t) for t in found[:20]))
+            return
+        name = next((t for t in found if t.lower() == q), found[0]).lower()
+        if unmute:
+            muted.discard(name)
+        else:
+            muted.add(name)
+        app.backup.flags["muted"] = sorted(muted)
+        await app.backup.save()
+        await m.answer((f"🔊 Коллекция «{html.escape(name)}» снова присылает лоты." if unmute else
+                        f"🔇 Коллекция «{html.escape(name)}» выключена: лоты из неё не приходят. "
+                        f"Вернуть: <code>/unmute {html.escape(name)}</code>"))
 
     @admin.message(Command("find"))
     async def cmd_find(m: Message, command: CommandObject) -> None:

@@ -1036,6 +1036,20 @@ async def test_35_resold_top_and_false_anchor():
     print("✔ TEST 35 перепродажа верхнего лота + ложный якорь: лот не теряется")
 
 
+async def test_36_muted_collection():
+    e, tmp = await fresh(10)
+    e.pipe.muted_getter = lambda: {"ice cream"}
+    e.market.list_new(e.market.item(9000))
+    await e.poll()
+    assert not e.sender.sent and e.pipe.stats.get("muted") == 1
+    e.pipe.muted_getter = lambda: set()
+    e.market.list_new(e.market.item(9000))
+    await e.poll()
+    assert len(e.sender.sent) == 1
+    await e.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 36 /mute: лоты выключенной коллекции не приходят, после /unmute — приходят")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
@@ -1048,7 +1062,7 @@ async def run() -> None:
               test_27_reinclude_after_skip_no_burst,
               test_31_baseline_survives_restart, test_32_fast_sync,
               test_33_same_seller_failed_send_not_lost, test_34_fast_burst_and_false_anchor,
-              test_35_resold_top_and_false_anchor):
+              test_35_resold_top_and_false_anchor, test_36_muted_collection):
         await t()
     test_15_seller_rules()
     test_20_proxies()
