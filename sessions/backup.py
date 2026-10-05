@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Awaitable, Callable
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramRetryAfter
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNotFound, TelegramRetryAfter
 from aiogram.types import BufferedInputFile
 from cryptography.fernet import Fernet, InvalidToken
 from telethon.crypto import AuthKey
@@ -130,13 +130,20 @@ class SessionBackup:
     def bury(self, name: str, reason: str | None) -> bool:
         """Запомнить аккаунт перед удалением (вызывать ДО storage.remove)."""
         rec = next((r for r in self.storage.list_sessions() if r.name == name), None)
-        if rec is None:
-            return False
-        string = session_file_to_string(rec.path)
+        prev = self._prev_items.get(name) or {}
+        # файл может быть временно не читаем (SQLite занят) — тогда берём ключ из последней копии
+        string = (session_file_to_string(rec.path) if rec else None) or prev.get("string")
         if not string:
             return False
-        self.graveyard[name] = {"name": name, "string": string, "api_id": rec.api_id,
-                                "api_hash": rec.api_hash, "owner_id": rec.owner_id,
+        old = self.graveyard.get(name)
+        if old and old.get("string") != string:
+            # то же имя, но ДРУГОЙ аккаунт (удалён раньше) — не затираем его запись
+            alt = f"{name}~{old.get('ts', 0)}"
+            self.graveyard[alt] = dict(old, name=alt)
+        self.graveyard[name] = {"name": name, "string": string,
+                                "api_id": rec.api_id if rec else prev.get("api_id"),
+                                "api_hash": rec.api_hash if rec else prev.get("api_hash"),
+                                "owner_id": rec.owner_id if rec else prev.get("owner_id"),
                                 "reason": (reason or "")[:200], "ts": int(time.time())}
         self._trim_graveyard()
         return True
@@ -152,11 +159,28 @@ class SessionBackup:
         g = self.graveyard.get(name)
         if not g:
             return None
-        target = name if not self.storage.session_path(name).exists() else self.storage.next_name()
+        for rec in self.storage.list_sessions():
+            if session_file_to_string(rec.path) == g["string"]:
+                # уже на диске (копия вернула его в «удалённые») — второй файл с тем же auth key
+                # Telegram убьёт обе сессии (AUTH_KEY_DUPLICATED)
+                self.graveyard.pop(name, None)
+                return rec.name
+        prev = self._prev_items.get(name)
+        clash = (self.storage.session_path(name).exists() or "~" in name
+                 or (prev is not None and prev.get("string") != g["string"]))
+        target = self._free_name() if clash else name
         string_to_session_file(g["string"], self.storage.session_path(target))
         self.storage.save_meta(target, int(g["api_id"]), g["api_hash"], owner_id=g.get("owner_id"))
         self.graveyard.pop(name, None)
         return target
+
+    def _free_name(self) -> str:
+        """Имя, не занятое ни на диске, ни в копии, ни среди удалённых."""
+        taken = set(self.backup_names or ()) | set(self.graveyard)
+        name = self.storage.next_name()
+        while name in taken or self.storage.session_path(name).exists():
+            name = f"session_{int(name.rsplit('_', 1)[1]) + 1:03d}"
+        return name
 
     # ------------------------------------------------------------------ pointer (bot description)
     async def _read_pointer(self) -> dict:
@@ -237,13 +261,19 @@ class SessionBackup:
             if s:
                 items.append({"name": rec.name, "string": s, "api_id": rec.api_id,
                               "api_hash": rec.api_hash, "owner_id": rec.owner_id, "proxy": rec.proxy})
-        if not allow_shrink and self.backup_names:
+        if self.backup_names:
             # каких-то аккаунтов сейчас нет на диске (не успели восстановиться / файл недоступен) —
             # не теряем их и не отказываемся от сохранения (иначе не сохранились бы оплаты подписок):
             # берём их из прошлой копии как есть
             have = {it["name"] for it in items}
-            missing = [self._prev_items[n] for n in sorted(self.backup_names - have - set(self.graveyard))
-                       if n in self._prev_items]
+            gone = set(self.graveyard)
+            if allow_shrink:
+                # удаление: отбрасываем только то, чего реально нет на диске; файл, который сейчас
+                # не прочитался (SQLite занят), берём из прошлой копии, а не теряем
+                gone |= {n for n in self.backup_names - have if not self.storage.session_path(n).exists()}
+            have_s = {it["string"] for it in items}
+            missing = [self._prev_items[n] for n in sorted(self.backup_names - have - gone)
+                       if n in self._prev_items and self._prev_items[n].get("string") not in have_s]
             if missing:
                 log.info("Backup: %s account(s) not on disk now — kept from the previous copy", len(missing))
                 items += missing
@@ -278,20 +308,32 @@ class SessionBackup:
                     chat, BufferedInputFile(blob, BACKUP_FILENAME),
                     caption=f"🔐 Служебная копия трекера: аккаунтов {len(items)}. Зашифрована, не удаляйте.",
                     disable_notification=True)
-            except Exception as e:
-                errors.append(f"{chat}: {e}")
+            except (TelegramForbiddenError, TelegramBadRequest, TelegramNotFound) as e:
+                errors.append(f"{chat}: {e}")      # этот чат копию не принимает — пробуем следующий
                 continue
+            except Exception as e:
+                # сеть/таймаут/флуд: файл МОГ уйти — не рассылаем копию по другим чатам
+                self.last_error = f"{chat}: {e}"[:300]
+                log.warning("Backup upload to %s failed: %s", chat, e)
+                return False
             try:
                 await self._write_pointer("s", [msg.document.file_id, chat, msg.message_id])
             except Exception as e:
-                # файл ушёл, а указатель не записался — проблема не в чате; не рассылаем копию дальше
+                # запрос мог дойти до Telegram (таймаут после применения) — перечитываем указатель
+                self._ptr = None
                 try:
-                    await self.bot.delete_message(chat, msg.message_id)
+                    cur = (await self._read_pointer()).get("s")
                 except Exception:
-                    pass
-                self.last_error = f"pointer: {e}"
-                log.warning("Backup pointer write failed: %s", e)
-                return False
+                    cur = False                   # неизвестно — НЕ удаляем: указатель может вести сюда
+                if not (cur and cur[0] == msg.document.file_id):
+                    if cur is not False:
+                        try:
+                            await self.bot.delete_message(chat, msg.message_id)
+                        except Exception:
+                            pass
+                    self.last_error = f"pointer: {e}"
+                    log.warning("Backup pointer write failed: %s", e)
+                    return False
             # удалить предыдущую копию (новая уже записана)
             if self._last_chat and self._last_msg and (self._last_chat, self._last_msg) != (chat, msg.message_id):
                 try:
@@ -316,6 +358,7 @@ class SessionBackup:
     # ------------------------------------------------------------------ restore
     async def restore(self) -> int:
         last_corrupt = False
+        digests: list[str] = []
         for attempt in range(10):
             try:
                 n = await self._restore_once()
@@ -325,19 +368,24 @@ class SessionBackup:
             except BackupCorrupt as e:
                 # битая закачка резолвится ретраем; если нет — ключ реально сменён (см. ниже)
                 last_corrupt = True
+                digests.append(getattr(e, "digest", None) or f"?{attempt}")
                 log.warning("Backup decrypt failed: %s (retry %s/10)", e, attempt + 1)
                 await asyncio.sleep(10)
             except BackupUnavailable as e:
                 last_corrupt = False
                 log.warning("Backup restore delayed: %s (retry %s/10)", e, attempt + 1)
                 await asyncio.sleep(10)
-        if last_corrupt:
+        if last_corrupt and len(digests) >= 3 and len(set(digests)) == 1:
             # 10 попыток скачали файл, но расшифровать не смогли — это не транзиент, а сменённый
             # ключ/испорченная копия. Старую копию мы всё равно не прочитаем, поэтому разрешаем
             # старт «с чистого листа»: сохранение включаем, чтобы новые аккаунты попали в свежую копию.
             log.error("Backup permanently undecryptable (key changed?) — starting fresh, saving ENABLED")
             self.restore_done = True
             self.backup_names = set()
+            # старую копию не удаляем и указатель на неё сохраняем — вдруг ключ вернут
+            if self._ptr and self._ptr.get("s"):
+                self._ptr["s_old"] = self._ptr["s"]
+            self._last_chat = self._last_msg = None
             return 0
         log.error("Backup could not be read (download failing) — saving disabled this run to protect the old copy")
         return 0
@@ -373,11 +421,14 @@ class SessionBackup:
             await src_bot.download(file_id, destination=buf)
             data = json.loads(f.decrypt(buf.getvalue()))
         except InvalidToken as e:
+            # одинаковые байты на всех попытках = реально другой ключ; разные = битая закачка
             # InvalidToken = неверный ключ ЛИБО оборванная/битая закачка. НЕ помечаем restore
             # выполненным здесь (иначе save() снял бы защиту и затёр хорошую копию пустой на
             # транзиенте). BackupCorrupt → restore() ретраит; если повторяется все 10 раз — это
             # реальная смена ключа, и restore() тогда разрешит старт заново (не блок навсегда).
-            raise BackupCorrupt(f"decrypt failed (wrong key or truncated download): {e}") from e
+            err = BackupCorrupt(f"decrypt failed (wrong key or truncated download): {e}")
+            err.digest = hashlib.sha256(buf.getvalue()).hexdigest()
+            raise err from e
         except Exception as e:
             raise BackupUnavailable(f"backup download failed: {e}") from e
         finally:
@@ -419,13 +470,20 @@ class SessionBackup:
         restored = 0
         self.backup_names = {it.get("name") for it in data.get("sessions", [])}
         self._prev_items = {it["name"]: it for it in data.get("sessions", []) if it.get("name")}
+        local_strings = {session_file_to_string(r.path) for r in self.storage.list_sessions()}
         for it in data.get("sessions", []):
-            path = self.storage.session_path(it["name"])
+            name = it["name"]
+            path = self.storage.session_path(name)
+            if it.get("string") in local_strings:
+                continue                       # этот аккаунт уже есть на диске (под любым именем)
             if path.exists():
-                continue
+                if None in local_strings:
+                    continue                   # какой-то файл сейчас не читается — не рискуем дублем
+                name = self._free_name()       # то же имя, другой аккаунт: локальный не трогаем, копию кладём рядом
+                path = self.storage.session_path(name)
             try:
                 string_to_session_file(it["string"], path)
-                self.storage.save_meta(it["name"], int(it["api_id"]), it["api_hash"],
+                self.storage.save_meta(name, int(it["api_id"]), it["api_hash"],
                                        owner_id=it.get("owner_id"), proxy=it.get("proxy") or "")
                 restored += 1
             except Exception as e:

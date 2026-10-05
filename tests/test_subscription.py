@@ -377,7 +377,7 @@ def test_graveyard():
     ss.set_dc(2, "149.154.167.51", 443); ss.auth_key = AuthKey(b"\x01" * 256); ss.save(); ss.close()
     st.save_meta("session_001", 123, "hash", owner_id=7)
     b = SessionBackup.__new__(SessionBackup)
-    b.storage = st; b.graveyard = {}
+    b.storage = st; b.graveyard = {}; b._prev_items = {}
     assert b.bury("session_001", "test")
     st.remove("session_001")
     assert not st.session_path("session_001").exists()

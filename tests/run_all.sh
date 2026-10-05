@@ -1,8 +1,14 @@
 #!/bin/sh
 # Все проверки разом (без Telegram). Запуск из корня проекта:  sh tests/run_all.sh
-set -e
+# Падает с ошибкой, если хоть один набор тестов не прошёл.
 export PYTHONPATH=.
-python tests/test_tracker.py | tail -1
-python tests/test_subscription.py | grep -c "OK$" | sed 's/^/subscription groups OK: /'
-python tests/test_watchdog.py | tail -1
-python tests/bot_audit.py | tail -1
+fail=0
+for t in tests/test_tracker.py tests/test_subscription.py tests/test_watchdog.py tests/bot_audit.py; do
+    out=$(timeout 300 python "$t" 2>&1); rc=$?
+    if [ $rc -ne 0 ]; then
+        echo "FAIL $t (код $rc)"; echo "$out" | tail -15; fail=1
+    else
+        echo "ok   $t — $(echo "$out" | grep -cE 'OK$|✔|PASSED|NO PROBLEMS') проверок"
+    fi
+done
+exit $fail
