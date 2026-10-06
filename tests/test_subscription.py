@@ -566,3 +566,47 @@ def test_hidden_owner_resolved():
     print("HIDDEN OWNER OK")
 
 test_hidden_owner_resolved()
+
+
+def test_backup_migrates_from_old_bot_once():
+    import asyncio, json, tempfile
+    from pathlib import Path
+    from types import SimpleNamespace as NS
+    import sessions.backup as B
+    from sessions.storage import SessionStorage
+    f = B._fernet()
+    fresh = f.encrypt(json.dumps({"v": 2, "sessions": [], "admins": [], "sent": [], "flags": {"who": "old-fresh"}}).encode())
+    stale = f.encrypt(json.dumps({"v": 2, "sessions": [], "admins": [], "sent": [], "flags": {"who": "new-stale"}}).encode())
+    class FB:
+        def __init__(s, ptr, blob): s.ptr, s.blob, s.desc = ptr, blob, None
+        async def get_my_description(s, language_code=None):
+            return NS(description=s.desc or (B.POINTER_PREFIX2 + json.dumps(s.ptr)))
+        async def set_my_description(s, description=None, language_code=None): s.desc = description
+        async def download(s, fid, destination): destination.write(s.blob)
+        @property
+        def session(s):
+            async def close(): pass
+            return NS(close=close)
+    old = FB({"s": ["oldfid", 1, 2]}, fresh)
+    new = FB({"s": ["newfid", 1, 3]}, stale)
+    orig = B.Bot
+    B.Bot = lambda token: old
+    settings.old_bot_token, settings.bot_token = "111:aaa", "222:bbb"
+    try:
+        st = SessionStorage(Path(tempfile.mkdtemp()), 1, "h")
+        b = B.SessionBackup(new, st, lambda: set())
+        asyncio.run(b.restore())
+        assert b.flags.get("who") == "old-fresh", b.flags
+        assert b._ptr.get("mig") == "111" and "s" not in b._ptr
+        # после переноса указатель нового бота с отметкой mig → следующий запуск читает СВОЮ копию
+        new.ptr = {"s": ["newfid2", 1, 4], "mig": "111"}
+        new.blob = f.encrypt(json.dumps({"v": 2, "sessions": [], "admins": [], "sent": [], "flags": {"who": "new-after"}}).encode())
+        b2 = B.SessionBackup(new, SessionStorage(Path(tempfile.mkdtemp()), 1, "h"), lambda: set())
+        asyncio.run(b2.restore())
+        assert b2.flags.get("who") == "new-after", b2.flags
+    finally:
+        B.Bot = orig
+        settings.old_bot_token = ""
+    print("BOT MIGRATION OK")
+
+test_backup_migrates_from_old_bot_once()

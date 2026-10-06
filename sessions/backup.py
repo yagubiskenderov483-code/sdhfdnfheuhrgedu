@@ -400,18 +400,25 @@ class SessionBackup:
 
     async def _restore_once(self) -> int:
         f = _fernet()
-        ptr = (await self._read_pointer()).get("s")
+        own = await self._read_pointer()
+        ptr = own.get("s")
         src_bot = self.bot
         old_bot = None
-        if not ptr and settings.old_bot_token and settings.old_bot_token != settings.bot_token:
-            # сменили токен бота: копия лежит у прошлого бота — забираем её оттуда один раз
+        old_id = (settings.old_bot_token or "").split(":", 1)[0]
+        if (settings.old_bot_token and settings.old_bot_token != settings.bot_token
+                and str(own.get("mig") or "") != old_id):
+            # Сменили бота: свежая копия лежит у прошлого бота (OLD_BOT_TOKEN). Берём её оттуда ОДИН раз,
+            # даже если у нового бота есть своя (возможно, давно устаревшая) копия. После переноса
+            # в указателе нового бота ставится отметка mig — следующие деплои читают уже свою копию.
             try:
                 old_bot = Bot(settings.old_bot_token)
                 d = await old_bot.get_my_description(language_code=POINTER_LANG)
                 text = (d.description or "") if d else ""
+                old_ptr = None
                 if text.startswith(POINTER_PREFIX2):
-                    ptr = (json.loads(text[len(POINTER_PREFIX2):]) or {}).get("s")
-                if ptr:
+                    old_ptr = (json.loads(text[len(POINTER_PREFIX2):]) or {}).get("s")
+                if old_ptr:
+                    ptr = old_ptr
                     src_bot = old_bot
                     log.info("Backup found on the previous bot (OLD_BOT_TOKEN) — migrating accounts")
             except Exception as e:
@@ -507,6 +514,11 @@ class SessionBackup:
             except Exception as e:
                 log.error("Restore %s failed: %s", it.get("name"), e)
         log.info("Restored %s session(s) from Telegram backup", restored)
+        if src_bot is not self.bot:
+            # перенесли копию с прошлого бота — отметка в указателе нового, чтобы не переносить повторно
+            self._ptr = dict(self._ptr or {})
+            self._ptr.pop("s", None)                 # своя старая копия нового бота больше не нужна
+            self._ptr["mig"] = old_id
         return restored
 
     # ------------------------------------------------------------------ market snapshot
