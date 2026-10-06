@@ -404,25 +404,33 @@ class SessionBackup:
         ptr = own.get("s")
         src_bot = self.bot
         old_bot = None
-        old_id = (settings.old_bot_token or "").split(":", 1)[0]
-        if (settings.old_bot_token and settings.old_bot_token != settings.bot_token
-                and str(own.get("mig") or "") != old_id):
-            # Сменили бота: свежая копия лежит у прошлого бота (OLD_BOT_TOKEN). Берём её оттуда ОДИН раз,
+        old_id = ""
+        # OLD_BOT_TOKEN — один или несколько прошлых токенов через запятую, самый свежий первым.
+        olds = [t.strip() for t in (settings.old_bot_token or "").split(",")
+                if t.strip() and t.strip() != settings.bot_token]
+        old_ids = [t.split(":", 1)[0] for t in olds]
+        if olds and str(own.get("mig") or "") not in old_ids:
+            # Сменили бота: свежая копия лежит у одного из прошлых ботов. Берём её оттуда ОДИН раз,
             # даже если у нового бота есть своя (возможно, давно устаревшая) копия. После переноса
             # в указателе нового бота ставится отметка mig — следующие деплои читают уже свою копию.
-            try:
-                old_bot = Bot(settings.old_bot_token)
-                d = await old_bot.get_my_description(language_code=POINTER_LANG)
-                text = (d.description or "") if d else ""
-                old_ptr = None
-                if text.startswith(POINTER_PREFIX2):
-                    old_ptr = (json.loads(text[len(POINTER_PREFIX2):]) or {}).get("s")
-                if old_ptr:
-                    ptr = old_ptr
-                    src_bot = old_bot
-                    log.info("Backup found on the previous bot (OLD_BOT_TOKEN) — migrating accounts")
-            except Exception as e:
-                log.warning("Could not read backup from the previous bot: %s", e)
+            for i, tok in enumerate(olds):
+                cand = None
+                try:
+                    cand = Bot(tok)
+                    d = await cand.get_my_description(language_code=POINTER_LANG)
+                    text = (d.description or "") if d else ""
+                    cp = (json.loads(text[len(POINTER_PREFIX2):]) or {}) if text.startswith(POINTER_PREFIX2) else {}
+                    # копия этого бота свежая, только если он сам уже забрал копию у следующего в списке
+                    # (или он последний) — иначе это его старая копия, а живая лежит дальше
+                    fresh = i == len(olds) - 1 or str(cp.get("mig") or "") in old_ids[i + 1:]
+                    if cp.get("s") and fresh:
+                        ptr, src_bot, old_bot, old_id = cp["s"], cand, cand, old_ids[i]
+                        log.info("Backup found on previous bot #%s (OLD_BOT_TOKEN) — migrating accounts", i + 1)
+                        break
+                except Exception as e:
+                    log.warning("Could not read backup from previous bot #%s: %s", i + 1, e)
+                if cand is not None:
+                    await cand.session.close()
         if f is None or not ptr:
             if old_bot:
                 await old_bot.session.close()

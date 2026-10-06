@@ -610,3 +610,50 @@ def test_backup_migrates_from_old_bot_once():
     print("BOT MIGRATION OK")
 
 test_backup_migrates_from_old_bot_once()
+
+
+def test_backup_migration_chain():
+    import asyncio, json, tempfile
+    from pathlib import Path
+    from types import SimpleNamespace as NS
+    import sessions.backup as B
+    from sessions.storage import SessionStorage
+    f = B._fernet()
+    blob = lambda who: f.encrypt(json.dumps({"v": 2, "sessions": [], "admins": [], "sent": [], "flags": {"who": who}}).encode())
+    class FB:
+        def __init__(s, ptr, b): s.ptr, s.blob, s.desc = ptr, b, None
+        async def get_my_description(s, language_code=None):
+            return NS(description=s.desc or (B.POINTER_PREFIX2 + json.dumps(s.ptr)))
+        async def set_my_description(s, description=None, language_code=None): s.desc = description
+        async def download(s, fid, destination): destination.write(s.blob)
+        @property
+        def session(s):
+            async def close(): pass
+            return NS(close=close)
+    orig = B.Bot
+    settings.bot_token = "333:ccc"
+    settings.old_bot_token = "222:bbb,111:aaa"
+    try:
+        # 1) средний бот уже забрал копию у старшего (mig=111) → берём у среднего
+        bots = {"222:bbb": FB({"s": ["m", 1, 2], "mig": "111"}, blob("mid")), "111:aaa": FB({"s": ["o", 1, 2]}, blob("oldest"))}
+        B.Bot = lambda t: bots[t]
+        b = B.SessionBackup(FB({}, b""), SessionStorage(Path(tempfile.mkdtemp()), 1, "h"), lambda: set())
+        asyncio.run(b.restore())
+        assert b.flags.get("who") == "mid" and b._ptr.get("mig") == "222", (b.flags, b._ptr)
+        # 2) средний бот так и не задеплоили (своя старая копия без mig) → берём у самого старого
+        bots = {"222:bbb": FB({"s": ["m", 1, 2]}, blob("mid-stale")), "111:aaa": FB({"s": ["o", 1, 2]}, blob("oldest"))}
+        b = B.SessionBackup(FB({}, b""), SessionStorage(Path(tempfile.mkdtemp()), 1, "h"), lambda: set())
+        asyncio.run(b.restore())
+        assert b.flags.get("who") == "oldest" and b._ptr.get("mig") == "111", (b.flags, b._ptr)
+        # 3) уже перенесли (mig = любой из списка) → свою копию, к прошлым ботам не ходим
+        def boom(t): raise AssertionError("must not touch old bots")
+        B.Bot = boom
+        b = B.SessionBackup(FB({"s": ["own", 1, 2], "mig": "111"}, blob("own")), SessionStorage(Path(tempfile.mkdtemp()), 1, "h"), lambda: set())
+        asyncio.run(b.restore())
+        assert b.flags.get("who") == "own", b.flags
+    finally:
+        B.Bot = orig
+        settings.old_bot_token = ""
+    print("BOT MIGRATION CHAIN OK")
+
+test_backup_migration_chain()

@@ -256,7 +256,8 @@ class Settings:
         return out
 
     def secrets(self) -> list[str]:
-        return [s for s in (self.api_hash, self.bot_token, self.session_backup_key, self.old_bot_token) if s]
+        olds = [t.strip() for t in (self.old_bot_token or "").split(",")]
+        return [s for s in (self.api_hash, self.bot_token, self.session_backup_key, self.old_bot_token, *olds) if s]
 
 
 # Ключи, которые можно менять из бота командой /set KEY VALUE
