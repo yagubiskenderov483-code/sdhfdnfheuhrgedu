@@ -260,41 +260,58 @@ class Settings:
         return [s for s in (self.api_hash, self.bot_token, self.session_backup_key, self.old_bot_token, *olds) if s]
 
 
+def _rng(lo: float, hi: float, cast=float):
+    """Число в разумных пределах: слишком большие значения ломают даты/таймеры (опрос «никогда»)."""
+    def f(v: str):
+        x = cast(float(v.replace(",", ".")) if cast is float else v)
+        if not math.isfinite(x) or x < lo or x > hi:
+            raise ValueError(f"допустимо от {lo:g} до {hi:g}")
+        return x
+    return f
+
+
+def _chat_id(v: str) -> int:
+    x = int(v)
+    if x == 0:
+        raise ValueError("ID чата не может быть 0")
+    return x
+
+
 # Ключи, которые можно менять из бота командой /set KEY VALUE
 RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "MIN_STARS": ("min_stars", lambda v: max(0, int(v))),
-    "TARGET_CHAT_ID": ("target_chat_id", lambda v: int(v)),
+    "TARGET_CHAT_ID": ("target_chat_id", _chat_id),
     "PRICE_ROUTES": ("price_routes", _price_routes),
     "BACKDROP_ROUTES": ("backdrop_routes", _backdrop_routes),
     "COLLECTION_MIN_FLOOR": ("collection_min_floor", lambda v: max(0, int(v))),
     "COLLECTION_FLOOR_MODE": ("collection_floor_mode", lambda v: _choice(v, {"skip", "slow"})),
-    "LOW_PRIORITY_POLL_INTERVAL": ("low_priority_poll_interval", lambda v: max(5.0, float(v))),
-    "MIN_TON": ("min_ton", lambda v: float(v.replace(",", "."))),
+    "LOW_PRIORITY_POLL_INTERVAL": ("low_priority_poll_interval", _rng(5, 3600)),
+    "MIN_TON": ("min_ton", _rng(0, 1e7)),
     "MAX_ABOVE_FLOOR": ("max_above_floor", lambda v: max(0, int(v))),
     "PRIORITY_FLOOR": ("priority_floor", lambda v: max(0, int(v))),
     "PRIORITY_SHARE": ("priority_share", lambda v: min(0.9, max(0.1, float(v.replace(",", "."))))),
-    "PRIORITY_POLL_INTERVAL": ("priority_poll_interval", lambda v: max(0.5, float(v.replace(",", ".")))),
+    "PRIORITY_POLL_INTERVAL": ("priority_poll_interval", _rng(0.5, 600)),
     "SYNC_MODE": ("sync_mode", lambda v: _choice(v, {"fast", "full"})),
-    "ROUTE_BY": ("route_by", lambda v: v.strip().lower() if v.strip().lower() in ("floor", "price") else "floor"),
+    "ROUTE_BY": ("route_by", lambda v: _choice(v, {"floor", "price"})),
     "ALLOW_TON_ONLY": ("allow_ton_only", _bool_strict),
     "RUSSIAN_ONLY": ("russian_only", _bool_strict),
     "UNKNOWN_SELLER_POLICY": ("unknown_seller_policy", lambda v: _choice(v, {"allow", "block"})),
     "SELLER_PHONE_PREFIXES": ("seller_phone_prefixes", _str_list),
-    "TRACKER_INTERVAL": ("tracker_interval", lambda v: max(0.2, float(v))),
+    "TRACKER_INTERVAL": ("tracker_interval", _rng(0.2, 3600)),
     "PAGE_LIMIT": ("page_limit", lambda v: max(1, min(100, int(v)))),
-    "SESSION_RPS": ("session_rps", lambda v: max(0.05, float(v))),
-    "GLOBAL_RPS": ("global_rps", lambda v: max(0.0, float(v))),
-    "MAX_CONCURRENT_SESSIONS": ("max_concurrent_sessions", lambda v: max(1, int(v))),
+    "SESSION_RPS": ("session_rps", _rng(0.05, 50)),
+    "GLOBAL_RPS": ("global_rps", _rng(0, 1000)),
+    "MAX_CONCURRENT_SESSIONS": ("max_concurrent_sessions", lambda v: max(1, min(1000, int(v)))),
     "TEST_MODE": ("test_mode", _bool_strict),
     "UNIQUE_GIFTS": ("unique_gifts", _bool_strict),
     "REQUIRE_FREE_MESSAGES": ("require_free_messages", _bool_strict),
     "MAX_SELLER_NFTS": ("max_seller_nfts", lambda v: max(0, int(v))),
     "MAX_SELLER_LEVEL": ("max_seller_level", lambda v: max(0, int(v))),
-    "COLD_POLL_INTERVAL": ("cold_poll_interval", lambda v: max(1.0, float(v))),
-    "CATALOG_INTERVAL": ("catalog_interval", lambda v: max(0.3, float(v))),
+    "COLD_POLL_INTERVAL": ("cold_poll_interval", _rng(1, 3600)),
+    "CATALOG_INTERVAL": ("catalog_interval", _rng(0.3, 3600)),
     "MAX_SAME_COLLECTION_STREAK": ("max_same_collection_streak", lambda v: max(0, int(v))),
     "UNIQUE_SELLERS": ("unique_sellers", _bool_strict),
-    "SELLER_REPEAT_HOURS": ("seller_repeat_hours", lambda v: max(0.0, float(v))),
+    "SELLER_REPEAT_HOURS": ("seller_repeat_hours", _rng(0, 87600)),
     "ALLOW_ALL_USERS": ("allow_all_users", _bool_strict),
     "FETCH_FULL_SELLER": ("fetch_full_seller", _bool_strict),
 }

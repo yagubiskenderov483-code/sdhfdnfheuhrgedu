@@ -126,9 +126,12 @@ class TelegramSender:
                 self._lock.release()
                 continue
             break
+        held = True
         if True:
           try:
-            for attempt in range(attempts):
+            attempt, flood_waits = -1, 0
+            while attempt + 1 < attempts:
+                attempt += 1
                 wait = self._last + settings.send_interval - time.monotonic()
                 if wait > 0:
                     await asyncio.sleep(wait)
@@ -141,7 +144,16 @@ class TelegramSender:
                     return SendResult(True, msg.message_id)
                 except TelegramRetryAfter as e:
                     log.warning("Bot API RetryAfter %ss", e.retry_after)
+                    # ждём БЕЗ общей очереди: пока эта группа под лимитом, посты в другие темы/группы идут;
+                    # ожидание лимита — не «неудачная попытка», лот не теряем (но и не ждём бесконечно)
+                    flood_waits += 1
+                    if flood_waits <= 8:
+                        attempt -= 1
+                    held = False
+                    self._lock.release()
                     await asyncio.sleep(e.retry_after + 0.5)
+                    await self._lock.acquire(0 if priority else 1)
+                    held = True
                 except (TelegramNetworkError, TelegramServerError) as e:
                     delay = min(30, 2 ** attempt)
                     log.warning("Bot API network/server error: %s (retry in %ss)", e, delay)
@@ -196,4 +208,5 @@ class TelegramSender:
                     except Exception as e:
                         log.warning("Could not close topic %s back: %s", reopened, e)
             finally:
-                self._lock.release()
+                if held:
+                    self._lock.release()

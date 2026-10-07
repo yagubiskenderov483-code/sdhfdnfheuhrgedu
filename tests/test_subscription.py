@@ -724,3 +724,30 @@ def test_sub_loopholes():
     print("SUB LOOPHOLES OK")
 
 test_sub_loopholes()
+
+
+def test_sender_retry_after_releases_queue():
+    import asyncio, types
+    from aiogram.exceptions import TelegramRetryAfter
+    from bot.sender import TelegramSender
+    async def run():
+        order, calls = [], {"A": 0}
+        class Bot:
+            async def send_message(s, chat, text, **kw):
+                if chat == -1 and calls["A"] < 6:          # группа A под лимитом 6 раз подряд
+                    calls["A"] += 1
+                    raise TelegramRetryAfter(method=None, message="flood", retry_after=0)
+                order.append(chat); return types.SimpleNamespace(message_id=1)
+        settings.test_mode = False; settings.send_interval = 0
+        snd = TelegramSender(Bot())
+        a = asyncio.create_task(snd.send(-1, "a"))
+        await asyncio.sleep(0)
+        b = asyncio.create_task(snd.send(-2, "b"))
+        ra, rb = await asyncio.gather(a, b)
+        assert ra.ok and rb.ok, (ra.error, rb.error)       # 6 ожиданий лимита ≠ 5 «неудачных попыток»
+        assert order.index(-2) < order.index(-1), order     # B не ждал, пока A отлежит лимит
+        assert not snd._lock._busy
+    asyncio.run(run())
+    print("SENDER RETRY-AFTER OK")
+
+test_sender_retry_after_releases_queue()

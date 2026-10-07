@@ -61,7 +61,9 @@ def save_admins(ids: set[int]) -> None:
 
 
 def can_manage(user_id: int, owner_id: int | None) -> bool:
-    return user_id in all_admins() or (owner_id is not None and owner_id == user_id)
+    # ADMIN_IDS задан — только они (старые админы из admins.json не в счёт); иначе — админы; свой аккаунт — всегда
+    return is_manager(user_id) and (bool(settings.admin_ids) or user_id in all_admins()) \
+        or (owner_id is not None and owner_id == user_id)
 
 
 _owner_ids_getter = lambda: set()   # noqa: E731 — задаётся в build_routers (владельцы добавленных аккаунтов)
@@ -340,7 +342,9 @@ def build_routers(app: "App") -> list[Router]:
     admin.message.filter(IsAdmin())
     users = Router(name="users")        # все пользователи, если ALLOW_ALL_USERS=true
     users.message.filter(IsAllowed())
+    users.callback_query.filter(F.from_user.func(lambda u: is_allowed(u.id)))   # кнопки — тоже только своим
 
+    _login_tasks: set[asyncio.Task] = set()
     pending: dict[int, dict[str, Any]] = {}   # user_id → {client, name, phone, hash, api_id, api_hash}
     claimed: set[tuple[int, int]] = set()     # (chat_id, message_id) уже занятых лотов — атомарность «Занять»
     claim_lock = asyncio.Lock()
@@ -727,7 +731,7 @@ def build_routers(app: "App") -> list[Router]:
         await app.backup.save()
         await m.answer("🟢 Парсер включён.")
 
-    @admin.message(Command("proxies"))
+    @admin.message(Command("proxies"), F.chat.type == "private")   # пароли прокси — только в личке
     async def cmd_proxies(m: Message, command: CommandObject) -> None:
         """/proxies — список; /proxies + прокси с новой строки — заменить пул и раздать аккаунтам."""
         arg = (command.args or "").strip().lower()
@@ -797,7 +801,7 @@ def build_routers(app: "App") -> list[Router]:
             moved += 1
         return moved
 
-    @admin.message(Command("proxy"))
+    @admin.message(Command("proxy"), F.chat.type == "private")
     async def cmd_proxy(m: Message, command: CommandObject) -> None:
         await _delete(m)                           # в сообщении может быть пароль прокси
         if not _proxies_on():
@@ -1043,6 +1047,10 @@ def build_routers(app: "App") -> list[Router]:
     async def cmd_settings(m: Message) -> None:
         await _answer_long(m, _filters_help())
 
+    @admin.message(Command("proxies", "proxy"))
+    async def cmd_proxy_group(m: Message) -> None:
+        await m.answer("🔒 Прокси (там пароли) — только в личке с ботом.")
+
     @admin.message(Command("set"))
     async def cmd_set(m: Message, command: CommandObject) -> None:
         if not app.subs.ready.is_set():
@@ -1071,7 +1079,7 @@ def build_routers(app: "App") -> list[Router]:
         shown = str(value)
         await m.answer(f"✅ {parts[0].upper()} = {html.escape(shown[:300] + ('…' if len(shown) > 300 else ''))} (сохранено)")
 
-    @users.message(Command("test"))
+    @admin.message(Command("test"))
     async def cmd_test(m: Message, command: CommandObject) -> None:
         await m.answer("🧪 Запускаю проверку…")
         report, sample = await app.run_check()
@@ -1198,7 +1206,9 @@ def build_routers(app: "App") -> list[Router]:
             await asyncio.sleep(600)               # бросили вход на полпути — через 10 минут закрываем
             if pending.get(uid0, {}).get("ts") == stamp:
                 await _cleanup_pending(uid0)
-        asyncio.get_running_loop().create_task(_expire_login())
+        _bg = asyncio.get_running_loop().create_task(_expire_login())
+        _login_tasks.add(_bg)                       # держим ссылку — иначе задачу может собрать GC
+        _bg.add_done_callback(_login_tasks.discard)
         await state.set_state(AddSession.code)
         await m.answer("Шаг 2/3. Отправьте <b>код входа</b>, который пришёл в Telegram.\n\n"
                        "⚠️ Вводите код <b>с пробелами или дефисами</b>, например <code>1 2 3 4 5</code> — "
@@ -1240,8 +1250,6 @@ def build_routers(app: "App") -> list[Router]:
         p["name"] = name
         app.storage.save_meta(p["name"], p["api_id"], p["api_hash"], p["phone"], owner_id=uid,
                               proxy=p.get("proxy") or "")
-        if not all_admins():
-            save_admins({uid})           # первый, кто добавил аккаунт, становится админом
         rec = SessionRecord(p["name"], app.storage.session_path(p["name"]), p["api_id"], p["api_hash"], uid,
                             p.get("proxy"))
         w = await app.sessions.add_record(rec)

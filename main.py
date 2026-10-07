@@ -173,16 +173,16 @@ class App:
         if run_bot:
             init_claim_code()
             await self._drop_webhook("startup")
-            self._tasks.append(asyncio.create_task(
+            self._spawn(asyncio.create_task(
                 self.dp.start_polling(self.bot, handle_signals=False,
                                       allowed_updates=self.dp.resolve_used_update_types()),
                 name="admin-bot"))
-            self._tasks.append(asyncio.create_task(self.subs.run(), name="subscriptions"))
-            self._tasks.append(asyncio.create_task(self._webhook_guard(), name="webhook-guard"))
+            self._spawn(asyncio.create_task(self.subs.run(), name="subscriptions"))
+            self._spawn(asyncio.create_task(self._webhook_guard(), name="webhook-guard"))
             await self._set_menu()
         # 2) всё остальное — в фоне; ошибка любого шага не роняет бота
-        self._tasks.append(asyncio.create_task(self._boot(run_bot), name="boot"))
-        self._tasks.append(asyncio.create_task(self._bench_loop(), name="bench"))
+        self._spawn(asyncio.create_task(self._boot(run_bot), name="boot"))
+        self._spawn(asyncio.create_task(self._bench_loop(), name="bench"))
 
     async def _boot(self, run_bot: bool) -> None:
         async def step(name, coro):
@@ -199,7 +199,7 @@ class App:
         if not self.backup.restore_done:
             # копию прочитать не удалось — пробуем дальше в фоне; пока не прочитаем, сохранять
             # нельзя (затрём хорошую копию), а значит и новые аккаунты не попадут в копию
-            self._tasks.append(asyncio.create_task(self._restore_retry_loop(), name="restore-retry"))
+            self._spawn(asyncio.create_task(self._restore_retry_loop(), name="restore-retry"))
         await step("restore market snapshot", self.backup.restore_market())
         # разовая миграция: убрать старые ценовые /set (555, фильтр дороже флора, лимит аккаунтов) —
         # теперь действуют значения из .env (порог 400, все аккаунты параллельно)
@@ -246,12 +246,12 @@ class App:
         self.booting = False
         await step("menu", self._set_menu())      # админы из копии получают полное меню
         if run_bot:
-            self._tasks.append(asyncio.create_task(self._startup_report(), name="startup-report"))
+            self._spawn(asyncio.create_task(self._startup_report(), name="startup-report"))
         if getattr(self, "_flags_dirty", False):
             await step("save flags", self.backup.save())   # чтобы разовые сбросы не повторились
         await step("backup sync", self.backup.sync_if_needed())
         if run_bot:
-            self._tasks.append(asyncio.create_task(self._backup_loop(), name="backup-loop"))
+            self._spawn(asyncio.create_task(self._backup_loop(), name="backup-loop"))
         self.pipeline.start()
         await step("tracker", self.coordinator.start())
 
@@ -282,6 +282,15 @@ class App:
                 await self.bot.send_message(chat, text)
             except Exception:
                 pass
+
+    def _spawn(self, t: asyncio.Task) -> None:
+        """Фоновая задача: держим ссылку и громко пишем в лог, если она упала (а не молча умерла)."""
+        self._tasks.append(t)
+
+        def _done(task: asyncio.Task) -> None:
+            if not task.cancelled() and task.exception() is not None:
+                log.error("Background task %s crashed: %r", task.get_name(), task.exception())
+        t.add_done_callback(_done)
 
     async def _flag(self, name: str) -> bool:
         return bool(self.backup.flags.get(name) or await self.db.kv_get(name))
@@ -350,7 +359,10 @@ class App:
                 # применить восстановленное состояние, как при обычном запуске
                 if self.backup.restored_paused:
                     self.coordinator.paused = True
-                    await self.db.kv_set("paused", 1)
+                    try:
+                        await self.db.kv_set("paused", 1)
+                    except Exception as e:
+                        log.warning("Could not store paused flag: %s", e)
                 self.users_closed = bool(self.backup.flags.get("users_closed"))
                 self.sessions.limiter.set_rate(settings.global_rps)
                 found = bool(self.backup.backup_names) or self.backup.restored_count
