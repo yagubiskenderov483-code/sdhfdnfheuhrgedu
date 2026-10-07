@@ -128,7 +128,7 @@ class Subscriptions:
             if isinstance(data.get(k), (int, float)):
                 self.state[k] = max(int(self.state.get(k) or 0), int(data[k]))
         if isinstance(data.get("seen_tx"), list):
-            self.state["seen_tx"] = list(dict.fromkeys(self.state["seen_tx"] + data["seen_tx"]))[-1000:]
+            self.state["seen_tx"] = list(dict.fromkeys(data["seen_tx"] + self.state["seen_tx"]))[-2000:]
         # оплата пришла, а выдача оборвалась перезапуском → повторить выдачу
         for i in self.state["invoices"].values():
             if i.get("paid") and i.get("granted") == "inflight":
@@ -178,6 +178,9 @@ class Subscriptions:
         await self.load()
         async with self._lock:
             self._merge(data or {})
+            for u in self.state["users"].values():
+                if isinstance(u, dict):
+                    u.pop("tmp", None)        # копия прочитана — временных записей больше нет
             await self.save()
         return len(self.state["users"])
 
@@ -210,16 +213,15 @@ class Subscriptions:
     async def _member_status(self, uid: int) -> str | None:
         """Статус в канале или None, если Telegram не ответил."""
         try:
-            return (await self.bot.get_chat_member(sub_chat_id(), uid)).status
+            m = await self.bot.get_chat_member(sub_chat_id(), uid)
         except Exception:
             return None
+        if m.status == "restricted" and not getattr(m, "is_member", True):
+            return "left"          # ограничен, но уже вышел из группы — он НЕ в канале
+        return m.status
 
     async def _is_member(self, uid: int) -> bool:
-        try:
-            m = await self.bot.get_chat_member(sub_chat_id(), uid)
-            return m.status in ("member", "administrator", "creator", "restricted")
-        except Exception:
-            return False
+        return await self._member_status(uid) in ("member", "administrator", "creator", "restricted")
 
     async def flush_backup(self) -> None:
         """Дождаться фоновой резервной копии (вызывается ВНЕ лока — после денег/выдачи доступа)."""
@@ -303,7 +305,11 @@ class Subscriptions:
                     u["in_chat"] = False
                     await self.save()
             return
-        if new != "member" or old in ("member", "administrator", "creator", "restricted"):
+        was_in = old in ("member", "administrator", "creator") or (
+            old == "restricted" and getattr(ev.old_chat_member, "is_member", True))
+        if new not in ("member", "restricted") or was_in:
+            return
+        if new == "restricted" and not getattr(ev.new_chat_member, "is_member", True):
             return
         link = ev.invite_link.invite_link if ev.invite_link else None
         rec = self.state["links"].get(link) if link else None
@@ -401,7 +407,15 @@ class Subscriptions:
                     await self._deliver(i)
             return
         if self.degraded:
-            log.warning("User %s joined, subscriptions backup not restored — not kicking", uid)
+            # копия подписок не прочитана — не кикаем сразу (вдруг оплачено), но запоминаем:
+            # после чтения копии без оплаченного времени его уберут обычной проверкой
+            log.warning("User %s joined, subscriptions backup not restored — not kicking yet", uid)
+            async with self._lock:
+                u = self.user(uid)
+                u["in_chat"] = True
+                if not u.get("until") and not u.get("pending"):
+                    u["until"] = time.time()
+                await self.save()
             return
         if not await self.kick(uid):
             async with self._lock:
@@ -426,7 +440,7 @@ class Subscriptions:
         checks = 0          # не больше 60 проверок «ждёт входа» за проход — иначе проход тянется минутами
         for k, u in list(self.state["users"].items()):
             uid = int(k)
-            if uid in settings.admin_ids or self._has_access(u):
+            if uid in settings.admin_ids or self._has_access(u) or (self.degraded and u.get("tmp")):
                 continue
             if u.get("pending"):
                 if checks < 60 and now - float(u.get("checked") or 0) >= 600:
@@ -540,6 +554,15 @@ class Subscriptions:
                 im = tx.get("in_msg") or {}
                 if not h or h in seen or not im.get("source"):
                     continue
+                # перевод отскочил обратно (кошелёк не активирован / bounce) — деньги ушли назад, это не оплата
+                outs = tx.get("out_msgs") or []
+                back = sum(int(o.get("value") or 0) for o in outs if isinstance(o, dict))
+                if back > 0 and (any(o.get("destination") == im.get("source") for o in outs if isinstance(o, dict))
+                                 or back * 2 >= int(im.get("value") or 0)):
+                    self.state["seen_tx"].append(h)
+                    seen.add(h)
+                    log.warning("Incoming transfer %s bounced back to sender — not counted as payment", h[:12])
+                    continue
                 comment = (im.get("message") or "").strip().upper()
                 code = next((c for c in open_codes if c in comment), None)
                 if not code:
@@ -567,7 +590,7 @@ class Subscriptions:
                 self.state["paid_count"] = int(self.state.get("paid_count") or 0) + 1
                 open_codes.discard(code)
                 paid.append(inv)
-            self.state["seen_tx"] = self.state["seen_tx"][-1000:]
+            self.state["seen_tx"] = self.state["seen_tx"][-2000:]
             if paid or underpaid or extra:
                 await self.save(backup=True)     # оплата — сразу и в резервную копию (деплой не потеряет)
         await self.flush_backup()
@@ -695,7 +718,7 @@ class Subscriptions:
         now = time.time()
         due = [int(k) for k, u in self.state["users"].items()
                if u.get("in_chat") and u.get("until") not in (FOREVER, None) and 0 < float(u["until"]) <= now
-               and int(k) not in settings.admin_ids]
+               and int(k) not in settings.admin_ids and not (self.degraded and u.get("tmp"))]
         for uid in due:
             async with self._lock:
                 if self._has_access(self.user(uid)) or self.user(uid).get("pending"):

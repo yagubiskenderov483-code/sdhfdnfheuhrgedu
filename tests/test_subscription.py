@@ -657,3 +657,70 @@ def test_backup_migration_chain():
     print("BOT MIGRATION CHAIN OK")
 
 test_backup_migration_chain()
+
+
+def test_sub_loopholes():
+    import asyncio, types, time as _t
+    import bot.subscription as S
+    class DB:
+        def __init__(s): s.kv = {}
+        async def kv_get(s, k, d=None): return s.kv.get(k, d)
+        async def kv_set(s, k, v): s.kv[k] = v
+    class Bot:
+        def __init__(s): s.bans, s.links, s.st = [], 0, {}
+        async def create_chat_invite_link(s, chat, **kw):
+            s.links += 1; return types.SimpleNamespace(invite_link=f"L{s.links}")
+        async def revoke_chat_invite_link(s, *a): pass
+        async def send_message(s, *a, **k): pass
+        async def ban_chat_member(s, chat, uid, **kw): s.bans.append(uid)
+        async def unban_chat_member(s, *a, **k): pass
+        async def get_chat_member(s, chat, uid):
+            st, mem = s.st.get(uid, ("left", False))
+            return types.SimpleNamespace(status=st, is_member=mem)
+    settings.target_chat_id = -100
+    bot = Bot()
+    subs = S.Subscriptions(types.SimpleNamespace(db=DB(), bot=bot))
+    def ev(uid, old, new, mem=True):
+        u = types.SimpleNamespace(id=uid, username=None, first_name="x")
+        return types.SimpleNamespace(chat=types.SimpleNamespace(id=-100), invite_link=None, from_user=u,
+            old_chat_member=types.SimpleNamespace(status=old, user=u, is_member=False),
+            new_chat_member=types.SimpleNamespace(status=new, user=u, is_member=mem))
+    async def run():
+        await subs.load()
+        subs.ready.set()
+        # 1) отскочивший перевод не считается оплатой
+        code = await subs.new_invoice(50, "24h")
+        nano = subs.state["invoices"][code]["nano"]
+        async def txs():
+            return [{"transaction_id": {"hash": "B1"}, "in_msg": {"source": "EQpay", "value": str(nano), "message": code},
+                     "out_msgs": [{"destination": "EQpay", "value": str(nano - 5)}]}]
+        subs._fetch_txs = txs
+        await subs.check_payments()
+        assert not subs.state["invoices"][code].get("paid") and not subs.state["invoices"][code].get("got")
+        # 2) ограниченный, но вышедший — не «в канале»: оплата даёт ссылку
+        bot.st[51] = ("restricted", False)
+        t = await subs.grant(51, 3600, "paid")
+        assert "L" in t and not subs.user(51)["in_chat"], t
+        # 3) зашёл без оплаты, пока копия не прочитана → после чтения копии его выкидывают
+        subs.degraded = True
+        await subs.on_join(ev(52, "left", "member"))
+        assert 52 not in bot.bans and subs.user(52)["in_chat"]
+        await subs._expire(); await subs._reconcile()
+        assert 52 not in bot.bans                       # пока копии нет — не трогаем
+        await subs.import_({"users": {}})
+        subs.degraded = False
+        bot.st[52] = ("member", True)
+        await subs._expire()
+        assert 52 in bot.bans, bot.bans
+        # 3b) а если в копии оплачено — остаётся
+        subs.degraded = True
+        await subs.on_join(ev(53, "left", "member"))
+        await subs.import_({"users": {"53": {"until": _t.time() + 86400, "in_chat": True}}})
+        subs.degraded = False
+        bot.st[53] = ("member", True)
+        await subs._expire()
+        assert 53 not in bot.bans and subs.user(53)["until"] > _t.time() + 86000
+    asyncio.run(run())
+    print("SUB LOOPHOLES OK")
+
+test_sub_loopholes()
