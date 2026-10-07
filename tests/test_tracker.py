@@ -842,7 +842,8 @@ def test_29_price_routes():
     assert st.route_chat(500) == (-100, 61)
     assert st.route_chat(1000) == (-100, 62) and st.route_chat(4999) == (-100, 63)
     assert st.route_chat(5000) == (-100, 64) and st.route_chat(99999) == (-100, 64)
-    assert st.route_chat(100) == st.route_chat(st.price_routes[0][0] if st.price_routes else 100)  # ниже всех → нижняя тема
+    assert st.route_chat(240) == (-100, 61)          # чуть ниже нижней границы (флор просел) → нижняя тема
+    assert st.route_chat(100) == (-100999, None)    # сильно ниже всех диапазонов → общий
     assert st.route_chat(None) == (-100999, None)
     st.price_routes = []
     assert st.route_chat(7000) == (-100999, None)   # маршрутов нет → общий

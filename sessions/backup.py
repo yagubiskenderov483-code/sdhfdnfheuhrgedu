@@ -61,6 +61,12 @@ MARKET_FILENAME = "market.backup"
 MAX_BOT_DOWNLOAD = 19 * 1024 * 1024       # Bot API отдаёт файлы до 20 МБ
 
 
+def _safe_name(n) -> bool:
+    """Имя сессии из копии можно класть в папку: без путей и «..» (любые буквы, +7999…, пробелы — можно)."""
+    return (isinstance(n, str) and 0 < len(n) <= 128 and n not in (".", "..")
+            and not any(c in n for c in "/\\\0") and Path(n).name == n)
+
+
 def _key(k: str) -> Fernet:
     return Fernet(base64.urlsafe_b64encode(hashlib.sha256(("gift-tracker:" + k).encode()).digest()))
 
@@ -131,6 +137,7 @@ class SessionBackup:
         # удалённые аккаунты (снёс Telegram или удалили вручную) — хранятся в копии 14 дней,
         # чтобы ошибочно удалённый аккаунт можно было вернуть командой /revive
         self.graveyard: dict[str, dict] = {}
+        self._postponed: dict[str, float] = {}     # новые аккаунты, чей файл не читался: имя → когда впервые
         self._prev_items: dict[str, dict] = {}      # аккаунты из последней копии (имя → запись)
 
     GRAVE_DAYS = 14
@@ -275,12 +282,14 @@ class SessionBackup:
                     fresh_file = time.time() - rec.path.stat().st_mtime < 300
                 except OSError:
                     fresh_file = False
-                if not s and fresh_file:
+                first = self._postponed.setdefault(rec.name, time.time())
+                if not s and fresh_file and time.time() - first < 600:
                     # новый аккаунт не читается — не говорим «сохранено», иначе после деплоя он пропадёт
                     self.last_error = f"{rec.name}: файл сессии сейчас не читается — копия сохранится позже"
                     log.warning("Backup postponed: session %s unreadable", rec.name)
                     return False
             if s:
+                self._postponed.pop(rec.name, None)
                 items.append({"name": rec.name, "string": s, "api_id": rec.api_id,
                               "api_hash": rec.api_hash, "owner_id": rec.owner_id, "proxy": rec.proxy})
         if self.backup_names:
@@ -511,8 +520,7 @@ class SessionBackup:
         # чужие/битые записи в копии не должны ронять восстановление и писать файлы вне папки сессий
         data["sessions"] = [it for it in (data.get("sessions") if isinstance(data.get("sessions"), list) else [])
                             if isinstance(it, dict) and isinstance(it.get("string"), str) and it.get("string")
-                            and re.fullmatch(r"[A-Za-z0-9_~.-]{1,64}", str(it.get("name") or ""))
-                            and ".." not in str(it.get("name"))]
+                            and _safe_name(it.get("name"))]
         self.restored_paused = bool(data.get("paused"))
         # удалённые В ЭТОМ запуске (до чтения копии) — их не возвращаем; список удалённых из самой копии
         # тут не учитываем: в старой копии аккаунт мог быть и в удалённых, и уже возвращённым

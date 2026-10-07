@@ -1049,6 +1049,7 @@ def build_routers(app: "App") -> list[Router]:
 
     @admin.message(Command("proxies", "proxy"))
     async def cmd_proxy_group(m: Message) -> None:
+        await _delete(m)                     # в сообщении мог быть пароль прокси — убираем из группы
         await m.answer("🔒 Прокси (там пароли) — только в личке с ботом.")
 
     @admin.message(Command("set"))

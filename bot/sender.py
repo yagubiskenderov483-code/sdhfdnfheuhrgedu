@@ -73,6 +73,7 @@ class TelegramSender:
         self._lock = _PriorityLock()
         self._last = 0.0
         self._recent: dict[int, deque[float]] = {}
+        self._flood_until: dict[int, float] = {}    # группа под лимитом Telegram (RetryAfter) — до этого момента не шлём
         self.test_sent = 0
 
     def _window_wait(self, chat_id: int) -> float:
@@ -81,7 +82,9 @@ class TelegramSender:
         now = time.monotonic()
         while recent and now - recent[0] > 60:
             recent.popleft()
-        return recent[0] + 60 - now if len(recent) >= self.PER_CHAT_MINUTE else 0.0
+        win = recent[0] + 60 - now if len(recent) >= self.PER_CHAT_MINUTE else 0.0
+        # темы одной группы делят её лимит: пока группа под RetryAfter, остальные посты туда ждут, а не долбят
+        return max(win, self._flood_until.get(chat_id, 0.0) - now)
 
     def _test_chat(self) -> int | None:
         if settings.test_chat_id:
@@ -149,10 +152,19 @@ class TelegramSender:
                     flood_waits += 1
                     if flood_waits <= 8:
                         attempt -= 1
+                    self._flood_until[chat_id] = time.monotonic() + e.retry_after + 0.5
                     held = False
                     self._lock.release()
-                    await asyncio.sleep(e.retry_after + 0.5)
-                    await self._lock.acquire(0 if priority else 1)
+                    while True:
+                        w = self._window_wait(chat_id)
+                        if w > 0:
+                            await asyncio.sleep(w)
+                            continue
+                        await self._lock.acquire(0 if priority else 1)
+                        if self._window_wait(chat_id) > 0:
+                            self._lock.release()
+                            continue
+                        break
                     held = True
                 except (TelegramNetworkError, TelegramServerError) as e:
                     delay = min(30, 2 ** attempt)

@@ -242,7 +242,7 @@ class Settings:
                 if stars >= lo and (hi is None or stars < hi):
                     return chat, thread
             lo, _hi, chat, thread = min(self.price_routes, key=lambda r: r[0])
-            if stars < lo:
+            if lo * 0.9 <= stars < lo:
                 return chat, thread        # чуть ниже самой нижней границы (флор просел) — в нижнюю тему
         return self.target_chat_id, None
 
@@ -267,9 +267,9 @@ def _rng(lo: float, hi: float, cast=float):
     """Число в разумных пределах: слишком большие значения ломают даты/таймеры (опрос «никогда»)."""
     def f(v: str):
         x = cast(float(v.replace(",", ".")) if cast is float else v)
-        if not math.isfinite(x) or x < lo or x > hi:
-            raise ValueError(f"допустимо от {lo:g} до {hi:g}")
-        return x
+        if not math.isfinite(x):
+            raise ValueError("нужно обычное число")
+        return min(hi, max(lo, x))         # как раньше — подрезаем к границе, а не отказываем
     return f
 
 
@@ -289,13 +289,13 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "COLLECTION_MIN_FLOOR": ("collection_min_floor", lambda v: max(0, int(v))),
     "COLLECTION_FLOOR_MODE": ("collection_floor_mode", lambda v: _choice(v, {"skip", "slow"})),
     "LOW_PRIORITY_POLL_INTERVAL": ("low_priority_poll_interval", _rng(5, 3600)),
-    "MIN_TON": ("min_ton", _rng(0, 1e7)),
+    "MIN_TON": ("min_ton", lambda v: float(v.replace(",", "."))),
     "MAX_ABOVE_FLOOR": ("max_above_floor", lambda v: max(0, int(v))),
     "PRIORITY_FLOOR": ("priority_floor", lambda v: max(0, int(v))),
     "PRIORITY_SHARE": ("priority_share", lambda v: min(0.9, max(0.1, float(v.replace(",", "."))))),
     "PRIORITY_POLL_INTERVAL": ("priority_poll_interval", _rng(0.5, 600)),
     "SYNC_MODE": ("sync_mode", lambda v: _choice(v, {"fast", "full"})),
-    "ROUTE_BY": ("route_by", lambda v: _choice(v, {"floor", "price"})),
+    "ROUTE_BY": ("route_by", lambda v: v.strip().lower() if v.strip().lower() in ("floor", "price") else "floor"),
     "ALLOW_TON_ONLY": ("allow_ton_only", _bool_strict),
     "RUSSIAN_ONLY": ("russian_only", _bool_strict),
     "UNKNOWN_SELLER_POLICY": ("unknown_seller_policy", lambda v: _choice(v, {"allow", "block"})),

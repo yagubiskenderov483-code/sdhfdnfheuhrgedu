@@ -796,3 +796,31 @@ def test_backup_migration_timestamps_and_old_key():
     print("BACKUP TIMESTAMPS + OLD KEY OK")
 
 test_backup_migration_timestamps_and_old_key()
+
+
+def test_sender_same_group_waits_flood():
+    import asyncio, types
+    from aiogram.exceptions import TelegramRetryAfter
+    from bot.sender import TelegramSender
+    async def run():
+        calls = []
+        class Bot:
+            first = True
+            async def send_message(s, chat, text, **kw):
+                calls.append(text)
+                if s.first:
+                    s.first = False
+                    raise TelegramRetryAfter(method=None, message="flood", retry_after=0.3)
+                return types.SimpleNamespace(message_id=1)
+        settings.test_mode = False; settings.send_interval = 0
+        snd = TelegramSender(Bot())
+        a = asyncio.create_task(snd.send(-1, "a", thread_id=3))
+        await asyncio.sleep(0.05)
+        b = asyncio.create_task(snd.send(-1, "b", thread_id=5))     # другая тема той же группы
+        ra, rb = await asyncio.gather(a, b)
+        assert ra.ok and rb.ok
+        assert calls.count("b") == 1, calls     # пока группа под лимитом, B не стучится зря
+    asyncio.run(run())
+    print("SENDER GROUP FLOOD OK")
+
+test_sender_same_group_waits_flood()
