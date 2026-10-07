@@ -751,3 +751,48 @@ def test_sender_retry_after_releases_queue():
     print("SENDER RETRY-AFTER OK")
 
 test_sender_retry_after_releases_queue()
+
+
+def test_backup_migration_timestamps_and_old_key():
+    import asyncio, json, tempfile
+    from pathlib import Path
+    from types import SimpleNamespace as NS
+    import sessions.backup as B
+    from sessions.storage import SessionStorage
+    class FB:
+        def __init__(s, ptr, b): s.ptr, s.blob, s.desc = ptr, b, None
+        async def get_my_description(s, language_code=None):
+            return NS(description=s.desc or (B.POINTER_PREFIX2 + json.dumps(s.ptr)))
+        async def set_my_description(s, description=None, language_code=None): s.desc = description
+        async def download(s, fid, destination): destination.write(s.blob)
+        @property
+        def session(s):
+            async def close(): pass
+            return NS(close=close)
+    body = lambda who: json.dumps({"v": 2, "sessions": [{"name": "../evil", "string": "x"}, 5],
+                                   "admins": ["bad", 7], "sent": [], "flags": {"who": who}}).encode()
+    orig, key = B.Bot, settings.session_backup_key
+    try:
+        # без SESSION_BACKUP_KEY: копия старого бота зашифрована ЕГО токеном — всё равно читается
+        settings.session_backup_key = ""
+        settings.bot_token, settings.old_bot_token = "333:ccc", "222:bbb,111:aaa"
+        enc_old = B._key("111:aaa").encrypt(body("oldest"))
+        enc_mid = B._key("222:bbb").encrypt(body("mid"))
+        # у среднего копия СТАРЕЕ по времени, хотя он идёт первым — берём самую свежую
+        bots = {"222:bbb": FB({"s": ["m", 1, 2, 100]}, enc_mid), "111:aaa": FB({"s": ["o", 1, 2, 200]}, enc_old)}
+        B.Bot = lambda t: bots[t]
+        b = B.SessionBackup(FB({}, b""), SessionStorage(Path(tempfile.mkdtemp()), 1, "h"), lambda: set())
+        asyncio.run(b.restore())
+        assert b.flags.get("who") == "oldest" and b._ptr.get("mig") == "111", (b.flags, b._ptr)
+        assert b.restore_done and b.restored_count == 0       # битые записи пропущены, не уронили восстановление
+        # своя копия свежее всех старых — не переносим
+        own = FB({"s": ["own", 1, 2, 300]}, B._fernet().encrypt(body("own")))
+        b = B.SessionBackup(own, SessionStorage(Path(tempfile.mkdtemp()), 1, "h"), lambda: set())
+        asyncio.run(b.restore())
+        assert b.flags.get("who") == "own", b.flags
+    finally:
+        B.Bot = orig
+        settings.old_bot_token, settings.session_backup_key = "", key
+    print("BACKUP TIMESTAMPS + OLD KEY OK")
+
+test_backup_migration_timestamps_and_old_key()

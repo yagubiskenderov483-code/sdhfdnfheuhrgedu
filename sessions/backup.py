@@ -25,6 +25,7 @@ import base64
 import hashlib
 import io
 import json
+import re
 import sqlite3
 import time
 import zlib
@@ -34,7 +35,7 @@ from typing import Awaitable, Callable
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramNotFound, TelegramRetryAfter
 from aiogram.types import BufferedInputFile
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, MultiFernet, InvalidToken
 from telethon.crypto import AuthKey
 from telethon.sessions import SQLiteSession, StringSession
 
@@ -60,11 +61,19 @@ MARKET_FILENAME = "market.backup"
 MAX_BOT_DOWNLOAD = 19 * 1024 * 1024       # Bot API отдаёт файлы до 20 МБ
 
 
-def _fernet() -> Fernet | None:
-    key = settings.session_backup_key or settings.bot_token
-    if not key:
+def _key(k: str) -> Fernet:
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(("gift-tracker:" + k).encode()).digest()))
+
+
+def _fernet() -> Fernet | MultiFernet | None:
+    """Шифруем основным ключом; расшифровать пробуем всеми: без SESSION_BACKUP_KEY ключ зависит
+    от токена — копия прошлого бота зашифрована его токеном, иначе её не прочитать после смены бота."""
+    keys = [settings.session_backup_key or settings.bot_token, settings.bot_token,
+            *[t.strip() for t in (settings.old_bot_token or "").split(",")]]
+    keys = [k for k in dict.fromkeys(keys) if k]
+    if not keys:
         return None
-    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(("gift-tracker:" + key).encode()).digest()))
+    return MultiFernet([_key(k) for k in keys]) if len(keys) > 1 else _key(keys[0])
 
 
 def session_file_to_string(path: Path) -> str | None:
@@ -257,7 +266,20 @@ class SessionBackup:
             return False
         items = []
         for rec in self.storage.list_sessions():
-            s = session_file_to_string(rec.path)
+            s = await asyncio.to_thread(session_file_to_string, rec.path)      # SQLite может ждать — не в цикле событий
+            if not s and (rec.name not in self._prev_items
+                          or self._prev_items[rec.name].get("string") in {g.get("string") for g in self.graveyard.values()}):
+                await asyncio.sleep(1)                                     # файл занят (только что добавлен) — ещё раз
+                s = await asyncio.to_thread(session_file_to_string, rec.path)
+                try:
+                    fresh_file = time.time() - rec.path.stat().st_mtime < 300
+                except OSError:
+                    fresh_file = False
+                if not s and fresh_file:
+                    # новый аккаунт не читается — не говорим «сохранено», иначе после деплоя он пропадёт
+                    self.last_error = f"{rec.name}: файл сессии сейчас не читается — копия сохранится позже"
+                    log.warning("Backup postponed: session %s unreadable", rec.name)
+                    return False
             if s:
                 items.append({"name": rec.name, "string": s, "api_id": rec.api_id,
                               "api_hash": rec.api_hash, "owner_id": rec.owner_id, "proxy": rec.proxy})
@@ -272,8 +294,12 @@ class SessionBackup:
                 # не прочитался (SQLite занят), берём из прошлой копии, а не теряем
                 gone |= {n for n in self.backup_names - have if not self.storage.session_path(n).exists()}
             have_s = {it["string"] for it in items}
-            missing = [self._prev_items[n] for n in sorted(self.backup_names - have - gone)
-                       if n in self._prev_items and self._prev_items[n].get("string") not in have_s]
+            # удалённый определяем по самому аккаунту (строке), а не только по имени: имя из «удалённых»
+            # могло достаться новому аккаунту — его нельзя выкинуть из копии из-за совпадения имени
+            buried_s = {g.get("string") for g in self.graveyard.values()}
+            missing = [self._prev_items[n] for n in sorted(self.backup_names - have - (gone - set(self.graveyard)))
+                       if n in self._prev_items and self._prev_items[n].get("string") not in have_s
+                       and self._prev_items[n].get("string") not in buried_s]
             if missing:
                 log.info("Backup: %s account(s) not on disk now — kept from the previous copy", len(missing))
                 items += missing
@@ -325,7 +351,7 @@ class SessionBackup:
                 log.warning("Backup upload to %s failed: %s", chat, e)
                 return False
             try:
-                await self._write_pointer("s", [msg.document.file_id, chat, msg.message_id])
+                await self._write_pointer("s", [msg.document.file_id, chat, msg.message_id, int(time.time())])
             except Exception as e:
                 # запрос мог дойти до Telegram (таймаут после применения) — перечитываем указатель
                 self._ptr = None
@@ -413,6 +439,7 @@ class SessionBackup:
             # Сменили бота: свежая копия лежит у одного из прошлых ботов. Берём её оттуда ОДИН раз,
             # даже если у нового бота есть своя (возможно, давно устаревшая) копия. После переноса
             # в указателе нового бота ставится отметка mig — следующие деплои читают уже свою копию.
+            cands = []                     # (номер, токен, указатель) прошлых ботов, у которых есть копия
             for i, tok in enumerate(olds):
                 cand = None
                 try:
@@ -420,17 +447,37 @@ class SessionBackup:
                     d = await cand.get_my_description(language_code=POINTER_LANG)
                     text = (d.description or "") if d else ""
                     cp = (json.loads(text[len(POINTER_PREFIX2):]) or {}) if text.startswith(POINTER_PREFIX2) else {}
-                    # копия этого бота свежая, только если он сам уже забрал копию у следующего в списке
-                    # (или он последний) — иначе это его старая копия, а живая лежит дальше
-                    fresh = i == len(olds) - 1 or str(cp.get("mig") or "") in old_ids[i + 1:]
-                    if cp.get("s") and fresh:
-                        ptr, src_bot, old_bot, old_id = cp["s"], cand, cand, old_ids[i]
-                        log.info("Backup found on previous bot #%s (OLD_BOT_TOKEN) — migrating accounts", i + 1)
-                        break
+                    if isinstance(cp, dict) and isinstance(cp.get("s"), list) and cp["s"]:
+                        cands.append((i, tok, cp))
                 except Exception as e:
                     log.warning("Could not read backup from previous bot #%s: %s", i + 1, e)
-                if cand is not None:
-                    await cand.session.close()
+                finally:
+                    if cand is not None:
+                        await cand.session.close()
+
+            def _ts(p) -> float:
+                try:
+                    return float(p[3]) if isinstance(p, list) and len(p) > 3 else 0.0
+                except (TypeError, ValueError):
+                    return 0.0
+            pick = None
+            if any(_ts(cp["s"]) for _, _, cp in cands):
+                # у копий есть время сохранения — берём самую свежую (и только если она свежее своей)
+                pick = max(cands, key=lambda c: _ts(c[2]["s"]))
+                if _ts(ptr) >= _ts(pick[2]["s"]):
+                    pick = None
+            else:
+                # старые указатели без времени: копия бота свежая, только если он сам уже забрал копию
+                # у следующего в списке (или он последний) — иначе это его старая копия, живая лежит дальше
+                for i, tok, cp in cands:
+                    if i == len(olds) - 1 or str(cp.get("mig") or "") in old_ids[i + 1:]:
+                        pick = (i, tok, cp)
+                        break
+            if pick:
+                i, tok, cp = pick
+                old_bot = Bot(tok)
+                ptr, src_bot, old_id = cp["s"], old_bot, old_ids[i]
+                log.info("Backup found on previous bot #%s (OLD_BOT_TOKEN) — migrating accounts", i + 1)
         if f is None or not ptr:
             if old_bot:
                 await old_bot.session.close()
@@ -459,6 +506,13 @@ class SessionBackup:
             if old_bot:
                 await old_bot.session.close()
 
+        if not isinstance(data, dict):
+            data = {}
+        # чужие/битые записи в копии не должны ронять восстановление и писать файлы вне папки сессий
+        data["sessions"] = [it for it in (data.get("sessions") if isinstance(data.get("sessions"), list) else [])
+                            if isinstance(it, dict) and isinstance(it.get("string"), str) and it.get("string")
+                            and re.fullmatch(r"[A-Za-z0-9_~.-]{1,64}", str(it.get("name") or ""))
+                            and ".." not in str(it.get("name"))]
         self.restored_paused = bool(data.get("paused"))
         # удалённые В ЭТОМ запуске (до чтения копии) — их не возвращаем; список удалённых из самой копии
         # тут не учитываем: в старой копии аккаунт мог быть и в удалённых, и уже возвращённым
@@ -474,8 +528,15 @@ class SessionBackup:
                 self.flags.setdefault(k, v)        # изменённое уже в этом запуске (например /mute) не затираем
             if mine_muted:
                 self.flags["muted"] = sorted(mine_muted | set(data["flags"].get("muted") or []))
-        if self._set_admins and data.get("admins"):
-            self._set_admins(set(int(a) for a in data["admins"]))
+        if self._set_admins and isinstance(data.get("admins"), list):
+            ids = set()
+            for a in data["admins"]:
+                try:
+                    ids.add(int(a))
+                except (TypeError, ValueError):
+                    pass
+            if ids:
+                self._set_admins(ids)
         if self._history_import and data.get("sent"):
             try:
                 n = await self._history_import(data["sent"])
@@ -501,7 +562,15 @@ class SessionBackup:
         restored = 0
         self.backup_names = {it.get("name") for it in data.get("sessions", [])}
         self._prev_items = {it["name"]: it for it in data.get("sessions", []) if it.get("name")}
-        local_strings = {session_file_to_string(r.path) for r in self.storage.list_sessions()}
+        local_strings = set()
+        for r in self.storage.list_sessions():
+            ls = None
+            for _try in range(4):          # файл может быть занят SQLite — перечитываем, а не пропускаем аккаунт
+                ls = await asyncio.to_thread(session_file_to_string, r.path)
+                if ls:
+                    break
+                await asyncio.sleep(0.5)
+            local_strings.add(ls)
         for it in data.get("sessions", []):
             name = it["name"]
             if it.get("string") in buried:
