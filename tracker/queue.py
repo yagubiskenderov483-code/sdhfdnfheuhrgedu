@@ -214,7 +214,8 @@ class ListingPipeline:
 
     @staticmethod
     def _is_expensive(l) -> bool:
-        value = getattr(l, "floor_stars", None) or getattr(l, "stars_price", None) or 0
+        # дорогой = дорогая коллекция ИЛИ сам лот дорогой (50k⭐ в коллекции с флором 1.5k — тоже дорогой)
+        value = max(getattr(l, "floor_stars", None) or 0, getattr(l, "stars_price", None) or 0)
         return bool(settings.priority_floor and value >= settings.priority_floor)
 
     async def _enqueue(self, ev: ListingEvent) -> None:
@@ -376,12 +377,13 @@ class ListingPipeline:
         n = settings.max_same_collection_streak
         if n <= 0:
             return None
-        value = l.floor_stars or l.stars_price or 0
-        if settings.priority_floor and value >= settings.priority_floor:
+        if self._is_expensive(l):
             return None     # дорогие лоты никогда не режем за «та же коллекция подряд»
         if l.gift_id in self._sending_gift_ids:
             return "same collection is being sent right now"
-        if self._last_sent_gift_id == l.gift_id and self._streak >= n:
+        # «подряд» — только пока прошлый пост свежий: через 5 минут та же коллекция снова можно
+        if (self._last_sent_gift_id == l.gift_id and self._streak >= n
+                and self.last_sent_at and time.time() - self.last_sent_at < 300):
             return f"same collection {n}x in a row"
         return None
 

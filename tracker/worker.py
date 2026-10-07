@@ -309,6 +309,9 @@ class SessionWorker:
             self.status = WorkerStatus.ERROR
             self.reason = f"connection{' (proxy ' + mask_proxy(self.proxy) + ')' if self.proxy else ''}: {type(e).__name__}"
             raise WorkerUnavailable(self.reason) from e
+        except errors.TimedOutError as e:
+            # «-503 Timeout» — Telegram не успел ответить; аккаунт в порядке, повторит другой аккаунт сразу
+            raise WorkerUnavailable("telegram timeout") from e
         except errors.ServerError as e:
             # «Telegram is having internal issues» (500, RpcMcgetFail и т.п.) — сбой на стороне Telegram,
             # аккаунт в порядке: запрос повторит другой аккаунт

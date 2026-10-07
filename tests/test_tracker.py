@@ -342,16 +342,21 @@ async def test_11_filters_and_repeats():
     await e.poll()
     assert e.pipe.stats["filtered_price"] == 1 and len(e.sender.sent) == 1
     settings.max_same_collection_streak = 1
+    pf, settings.priority_floor = settings.priority_floor, 100000
     e.market.list_new(e.market.item(9000))
     await e.poll()
     assert len(e.sender.sent) == 1, "та же коллекция подряд не отправляется"
+    settings.priority_floor = pf
+    e.market.list_new(e.market.item(60000))          # но дорогой ЛОТ (не только коллекция) не режем
+    await e.poll()
+    assert len(e.sender.sent) == 2, "дорогой лот той же коллекции всё равно отправляется"
     settings.max_same_collection_streak = 0
     settings.unique_sellers = True
     a = e.market.item(9000, seller=424242)
     b = e.market.item(9000, seller=424242)
     e.market.list_new(a); e.market.list_new(b)
     await e.poll()
-    assert len(e.sender.sent) == 2, (e.pipe.stats, len(e.sender.sent))
+    assert len(e.sender.sent) == 3, (e.pipe.stats, len(e.sender.sent))
     await e.shutdown(); shutil.rmtree(tmp)
     print("✔ TEST 11 MIN_STARS 4999→FILTERED/5000→SENT, одна коллекция подряд и повтор продавца отсеяны")
 
@@ -837,7 +842,7 @@ def test_29_price_routes():
     assert st.route_chat(500) == (-100, 61)
     assert st.route_chat(1000) == (-100, 62) and st.route_chat(4999) == (-100, 63)
     assert st.route_chat(5000) == (-100, 64) and st.route_chat(99999) == (-100, 64)
-    assert st.route_chat(100) == (-100999, None)    # ниже всех диапазонов → общий
+    assert st.route_chat(100) == st.route_chat(st.price_routes[0][0] if st.price_routes else 100)  # ниже всех → нижняя тема
     assert st.route_chat(None) == (-100999, None)
     st.price_routes = []
     assert st.route_chat(7000) == (-100999, None)   # маршрутов нет → общий

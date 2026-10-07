@@ -237,10 +237,13 @@ class Settings:
             for name, chat, thread in self.backdrop_routes:
                 if name.lower() in bl:
                     return chat, thread
-        if stars is not None:
+        if stars is not None and self.price_routes:
             for lo, hi, chat, thread in self.price_routes:
                 if stars >= lo and (hi is None or stars < hi):
                     return chat, thread
+            lo, _hi, chat, thread = min(self.price_routes, key=lambda r: r[0])
+            if stars < lo:
+                return chat, thread        # чуть ниже самой нижней границы (флор просел) — в нижнюю тему
         return self.target_chat_id, None
 
     def public_view(self) -> dict[str, Any]:
