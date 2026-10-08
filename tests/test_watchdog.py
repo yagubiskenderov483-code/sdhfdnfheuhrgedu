@@ -84,3 +84,41 @@ async def startup():
     assert sent and "Бот запущен" in sent[0] and "120/120" in sent[0], sent
     print("STARTUP REPORT OK")
 asyncio.run(startup())
+
+
+async def diagnostics():
+    app = main.App.__new__(main.App)
+    sent = []
+    class B:
+        async def send_message(s, uid, text): sent.append(text)
+        async def get_me(s): return types.SimpleNamespace(id=42)
+        async def get_chat_member(s, chat, uid):
+            if chat == -1002:
+                raise RuntimeError("chat not found")
+            if chat == -1003:
+                return types.SimpleNamespace(status="member")
+            return types.SimpleNamespace(status="administrator", can_manage_topics=False,
+                                         can_invite_users=True, can_restrict_members=True)
+    app.bot = B()
+    settings.target_chat_id = -1001
+    settings.price_routes = [(400, 1000, -1001, 3), (1000, None, -1002, 5)]
+    settings.backdrop_routes = [("Black", -1003, 8)]
+    r = await app._chat_rights_report()
+    txt = "\n".join(r)
+    assert "-1002" in txt and "не видит" in txt and "-1003" in txt and "не админ" in txt and "темами" in txt, r
+    # лоты находятся, но не отправляются → алерт с причинами
+    app._alerts, app._started_at, app.booting = {}, time.time() - 4000, False
+    app.coordinator = types.SimpleNamespace(paused=False, mode="LIVE")
+    app.pipeline = types.SimpleNamespace(last_new_at=time.time() - 10, last_sent_at=time.time() - 2400)
+    async def why(h): return "ПРИЧИНЫ"
+    app.why_report = why
+    settings.admin_ids = {1}
+    await app._watchdog_sent(); await app._watchdog_sent()
+    hits = [t for t in sent if "ни один не отправлен" in t]
+    assert len(hits) == 1 and "ПРИЧИНЫ" in hits[0], sent
+    app.pipeline.last_sent_at = time.time()
+    sent.clear(); app._alerts.clear()
+    await app._watchdog_sent()
+    assert not sent
+    print("DIAGNOSTICS OK")
+asyncio.run(diagnostics())
