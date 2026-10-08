@@ -189,6 +189,7 @@ HELP = (
     "<b>🎁 Gift Tracker · панель админа</b>\n\n"
     "<b>Состояние</b>\n"
     "/status — трекер, скорость, задержки\n"
+    "/why — почему нет постов (что нашлось и на чём отсеялось)\n"
     "/stats — статистика лотов · /last — последние лоты и почему не ушли\n"
     "/top — самые активные коллекции за сутки · /find имя — всё о коллекции\n"
     "/mute имя · /unmute имя — выключить / включить лоты коллекции\n"
@@ -517,7 +518,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -833,6 +834,24 @@ def build_routers(app: "App") -> list[Router]:
         await app.backup.save()
         await m.answer(f"{'✅' if ok else '⚠️'} {html.escape(name)}: {html.escape(mask_proxy(proxy))}"
                        + ("" if ok else f"\nНе подключился: {html.escape(w.reason or '')}"))
+
+    @admin.message(Command("why"))
+    async def cmd_why(m: Message, command: CommandObject) -> None:
+        try:
+            hours = min(48.0, max(0.25, float((command.args or "1").replace(",", "."))))
+        except ValueError:
+            hours = 1.0
+        try:
+            text = await app.why_report(hours)
+        except Exception as e:
+            text = f"Не удалось собрать отчёт: {html.escape(str(e)[:200])}"
+        try:
+            rights = await app._chat_rights_report()
+        except Exception:
+            rights = []
+        if rights:
+            text += "\n\n<b>Права бота в группе:</b>\n" + "\n".join(rights)
+        await m.answer(text)
 
     @admin.message(Command("top"))
     async def cmd_top(m: Message) -> None:

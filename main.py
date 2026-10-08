@@ -60,6 +60,22 @@ async def _html_fallback(make_request, bot, method):
         return await make_request(bot, method)
 
 
+_WHY_RU = (
+    ("no Russian bio / phone / whitelist", "продавец не русский (нет русского био/телефона) — RUSSIAN_ONLY"),
+    ("profile text is in a foreign language", "профиль продавца на другом языке — RUSSIAN_ONLY"),
+    ("visible phone prefix does not match", "телефон продавца не той страны"),
+    ("seller profile unavailable", "профиль продавца не прочитался (аккаунты заняты)"),
+    ("seller in blacklist", "продавец в чёрном списке"),
+    ("same collection", "та же коллекция подряд"),
+    ("this gift was already sent", "этот NFT уже отправляли"),
+    ("stale", "устарел, пока проверялся"),
+    ("TON-only listing", "лот только за TON (ALLOW_TON_ONLY=false)"),
+    ("messages:", "у продавца платные сообщения / только Premium"),
+    ("level N >", "уровень продавца выше MAX_SELLER_LEVEL"),
+    ("N NFT >", "у продавца больше NFT, чем MAX_SELLER_NFTS"),
+)
+
+
 class App:
     def __init__(self) -> None:
         self.db = Database(settings.path(settings.database_path))
@@ -339,6 +355,7 @@ class App:
             try:
                 await self._save_speeds()
                 await self._watchdog()
+                await self._watchdog_sent()
                 await self._daily_report()
             except Exception as e:
                 log.debug("watchdog failed: %s", e)
@@ -423,6 +440,13 @@ class App:
                      f"⏸ Парсер выключен (/on)" if self.coordinator.paused else "🟢 Парсер работает"]
             if getattr(self, "users_closed", False):
                 lines.append("🔒 Для пользователей закрыто (/open)")
+            try:
+                rights = await self._chat_rights_report()
+            except Exception as e:
+                rights = [f"⚠️ Не удалось проверить права бота: {html.escape(str(e)[:120])}"]
+            if rights:
+                lines[0] = "⚠️ <b>Бот запущен, но есть проблемы</b>"
+                lines += [""] + rights
             for admin in (settings.admin_ids or all_admins()):
                 try:
                     await self.bot.send_message(admin, "\n".join(lines))
@@ -430,6 +454,83 @@ class App:
                     pass
         except Exception as e:
             log.debug("startup report failed: %s", e)
+
+    async def why_report(self, hours: float = 1.0) -> str:
+        """«Почему нет постов»: что трекер нашёл за последние часы и на чём лоты отсеялись."""
+        import re as _re
+        since = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - hours * 3600))
+        rows = await self.db.reasons_since(since)
+        by_status: dict[str, int] = {}
+        reasons: dict[tuple[str, str], int] = {}
+        last_fail = ""
+        for st, reason, n in rows:
+            by_status[st] = by_status.get(st, 0) + n
+            key = _re.sub(r"\d[\d.,]*", "N", reason or "—")
+            for en, ru in _WHY_RU:
+                if key.startswith(en):
+                    key = ru
+                    break
+            key = key[:90]
+            reasons[(st, key)] = reasons.get((st, key), 0) + n
+            if st == "SEND_FAILED" and reason:
+                last_fail = reason
+        found = sum(by_status.values())
+        names = {"SENT": "✅ отправлено", "FILTERED_PRICE": "💰 отсеяно по цене",
+                 "FILTERED_SELLER": "👤 отсеяно по продавцу", "FILTERED_DUPLICATE": "🔁 повторы",
+                 "SEND_FAILED": "❌ не отправилось", "ERROR": "⌛ устарели/ошибка", "NEW": "⏳ в очереди",
+                 "SENDING": "📤 отправляются", "TEST_ONLY": "🧪 тест"}
+        span = f"{hours:g} ч"
+        lines = [f"🔎 <b>Почему нет постов — за {span}</b>", ""]
+        c = self.sessions.counts()
+        if self.coordinator.paused:
+            lines.append("⏸ <b>Парсер выключен</b> — включить: /on")
+        if not self.sessions.workers:
+            lines.append("🚨 <b>Нет ни одного аккаунта</b> — добавьте: /add_session")
+        elif not self.sessions.usable():
+            lines.append(f"🚨 <b>Нет рабочих аккаунтов</b> ({len(self.sessions.workers)} всего) — /sessions")
+        lines.append(f"👥 Аккаунтов работает: {c.get('ACTIVE', 0)} из {len(self.sessions.workers)}")
+        live, total = self.coordinator.sync_progress()
+        lines.append(f"📚 Коллекций в работе: {live}/{total}")
+        lines.append(f"🎁 Найдено новых лотов: <b>{found}</b>")
+        for st, n in sorted(by_status.items(), key=lambda x: -x[1]):
+            lines.append(f"  {names.get(st, st)}: {n}")
+        top = sorted(((n, st, r) for (st, r), n in reasons.items() if st not in ("SENT", "TEST_ONLY")), reverse=True)[:6]
+        if top:
+            lines += ["", "<b>Главные причины отсева:</b>"]
+            lines += [f"  {n} × {html.escape(r)}" for n, st, r in top]
+        if last_fail:
+            lines += ["", f"❌ Последняя ошибка отправки: <code>{html.escape(last_fail[:300])}</code>",
+                      "Проверьте, что бот — админ группы с правом писать и управлять темами (/test channel)."]
+        if found == 0 and self.sessions.usable() and not self.coordinator.paused:
+            lines += ["", "Новых лотов не найдено совсем — рынок тихий или коллекции ещё синхронизируются."]
+        return "\n".join(lines)
+
+    async def _chat_rights_report(self) -> list[str]:
+        """Проверка прав бота во всех группах, куда идут посты (частая причина «не кидает лоты»)."""
+        chats = {settings.target_chat_id} | {c for _, _, c, _ in settings.price_routes} | \
+                {c for _, c, _ in settings.backdrop_routes}
+        out = []
+        me = await self.bot.get_me()
+        for chat in sorted(c for c in chats if c):
+            try:
+                m = await self.bot.get_chat_member(chat, me.id)
+            except Exception as e:
+                out.append(f"❌ Группа <code>{chat}</code>: бот не видит её ({html.escape(str(e)[:120])}) — добавьте бота")
+                continue
+            st = getattr(m, "status", "")
+            if st not in ("administrator", "creator"):
+                out.append(f"❌ Группа <code>{chat}</code>: бот не админ (статус {html.escape(str(st))}) — выдайте права")
+            elif st == "administrator":
+                miss = []
+                if getattr(m, "can_manage_topics", None) is False:
+                    miss.append("управление темами")
+                if getattr(m, "can_invite_users", None) is False:
+                    miss.append("приглашения")
+                if getattr(m, "can_restrict_members", None) is False:
+                    miss.append("бан")
+                if miss:
+                    out.append(f"⚠️ Группа <code>{chat}</code>: нет прав — {', '.join(miss)}")
+        return out
 
     async def _alert(self, kind: str, text: str, every: float = 3600) -> None:
         """Сообщение админам, но одно и то же не чаще раза в `every` секунд."""
@@ -478,8 +579,27 @@ class App:
         last_new = self.pipeline.last_new_at
         quiet = time.time() - (last_new or self._started_at)
         if lasting("no_lots", usable > 0 and quiet > 1800, 0):
-            await self._alert("no_lots", f"⚠️ <b>{int(quiet // 60)} минут ни одного нового лота.</b>\n"
-                                         "Обычно лоты идут каждые несколько минут — проверьте /status", 3600)
+            try:
+                why = "\n\n" + await self.why_report(1)
+            except Exception:
+                why = ""
+            await self._alert("no_lots", f"⚠️ <b>{int(quiet // 60)} минут ни одного нового лота.</b>"
+                                         + (why or "\nОбычно лоты идут каждые несколько минут — проверьте /status"), 3600)
+
+    async def _watchdog_sent(self) -> None:
+        """Лоты находятся, но в группу ничего не уходит 30+ минут — сразу говорим админам почему."""
+        if self.booting or self.coordinator.paused or self.coordinator.mode != "LIVE":
+            return
+        last_new = self.pipeline.last_new_at
+        last_sent = getattr(self.pipeline, "last_sent_at", None) or self._started_at
+        if not last_new or last_new <= last_sent or time.time() - last_sent < 1800:
+            return
+        try:
+            why = await self.why_report(1)
+        except Exception as e:
+            why = f"(не удалось собрать причины: {html.escape(str(e)[:100])})"
+        await self._alert("no_sent", f"⚠️ <b>Лоты находятся, но за {int((time.time() - last_sent) // 60)} мин "
+                                     f"ни один не отправлен.</b>\n\n" + why, 3600)
 
     async def _daily_report(self) -> None:
         """Итоги за сутки админам — раз в день в 10:00 (TIMEZONE)."""
@@ -531,6 +651,7 @@ class App:
             BotCommand(command="add_session", description="Добавить аккаунт"),
             BotCommand(command="sessions", description="Мои аккаунты / удалить"),
             BotCommand(command="status", description="Состояние трекера"),
+            BotCommand(command="why", description="Почему нет постов"),
             BotCommand(command="stats", description="Статистика"),
             BotCommand(command="last", description="Последние лоты и почему не отправлены"),
             BotCommand(command="collections", description="Какие коллекции отслеживаются"),

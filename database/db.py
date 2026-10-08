@@ -398,6 +398,14 @@ class Database:
             (gift_id, since_iso))
         return {r[0]: r[1] for r in await cur.fetchall()}
 
+    async def reasons_since(self, since_iso: str) -> list[tuple[str, str, int]]:
+        """(статус, причина, сколько) по лотам, найденным с since — для «почему нет постов»."""
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT status, COALESCE(reason, ''), COUNT(*) FROM listings WHERE first_seen >= ? "
+            "GROUP BY status, reason", (since_iso,))
+        return [(r[0], r[1], r[2]) for r in await cur.fetchall()]
+
     async def counts_since(self, since_iso: str) -> dict[str, int]:
         assert self.conn
         cur = await self.conn.execute(
