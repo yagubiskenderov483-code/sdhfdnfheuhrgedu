@@ -442,6 +442,16 @@ class App:
                      f"⏸ Парсер выключен (/on)" if self.coordinator.paused else "🟢 Парсер работает"]
             if getattr(self, "users_closed", False):
                 lines.append("🔒 Для пользователей закрыто (/open)")
+            strict = []
+            if settings.russian_only and settings.unknown_seller_policy == "block":
+                strict.append("только русские продавцы")
+            if settings.require_free_messages:
+                strict.append("только с бесплатными сообщениями")
+            if settings.unique_sellers:
+                strict.append("продавец один раз" + (f" за {settings.seller_repeat_hours:g} ч"
+                                                      if settings.seller_repeat_hours else " навсегда"))
+            if strict:
+                lines.append("🧹 Фильтры: " + ", ".join(strict) + " · почему отсеяно: /why")
             try:
                 rights = await self._chat_rights_report()
             except Exception as e:
