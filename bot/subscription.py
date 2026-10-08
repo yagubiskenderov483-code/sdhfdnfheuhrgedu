@@ -183,6 +183,8 @@ class Subscriptions:
             for u in self.state["users"].values():
                 if isinstance(u, dict):
                     u.pop("tmp", None)        # копия прочитана — временных записей больше нет
+                    if u.get("unpaid_join") and (self._has_access(u) or u.get("pending")):
+                        u.pop("unpaid_join", None)        # в копии нашлась оплата
             await self.save()
         return len(self.state["users"])
 
@@ -244,6 +246,7 @@ class Subscriptions:
         """Выдать доступ: если человек уже в канале — продлить; иначе — одноразовая ссылка."""
         async with self._lock:
             u = self.user(uid)
+            u.pop("unpaid_join", None)
             st = await self._member_status(uid)
             if st is None:
                 raise RuntimeError("get_chat_member failed")
@@ -419,6 +422,7 @@ class Subscriptions:
                 u["in_chat"] = True
                 if not u.get("until") and not u.get("pending"):
                     u["until"] = time.time()
+                    u["unpaid_join"] = True          # если в копии оплаты не окажется — это вход без подписки
                 await self.save()
             return
         if not await self.kick(uid):
@@ -741,6 +745,15 @@ class Subscriptions:
                     await self.bot.send_message(uid, text)
                 except Exception as e:
                     log.warning("Re-link after renewal during kick failed for %s: %s", uid, e)
+                continue
+            if u.pop("unpaid_join", None):
+                # зашёл без подписки, пока копия не читалась — это не «подписка закончилась»
+                log.warning("User %s joined without subscription (while backup was unread) — kicked", uid)
+                for admin in settings.admin_ids:
+                    try:
+                        await self.bot.send_message(admin, f"🚫 Зашёл без подписки и выкинут: <code>{uid}</code>")
+                    except Exception:
+                        pass
                 continue
             log.info("Subscription ended — user %s removed from channel", uid)
             try:
