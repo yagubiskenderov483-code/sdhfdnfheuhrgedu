@@ -81,10 +81,11 @@ def floor_line(l: Listing) -> str:
     out = f"{_n(l.floor_stars)} ⭐"
     if l.stars_price:
         diff = (l.stars_price - l.floor_stars) / l.floor_stars * 100
-        if abs(diff) < 0.5:
+        pct = int(abs(diff) + 0.5)              # обычное округление (не «банковское»: 2.5 → 3)
+        if pct == 0:
             out += " - по флору"
         else:
-            out += f" - {'+' if diff > 0 else '−'}{abs(diff):.0f}% к флору"
+            out += f" - {'+' if diff > 0 else '−'}{pct}% к флору"
     return out
 
 
@@ -135,6 +136,8 @@ class MessageFormatter:
                            f' · ID <code>{l.seller_id}</code>')
         elif l.seller_type == "address":
             seller_line = "TON-кошелёк"
+        elif l.seller_type in ("channel", "chat") and l.seller_name:
+            seller_line = html.escape(l.seller_name) + " (канал без ссылки)"
         else:
             seller_line = html.escape(l.seller_name or DASH) + (" (скрыт)" if l.seller_name else "")
 
@@ -166,7 +169,7 @@ class MessageFormatter:
         deal_badge = ""
         if l.floor_stars and l.stars_price and l.stars_price < l.floor_stars:
             off = (l.floor_stars - l.stars_price) / l.floor_stars * 100
-            if off >= 5:
+            if int(off + 0.5) >= 5:              # как в строке флора: «−5%» всегда с 🔥
                 deal_badge = "  🔥"          # выгодный лот: ниже флора на 5%+
         return _Safe(
             deal_badge=deal_badge,

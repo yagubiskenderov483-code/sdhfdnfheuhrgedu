@@ -67,11 +67,13 @@ def sub_chat_id() -> int:
 def _fmt_left(until: float) -> str:
     if until == FOREVER:
         return "навсегда"
-    left = int(until - time.time())
+    left = until - time.time()
     if left <= 0:
         return "закончилась"
-    h, m = divmod(left // 60, 60)
-    return f"{h} ч {m} мин" if h else f"{m} мин"
+    mins = math.ceil(left / 60 - 1e-6)        # 24 ч сразу после выдачи — «24 ч», а не «23 ч 59 мин»
+    d, mins = divmod(mins, 1440)
+    h, m = divmod(mins, 60)
+    return " ".join(x for x in (f"{d} дн" if d else "", f"{h} ч" if h else "", f"{m} мин" if m else "") if x)
 
 
 class Subscriptions:
@@ -270,13 +272,15 @@ class Subscriptions:
             await self.save(backup=True)
         if u["pending"] == FOREVER or u.get("until") == FOREVER:
             dur = "навсегда"
-        elif u["pending"]:
-            dur = _fmt_left(time.time() + u["pending"])
         else:
-            dur = _fmt_left(float(u.get("until") or 0))
+            # при входе ожидающее время добавляется к ещё не истёкшему — показываем итог
+            dur = _fmt_left(time.time() + float(u["pending"] or 0)
+                            + max(0.0, float(u.get("until") or 0) - time.time()))
+        starts = ("время пойдёт с момента входа" if u["pending"] and float(u.get("until") or 0) <= time.time()
+                  else "время уже идёт")
         return (f"✅ {reason}\n\n"
                 f"🔗 Ваша одноразовая ссылка для входа:\n{link.invite_link}\n\n"
-                f"Доступ: <b>{dur}</b>, время пойдёт с момента входа.\n"
+                f"Доступ: <b>{dur}</b>, {starts}.\n"
                 "Ссылка работает один раз и удаляется сразу после входа.")
 
     async def _revoke_links(self, uid: int) -> None:
@@ -836,7 +840,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             await q.answer("Telegram не ответил, попробуйте через минуту", show_alert=True)
             return
         if status in ("member", "administrator", "creator", "restricted"):
-            if u and u.get("in_chat"):
+            if u and not subs._has_access(u) and not u.get("pending") and uid not in settings.admin_ids:
+                await q.answer("⌛ Подписка закончилась — продлить можно в «💎 Подписка»", show_alert=True)
+            elif u and u.get("in_chat"):
                 await q.answer(f"✅ Подписка активна, осталось: {_fmt_left(left)}"[:200], show_alert=True)
             else:
                 await q.answer("Вы в канале" + (f", осталось: {_fmt_left(left)}" if left else ""), show_alert=True)
@@ -935,14 +941,18 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 await subs.check_payments()
             except Exception as e:
                 log.warning("Manual payment check failed: %s", e)
-        if subs.state["invoices"].get(code, {}).get("paid"):
-            await q.answer("✅ Оплата пришла, ссылка в чате", show_alert=True)
+        inv = subs.state["invoices"].get(code, {})
+        if inv.get("paid"):
+            await q.answer("✅ Оплата пришла, ссылка в чате" if inv.get("granted") is True
+                           else "✅ Оплата пришла, ссылка придёт в чат в течение пары минут", show_alert=True)
         else:
             await q.answer("Оплата пока не пришла. Если уже оплатили, подождите минуту и нажмите ещё раз.",
                            show_alert=True)
 
     # ---------------- админам: список и ручная выдача
-    @r.message(Command("subs"), F.from_user.func(lambda u: u.id in settings.admin_ids))
+    # те же админы, что видят эти команды в /help (в т.ч. назначенные через /claim, если ADMIN_IDS пуст)
+    _ADM = F.from_user.func(lambda u: u is not None and is_manager(u.id))
+    @r.message(Command("subs"), _ADM)
     async def cmd_subs(m: Message) -> None:
         await subs.load()
         rows = []
@@ -960,7 +970,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                        "Выдать вручную: <code>/grant ID часы</code> или <code>/grant ID навсегда</code>\n"
                        "Забрать: <code>/revoke ID</code>")
 
-    @r.message(Command("grant"), F.from_user.func(lambda u: u.id in settings.admin_ids))
+    @r.message(Command("grant"), _ADM)
     async def cmd_grant(m: Message, command: CommandObject) -> None:
         await subs.load()
         usage = ("Выдать подписку:\n"
@@ -996,8 +1006,8 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
 
     def _resolve_user(arg: str) -> int | None:
         arg = arg.strip()
-        if re.fullmatch(r"-?\d{1,20}", arg, re.ASCII):
-            return int(arg)
+        if re.fullmatch(r"[1-9]\d{0,15}", arg, re.ASCII):
+            return int(arg)                    # ID человека — положительный (-100… это группы/каналы)
         name = arg.lstrip("@").lower()
         for k, u in subs.state["users"].items():
             if (u.get("username") or "").lower() == name:
@@ -1019,9 +1029,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         except ValueError:
             return None
         # inf / nan / 100 лет — не срок (inf ломал запись подписчика навсегда)
-        return v if math.isfinite(v) and 0 < v <= 10 * 365 * 86400 else None
+        return v if math.isfinite(v) and 60 <= v <= 10 * 365 * 86400 else None
 
-    @r.message(Command("revoke"), F.from_user.func(lambda u: u.id in settings.admin_ids))
+    @r.message(Command("revoke"), _ADM)
     async def cmd_revoke(m: Message, command: CommandObject) -> None:
         await subs.load()
         arg = (command.args or "").strip()
@@ -1044,10 +1054,11 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             u.update({"until": 0 if ok else time.time(), "in_chat": not ok, "pending": 0})
             await subs.save(backup=True)
         await subs.flush_backup()
-        await m.answer(f"✅ Доступ {uid} забран")
+        await m.answer(f"✅ Доступ {uid} забран" if ok else
+                       f"⚠️ Доступ {uid} снят, но выгнать из канала сейчас не вышло — бот повторит сам")
 
     # ---------------- всё остальное от не-админов → приветствие
-    @tail.message(F.chat.type == "private", F.from_user.func(lambda u: not is_manager(u.id)))
+    @tail.message(F.chat.type == "private", F.from_user.func(lambda u: u is not None and not is_manager(u.id)))
     async def any_msg(m: Message) -> None:
         await welcome(m)
 

@@ -450,6 +450,9 @@ def build_routers(app: "App") -> list[Router]:
     async def cb_untake(q: CallbackQuery) -> None:
         """«Отменить»: тот, кто занял лот, возвращает его в канал. Остальным — «Данный лот занят»."""
         msg = q.message
+        if not isinstance(msg, Message):         # сообщение слишком старое — Telegram его не отдаёт
+            await q.answer()
+            return
         try:
             owner = int(q.data.split(":", 1)[1] or 0)
         except ValueError:
@@ -652,7 +655,7 @@ def build_routers(app: "App") -> list[Router]:
     async def _remove_session(uid: int, name: str) -> str:
         owners = {r.name: r.owner_id for r in app.storage.list_sessions()}
         if name not in owners and name not in app.sessions.workers:
-            return f"❌ Не найдена: {html.escape(name)}"
+            return f"❌ Не найдена: {html.escape(name[:64])}"
         if not can_manage(uid, owners.get(name)):
             return "⛔ Удалять можно только свои аккаунты (или если вы админ)."
         app.backup.bury(name, "удалён вручную")
@@ -664,6 +667,9 @@ def build_routers(app: "App") -> list[Router]:
     @users.callback_query(F.data.startswith("rmsess:"))
     async def cb_rmsess(q: CallbackQuery) -> None:
         name = q.data.split(":", 1)[1]
+        if not isinstance(q.message, Message):
+            await q.answer()
+            return
         kb = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=f"✅ Да, удалить {name}", callback_data=f"rmsess_ok:{name}"),
             InlineKeyboardButton(text="✖ Отмена", callback_data="rmsess_no")]])
