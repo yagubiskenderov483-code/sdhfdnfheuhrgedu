@@ -321,7 +321,14 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
 
 
 def _from_env() -> Settings:
+    # секреты можно держать в переменных окружения хостинга, а в .env оставить пустыми:
+    # пустое значение в .env не затирает переменную окружения (токен не лежит в репозитории)
+    _secrets = {k: os.environ.get(k) for k in ("BOT_TOKEN", "API_HASH", "SESSION_BACKUP_KEY", "OLD_BOT_TOKEN",
+                                               "TONCENTER_API_KEY")}
     load_dotenv(ENV_PATH, override=True)
+    for k, v in _secrets.items():
+        if v and not (os.environ.get(k) or "").strip():
+            os.environ[k] = v
     e = os.environ.get
     return Settings(
         api_id=_int(e("API_ID"), 0),
