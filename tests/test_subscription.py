@@ -152,7 +152,7 @@ def test_failover():
             return SellerFull(level=2, premium=False, username="x", paid_message_stars=None,
                               contact_require_premium=None, phone=None, about="Привет"), "alive"
     p = ListingPipeline.__new__(ListingPipeline)
-    p.sessions = S(); p._seller_cache = {}; p.stats = {}
+    p.sessions = S(); p._seller_cache = {}; p._nft_cache = {}; p.stats = {}
     base = {x.name: None for x in dataclasses.fields(Listing)
             if x.default is dataclasses.MISSING and x.default_factory is dataclasses.MISSING}
     l = Listing(**base); l.seller_type = "user"; l.seller_id = 5; l.gift_id = 1; l.session_source = "dead"
