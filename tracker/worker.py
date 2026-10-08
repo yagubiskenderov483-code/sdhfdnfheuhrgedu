@@ -24,6 +24,13 @@ from utils.logger import get_logger
 log = get_logger("worker")
 
 
+
+def _foreign_cancel() -> bool:
+    """CancelledError пришла не потому, что отменили НАШУ задачу (а, например, Telethon отменил запрос)."""
+    t = asyncio.current_task()
+    cancelling = getattr(t, "cancelling", None)        # Python 3.11+; на старых — ведём себя как раньше
+    return t is not None and cancelling is not None and not cancelling()
+
 class WorkerStatus(str, Enum):
     CONNECTING = "CONNECTING"
     ACTIVE = "ACTIVE"
@@ -111,16 +118,28 @@ class SessionWorker:
     async def connect(self) -> bool:
         self.status = WorkerStatus.CONNECTING
         self.reason = None
+        if self.client is None:
+            self.client = self._make_client()
+        cl = self.client
         try:
-            if self.client is None:
-                self.client = self._make_client()
-            if not self.client.is_connected():
-                await self.client.connect()
+            return await self._connect(cl)
+        except asyncio.CancelledError:
+            if not _foreign_cancel():
+                raise
+            # клиент отключили во время подключения (удаление аккаунта / смена прокси) — это не отмена задачи
+            if cl is self.client:
+                self.status, self.reason = WorkerStatus.ERROR, "disconnected during connect"
+            return False
+
+    async def _connect(self, cl) -> bool:
+        try:
+            if not cl.is_connected():
+                await cl.connect()
             # ВАЖНО: не client.is_user_authorized() — он считает «не авторизован» ЛЮБУЮ ошибку Telegram,
             # включая FloodWait и сбой сервера. Из-за этого живые аккаунты в FloodWait при переподключении
             # помечались «снесёнными» и удалялись. Проверяем сами и различаем причины.
             try:
-                users = await self.client(functions.users.GetUsersRequest([types.InputUserSelf()]))
+                users = await cl(functions.users.GetUsersRequest([types.InputUserSelf()]))
             except errors.FloodError as e:
                 seconds = int(getattr(e, "seconds", 0) or 30)
                 self.flood_until = time.monotonic() + seconds + 1
@@ -144,6 +163,8 @@ class SessionWorker:
             await self._safe_disconnect()
             return False
         except Exception as e:  # сеть, прокси и т.п.
+            if cl is not self.client:
+                return False             # пока подключались, клиент заменили (/proxy) — новый уже работает
             self.status = WorkerStatus.ERROR
             self.reason = f"{type(e).__name__}: {e}"
             log.warning("Session %s connect failed: %s", self.name, self.reason)
@@ -171,6 +192,8 @@ class SessionWorker:
                     await asyncio.sleep(delay)
                     if not self._running:
                         break
+                    if self.status != WorkerStatus.ERROR:
+                        continue         # пока ждали, аккаунт уже подключили (например, /proxy)
                     await self.connect()
                     continue
                 if self.status in (WorkerStatus.AUTH_ERROR, WorkerStatus.STOPPED):
@@ -187,6 +210,8 @@ class SessionWorker:
         await self._safe_disconnect()
         self.client = None
         ok = await self.connect()
+        if self.status != WorkerStatus.AUTH_ERROR:
+            self.start_health_loop()     # цикл мог завершиться — без него аккаунт не переподключится сам
         log.info("Session %s now via %s: %s", self.name, mask_proxy(proxy), "OK" if ok else self.reason)
         return ok
 
@@ -277,7 +302,14 @@ class SessionWorker:
             if self.status == WorkerStatus.FLOOD:
                 self.status = WorkerStatus.ACTIVE
             t0 = time.monotonic()
-            result = await fn(self.client)
+            try:
+                result = await fn(self.client)
+            except asyncio.CancelledError:
+                if not _foreign_cancel():
+                    raise
+                # Telethon отменяет запросы, когда клиент отключают (удаление аккаунта, /proxy) — это не
+                # отмена нашей задачи: иначе молча умирали бы циклы трекера и обработчики лотов
+                raise WorkerUnavailable("client disconnected (removed/proxy change)") from None
             ms = (time.monotonic() - t0) * 1000
             self.ping_ms = ms if self.ping_ms is None else self.ping_ms * 0.9 + ms * 0.1
             self.ok_streak += 1

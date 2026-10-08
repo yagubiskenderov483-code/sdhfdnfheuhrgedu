@@ -164,6 +164,14 @@ class Database:
                     (cutoff, f"-{market_days} days"))
                 n += cur.rowcount or 0
             await self.conn.execute("DELETE FROM kv WHERE value IS NULL")
+            try:
+                # «занятые» лоты (полный текст поста для «Отменить») — неделю, потом место не тратим
+                cur = await self.conn.execute(
+                    "DELETE FROM kv WHERE key LIKE 'taken:%' AND CAST(json_extract(value, '$.ts') AS INTEGER) < ?",
+                    (int(time.time()) - 7 * 86400,))
+                n += cur.rowcount or 0
+            except Exception:
+                pass                       # SQLite без JSON1 — не критично
             await self.conn.commit()
         return n
 

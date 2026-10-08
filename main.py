@@ -463,9 +463,12 @@ class App:
             self._bad_since.setdefault(kind, now)
             return now - self._bad_since[kind] >= secs
 
-        if lasting("no_accounts", total > 0 and usable == 0, 180):
-            await self._alert("no_accounts", f"🚨 <b>Нет рабочих аккаунтов</b> ({total} всего: FloodWait/ошибки).\n"
-                                             "Лоты сейчас не ищутся. Подробнее: /sessions", 1800)
+        if lasting("no_accounts", usable == 0 and not getattr(self, "booting", False), 180):
+            text = (f"🚨 <b>Нет рабочих аккаунтов</b> ({total} всего: FloodWait/ошибки).\n"
+                    "Лоты сейчас не ищутся. Подробнее: /sessions") if total else (
+                    "🚨 <b>В трекере не осталось ни одного аккаунта</b> — лоты не ищутся.\n"
+                    "Добавьте аккаунт: /add_session")
+            await self._alert("no_accounts", text, 1800)
         elif lasting("few_accounts", total >= 4 and usable < total * 0.4, 600):
             hint = ("" if os.getenv("USE_PROXIES", "0").strip().lower() in ("1", "true", "yes", "on") else
                     "\nСовет: все аккаунты на одном IP — подключите прокси (USE_PROXIES=1 и /proxies), "
@@ -628,18 +631,23 @@ class App:
         except Exception:
             pass
         await self.coordinator.stop()
-        try:
-            if self.storage.list_sessions():
-                await asyncio.wait_for(self.backup.save(), timeout=15)
-                await asyncio.wait_for(self.backup.save_market(), timeout=40)
-        except Exception:
-            pass
-        # дать очереди дообработать уже найденные листинги (до 15 сек)
-        try:
-            await asyncio.wait_for(self.pipeline.queue.join(), timeout=15)
-        except asyncio.TimeoutError:
-            log.warning("Queue not drained; unfinished listings will be resumed on next start")
+        # сначала дообработать уже найденные лоты (до 10 сек), чтобы они попали и в канал, и в копию
+        if not self.coordinator.paused:
+            try:
+                await asyncio.wait_for(self.pipeline.queue.join(), timeout=10)
+            except asyncio.TimeoutError:
+                log.warning("Queue not drained; unfinished listings will be resumed on next start")
         await self.pipeline.stop()
+        for t in self._tasks:
+            if t.get_name() == "backup-loop":
+                t.cancel()             # не мешает финальному сохранению (общий замок сохранения)
+        if self.storage.list_sessions():
+            # каждый шаг отдельно: сбой одного не отменяет другой
+            for what, coro, to in (("backup", self.backup.save(), 20), ("market", self.backup.save_market(), 25)):
+                try:
+                    await asyncio.wait_for(coro, timeout=to)
+                except Exception as e:
+                    log.warning("Final %s save failed: %r", what, e)
         for t in self._tasks:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)

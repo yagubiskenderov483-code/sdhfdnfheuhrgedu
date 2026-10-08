@@ -818,11 +818,15 @@ def build_routers(app: "App") -> list[Router]:
         if raw.strip().lower() not in ("off", "none", "-", "нет") and not proxy:
             await m.answer("Не распознал прокси. Формат: socks5://user:pass@host:port")
             return
+        w = app.sessions.workers.get(name)
+        if w is None:
+            await m.answer(f"❌ Аккаунт {html.escape(name[:64])} уже удалён")
+            return
         app.storage.set_proxy(name, proxy)
-        ok = await app.sessions.workers[name].change_proxy(proxy)
+        ok = await w.change_proxy(proxy)
         await app.backup.save()
         await m.answer(f"{'✅' if ok else '⚠️'} {html.escape(name)}: {html.escape(mask_proxy(proxy))}"
-                       + ("" if ok else f"\nНе подключился: {html.escape(app.sessions.workers[name].reason or '')}"))
+                       + ("" if ok else f"\nНе подключился: {html.escape(w.reason or '')}"))
 
     @admin.message(Command("top"))
     async def cmd_top(m: Message) -> None:
