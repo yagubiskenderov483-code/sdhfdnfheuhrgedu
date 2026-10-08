@@ -68,6 +68,8 @@ _WHY_RU = (
     ("seller in blacklist", "продавец в чёрном списке"),
     ("same collection", "та же коллекция подряд"),
     ("this gift was already sent", "этот NFT уже отправляли"),
+    ("this seller was already sent", "этот продавец уже был (UNIQUE_SELLERS, SELLER_REPEAT_HOURS)"),
+    ("this seller is being sent", "этот продавец отправляется прямо сейчас"),
     ("stale", "устарел, пока проверялся"),
     ("TON-only listing", "лот только за TON (ALLOW_TON_ONLY=false)"),
     ("messages:", "у продавца платные сообщения / только Premium"),
