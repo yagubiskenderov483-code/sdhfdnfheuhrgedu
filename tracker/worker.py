@@ -363,3 +363,23 @@ class SessionWorker:
             raise
         finally:
             self.busy = False
+
+
+async def supervise(name: str, factory, stop_event: asyncio.Event | None = None, delay: float = 5.0) -> None:
+    """Держит фоновую петлю живой: если она упала с ошибкой или её «чужой» отменой сбросило
+    (Telethon отменяет запросы при отключении аккаунта), запускаем заново. Своя отмена — выходим."""
+    while True:
+        try:
+            await factory()
+            if stop_event is not None and stop_event.is_set():
+                return
+            log.error("Loop %s exited unexpectedly — restarting in %.0fs", name, delay)
+        except asyncio.CancelledError:
+            if not _foreign_cancel() or (stop_event is not None and stop_event.is_set()):
+                raise
+            log.error("Loop %s was cancelled from outside — restarting in %.0fs", name, delay)
+        except Exception:
+            log.exception("Loop %s crashed — restarting in %.0fs", name, delay)
+        if stop_event is not None and stop_event.is_set():
+            return
+        await asyncio.sleep(delay)

@@ -861,3 +861,34 @@ def test_new_collection_and_bad_item():
     print("NEW COLLECTION + BAD ITEM OK")
 
 test_new_collection_and_bad_item()
+
+
+def test_supervisor_restarts_loops():
+    import asyncio
+    import tracker.worker as W
+    async def run():
+        runs = []
+        stop = asyncio.Event()
+        async def loop():
+            runs.append(1)
+            if len(runs) == 1:
+                raise RuntimeError("boom")              # упала с ошибкой → перезапуск
+            if len(runs) == 2:
+                f = asyncio.get_running_loop().create_future()
+                asyncio.get_running_loop().call_soon(f.cancel)
+                await f                                 # «чужая» отмена (как от Telethon) → перезапуск
+            await asyncio.get_running_loop().create_future()   # дальше просто работает
+        t = asyncio.create_task(W.supervise("t", loop, stop, delay=0))
+        for _ in range(50):
+            await asyncio.sleep(0)
+        assert len(runs) == 3, runs
+        stop.set(); t.cancel()                          # своя отмена → выходит
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+        assert t.done()
+    asyncio.run(run())
+    print("SUPERVISOR OK")
+
+test_supervisor_restarts_loops()

@@ -250,7 +250,9 @@ class ListingPipeline:
     # ------------------------------------------------------------------ workers
     def start(self) -> None:
         for i in range(settings.processor_workers):
-            self._workers.append(asyncio.create_task(self._worker_loop(i), name=f"processor-{i}"))
+            from tracker.worker import supervise
+            self._workers.append(asyncio.create_task(
+                supervise(f"processor-{i}", (lambda i=i: self._worker_loop(i)), delay=1.0), name=f"processor-{i}"))
 
     async def stop(self) -> None:
         for t in list(self._workers) + list(self._retries):
