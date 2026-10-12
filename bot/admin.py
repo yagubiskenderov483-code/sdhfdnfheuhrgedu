@@ -190,6 +190,7 @@ HELP = (
     "<b>Состояние</b>\n"
     "/status — трекер, скорость, задержки\n"
     "/why — почему нет постов (что нашлось и на чём отсеялось)\n"
+    "/lot ссылка — почему конкретный лот (t.me/nft/…) не пришёл\n"
     "/stats — статистика лотов · /last — последние лоты и почему не ушли\n"
     "/top — самые активные коллекции за сутки · /find имя — всё о коллекции\n"
     "/mute имя · /unmute имя — выключить / включить лоты коллекции\n"
@@ -520,7 +521,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -836,6 +837,32 @@ def build_routers(app: "App") -> list[Router]:
         await app.backup.save()
         await m.answer(f"{'✅' if ok else '⚠️'} {html.escape(name)}: {html.escape(mask_proxy(proxy))}"
                        + ("" if ok else f"\nНе подключился: {html.escape(w.reason or '')}"))
+
+    @admin.message(Command("lot"))
+    async def cmd_lot(m: Message, command: CommandObject) -> None:
+        arg = (command.args or "").strip()
+        mt = re.search(r"(?:nft/)?([A-Za-z0-9]+-\d+)\s*$", arg)
+        if not mt:
+            await m.answer("Использование: <code>/lot https://t.me/nft/PlushPepe-123</code>")
+            return
+        slug = mt.group(1)
+        rows = await app.db.listings_by_slug(slug)
+        if not rows:
+            await m.answer(f"Лот <code>{html.escape(slug)}</code> трекер не видел как новый.\n"
+                           "Возможно: коллекция пропущена по флору (/find), лот выставлен до синхронизации "
+                           "или это смена цены уже известного лота.")
+            return
+        names = {"SENT": "✅ отправлен", "FILTERED_PRICE": "💰 отсеян по цене", "FILTERED_SELLER": "👤 отсеян по продавцу",
+                 "FILTERED_DUPLICATE": "🔁 повтор", "SEND_FAILED": "❌ не отправился", "ERROR": "⌛ устарел/ошибка",
+                 "NEW": "⏳ в очереди", "SENDING": "📤 отправляется", "TEST_ONLY": "🧪 тест"}
+        out = [f"🔎 <b>{html.escape(slug)}</b>"]
+        for r in rows:
+            price = f"{r['stars_price']}⭐" if r.get("stars_price") else (f"{r['ton_price']:g} TON" if r.get("ton_price") else "—")
+            who = f"@{r['seller_username']}" if r.get("seller_username") else (r.get("seller_name") or "—")
+            out.append(f"\n{(r.get('first_seen') or '')[:19].replace('T', ' ')} UTC · {html.escape(price)} · "
+                       f"{html.escape(str(who))}\n{names.get(r['status'], html.escape(str(r['status'])))}"
+                       + (f": {html.escape(str(r.get('reason') or '')[:200])}" if r.get("reason") else ""))
+        await m.answer("\n".join(out))
 
     @admin.message(Command("why"))
     async def cmd_why(m: Message, command: CommandObject) -> None:

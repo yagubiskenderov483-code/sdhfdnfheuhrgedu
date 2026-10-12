@@ -703,6 +703,7 @@ class App:
             BotCommand(command="sessions", description="Мои аккаунты / удалить"),
             BotCommand(command="status", description="Состояние трекера"),
             BotCommand(command="why", description="Почему нет постов"),
+            BotCommand(command="lot", description="Почему не пришёл лот (ссылка t.me/nft/…)"),
             BotCommand(command="stats", description="Статистика"),
             BotCommand(command="last", description="Последние лоты и почему не отправлены"),
             BotCommand(command="collections", description="Какие коллекции отслеживаются"),

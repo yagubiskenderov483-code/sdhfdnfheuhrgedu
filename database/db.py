@@ -398,6 +398,16 @@ class Database:
             (gift_id, since_iso))
         return {r[0]: r[1] for r in await cur.fetchall()}
 
+    async def listings_by_slug(self, slug: str, limit: int = 5) -> list[dict]:
+        """История конкретного NFT (t.me/nft/<slug>) в трекере — свежие первыми."""
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT gift_name, gift_num, stars_price, ton_price, seller_username, seller_name, status, reason, "
+            "first_seen, sent_at FROM listings WHERE lower(gift_slug) = lower(?) ORDER BY first_seen DESC LIMIT ?",
+            (slug, limit))
+        cols = [c[0] for c in cur.description]
+        return [dict(zip(cols, r)) for r in await cur.fetchall()]
+
     async def reasons_since(self, since_iso: str) -> list[tuple[str, str, int]]:
         """(статус, причина, сколько) по лотам, найденным с since — для «почему нет постов»."""
         assert self.conn
