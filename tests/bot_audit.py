@@ -45,6 +45,8 @@ async def fake_call(self, method, request_timeout=None):
         return True
     return True
 Bot.__call__ = fake_call
+import config as _cfg0
+_RS_BACKUP = _cfg0.RUNTIME_SETTINGS_PATH.read_text(encoding="utf-8") if _cfg0.RUNTIME_SETTINGS_PATH.exists() else None
 
 # ---- имитация Telethon для /add_session
 class FakeTC:
@@ -167,6 +169,7 @@ async def run():
     was = settings.russian_only
     await click(app, 8852171067, "flt:RUSSIAN_ONLY")
     if settings.russian_only == was: problems.append("/panel toggle did not change RUSSIAN_ONLY")
+    settings.seller_repeat_hours = 0
     await click(app, 8852171067, "flt:REPEAT")
     if settings.seller_repeat_hours != 6: problems.append(f"/panel repeat step wrong: {settings.seller_repeat_hours}")
     before = settings.russian_only
@@ -185,6 +188,12 @@ async def run():
         await asyncio.wait_for(app.stop(), 30); print("stop: OK")
     except Exception as e:
         problems.append(f"stop failed: {e!r}")
+    # тест пишет /set-значения в data/runtime_settings.json — возвращаем как было
+    import config as _cfg
+    if _RS_BACKUP is None:
+        _cfg.RUNTIME_SETTINGS_PATH.unlink(missing_ok=True)
+    else:
+        _cfg.RUNTIME_SETTINGS_PATH.write_text(_RS_BACKUP, encoding="utf-8")
     print("\nPROBLEMS:" if problems else "\nNO PROBLEMS FOUND", *problems, sep="\n  ")
     os._exit(1 if problems else 0)
 asyncio.run(run())
