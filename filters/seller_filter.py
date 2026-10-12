@@ -72,6 +72,14 @@ _RU_MARKERS = re.compile(
     r"kharkiv|odesa|odessa|country:(ru|ua|by))", re.IGNORECASE)
 
 
+def is_russian_name(name: str | None) -> bool:
+    """Имя/фамилия на славянской кириллице («Дмитрий», «Іван», «Я»). Одна кириллическая буква
+    внутри латиницы («Jоhn») не считается. Используется только при SELLER_NAME_SIGNAL=true."""
+    if not name or _NON_SLAVIC.search(name):
+        return False
+    return bool(re.search(r"[Ѐ-ӿ]{2,}", name) or (_CYR.search(name) and not re.search(r"[A-Za-z]", name)))
+
+
 def has_ru_marker(*texts: str | None) -> bool:
     return any(t and _RU_MARKERS.search(t) for t in texts)
 
@@ -151,7 +159,9 @@ class SellerFilter:
         if phone:
             if any(phone.startswith(p) for p in settings.seller_phone_prefixes):
                 return SellerResult(True, "PHONE_MATCH", "visible phone prefix matches")
-            return SellerResult(False, "PHONE_MISMATCH", "visible phone prefix does not match")
+            if settings.phone_mismatch_blocks:
+                return SellerResult(False, "PHONE_MISMATCH", "visible phone prefix does not match")
+            # PHONE_MISMATCH_BLOCKS=false: чужой номер ≠ чужой язык (переехавшие) — решают тексты ниже
 
         if is_russian_text(l.seller_about):
             return SellerResult(True, "BIO_RU", "profile bio is written in Russian")
@@ -171,6 +181,9 @@ class SellerFilter:
         if is_russian_text(l.seller_extra_text):
             return SellerResult(True, "STORIES_RU", "stories / channel posts are in Russian")
 
+        if settings.seller_name_signal and l.seller_type == "user" and is_russian_name(l.seller_name):
+            return SellerResult(True, "NAME_RU", "first/last name is in Cyrillic (SELLER_NAME_SIGNAL=true)")
+
         if has_ru_marker(l.seller_about, l.seller_channel, l.seller_business, l.seller_extra_text):
             return SellerResult(True, "RU_MARKER", "Russian services / cities / currency in profile")
 
@@ -179,6 +192,8 @@ class SellerFilter:
             if is_foreign_text(field):
                 return SellerResult(False, "FOREIGN_TEXT", "profile text is in a foreign language")
 
+        if phone and not settings.phone_mismatch_blocks:
+            return SellerResult(False, "PHONE_MISMATCH", "visible phone prefix does not match")
         if settings.unknown_seller_policy == "allow":
             return SellerResult(True, "UNKNOWN_ALLOWED", "no objective data (policy=allow)")
         return SellerResult(False, "UNKNOWN_BLOCKED", "no Russian bio / phone / whitelist (policy=block)")
