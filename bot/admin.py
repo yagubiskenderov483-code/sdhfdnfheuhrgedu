@@ -190,6 +190,7 @@ HELP = (
     "<b>Состояние</b>\n"
     "/status — трекер, скорость, задержки\n"
     "/why — почему нет постов (что нашлось и на чём отсеялось)\n"
+    "/panel — фильтры кнопками (включить/выключить в один клик)\n"
     "/lot ссылка — почему конкретный лот (t.me/nft/…) не пришёл\n"
     "/stats — статистика лотов · /last — последние лоты и почему не ушли\n"
     "/top — самые активные коллекции за сутки · /find имя — всё о коллекции\n"
@@ -521,7 +522,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1104,6 +1105,65 @@ def build_routers(app: "App") -> list[Router]:
     @users.message(or_f(Command("settings"), Command("filters")))
     async def cmd_settings(m: Message) -> None:
         await _answer_long(m, _filters_help())
+
+    # ---------------- /panel: фильтры кнопками (без набора /set)
+    _TOGGLES = (("RUSSIAN_ONLY", "russian_only", "Только русские продавцы"),
+                ("SELLER_NAME_SIGNAL", "seller_name_signal", "Имя кириллицей = русский"),
+                ("PHONE_MISMATCH_BLOCKS", "phone_mismatch_blocks", "Чужой телефон — отсеять"),
+                ("UNIQUE_SELLERS", "unique_sellers", "Продавец не повторяется"),
+                ("UNIQUE_GIFTS", "unique_gifts", "NFT не повторяется"),
+                ("ALLOW_TON_ONLY", "allow_ton_only", "Лоты только за TON"))
+    _REPEAT_STEPS = (0, 6, 24, 72)
+
+    def _panel() -> tuple[str, InlineKeyboardMarkup]:
+        rows = [[InlineKeyboardButton(text=f"{'✅' if getattr(settings, attr) else '⬜'} {title}",
+                                      callback_data=f"flt:{key}")] for key, attr, title in _TOGGLES]
+        rh = settings.seller_repeat_hours
+        rows.append([InlineKeyboardButton(
+            text="🔁 Повтор продавца: " + ("никогда" if not rh else f"через {rh:g} ч"), callback_data="flt:REPEAT")])
+        rows.append([InlineKeyboardButton(
+            text=f"📚 Коллекция подряд: {'до ' + str(settings.max_same_collection_streak) if settings.max_same_collection_streak else 'без ограничений'}",
+            callback_data="flt:STREAK")])
+        text = ("🎛 <b>Фильтры лотов</b>\nНажмите, чтобы переключить — применяется сразу и переживает деплой.\n"
+                f"Мин. цена: {settings.min_stars}⭐ · флор коллекции от {settings.collection_min_floor}⭐ "
+                "(менять: /set MIN_STARS …)\nПочему лоты отсеиваются: /why")
+        return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @admin.message(Command("panel"))
+    async def cmd_panel(m: Message) -> None:
+        text, kb = _panel()
+        await m.answer(text, reply_markup=kb)
+
+    @public.callback_query(F.data.startswith("flt:"))
+    async def cb_filter(q: CallbackQuery) -> None:
+        if not is_manager(q.from_user.id):
+            await q.answer("Только для админов", show_alert=True)
+            return
+        key = q.data.split(":", 1)[1]
+        try:
+            if key == "REPEAT":
+                cur = settings.seller_repeat_hours
+                steps = _REPEAT_STEPS
+                nxt = steps[(steps.index(cur) + 1) % len(steps)] if cur in steps else 0
+                set_runtime_value("SELLER_REPEAT_HOURS", str(nxt))
+            elif key == "STREAK":
+                set_runtime_value("MAX_SAME_COLLECTION_STREAK", "0" if settings.max_same_collection_streak else "1")
+            else:
+                attr = next(a for k, a, _ in _TOGGLES if k == key)
+                set_runtime_value(key, "false" if getattr(settings, attr) else "true")
+        except (StopIteration, KeyError, ValueError):
+            await q.answer("Неизвестная настройка")
+            return
+        try:
+            await app.backup.save()
+        except Exception:
+            pass
+        text, kb = _panel()
+        try:
+            await q.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await q.answer("Сохранено")
 
     @admin.message(Command("proxies", "proxy"))
     async def cmd_proxy_group(m: Message) -> None:
