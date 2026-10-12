@@ -161,6 +161,20 @@ async def run():
     print("taken ->", await click(app, 998, "taken"))
     print("untake other ->", await click(app, 998, "untake:999"))
     print("untake owner ->", await click(app, 999, "untake:999"))
+    # 4b) /panel — фильтры кнопками
+    r = await say(app, 8852171067, "/panel")
+    if not r: problems.append("NO REPLY to /panel")
+    was = settings.russian_only
+    await click(app, 8852171067, "flt:RUSSIAN_ONLY")
+    if settings.russian_only == was: problems.append("/panel toggle did not change RUSSIAN_ONLY")
+    await click(app, 8852171067, "flt:REPEAT")
+    if settings.seller_repeat_hours != 6: problems.append(f"/panel repeat step wrong: {settings.seller_repeat_hours}")
+    before = settings.russian_only
+    await click(app, STRANGER, "flt:RUSSIAN_ONLY")
+    if settings.russian_only != before: problems.append("stranger could toggle filters")
+    settings.seller_repeat_hours = 0
+    for c in ("/why", "/lot https://t.me/nft/X-1", "/lot"):
+        if not await say(app, 8852171067, c): problems.append(f"NO REPLY to {c!r}")
     # 5) удаление аккаунта кнопками
     print("rmsess ->", await click(app, OWNER, "rmsess:session_001"))
     print("rmsess_no ->", await click(app, OWNER, "rmsess_no"))
