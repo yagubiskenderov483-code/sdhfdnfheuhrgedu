@@ -824,3 +824,40 @@ def test_sender_same_group_waits_flood():
     print("SENDER GROUP FLOOD OK")
 
 test_sender_same_group_waits_flood()
+
+
+def test_new_collection_and_bad_item():
+    import types as T
+    from tracker.coordinator import MarketplaceCoordinator as Coordinator
+    from tracker.state import CollectionState
+    import tracker.marketplace as MP
+    c = Coordinator.__new__(Coordinator)
+    c.skipped, c.low_prio, c._dirty, c._due = set(), set(), set(), {}
+    settings.collection_min_floor, settings.collection_floor_mode = 300, "skip"
+    st = CollectionState(gift_id=77, title="New Gift")
+    assert c._apply_floor_rule(st, None, first=True) is False and 77 not in c.skipped   # без флора — отслеживаем
+    assert c._apply_floor_rule(CollectionState(gift_id=78, title="x"), 100, first=True) is True
+    # кривой лот не ломает страницу
+    good = MP.types.StarGiftUnique(id=1, gift_id=5, title="A", slug="A-1", num=1, owner_id=MP.types.PeerUser(9),
+                                   attributes=[], availability_issued=1, availability_total=1)
+    class Bad:
+        slug = "B-2"
+    MP.types.StarGiftUnique  # noqa
+    orig = MP.parse_unique_gift
+    def p(g, u, ch):
+        if isinstance(g, Bad):
+            raise AttributeError("new field")
+        return orig(g, u, ch)
+    MP.parse_unique_gift = p
+    try:
+        import asyncio
+        class Cl:
+            async def __call__(s, req):
+                return T.SimpleNamespace(users=[], chats=[], gifts=[Bad(), good], next_offset=None, count=2)
+        page = asyncio.run(MP.fetch_resale_page(Cl(), 5, "", 30))
+        assert [i.slug for i in page.items] == ["A-1"], page.items
+    finally:
+        MP.parse_unique_gift = orig
+    print("NEW COLLECTION + BAD ITEM OK")
+
+test_new_collection_and_bad_item()
