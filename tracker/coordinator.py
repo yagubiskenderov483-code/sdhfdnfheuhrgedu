@@ -233,7 +233,9 @@ class MarketplaceCoordinator:
         cheap_before = gid in self.skipped or gid in self.low_prio
         tracked = not cheap_before and not first
         limit = th * 0.9 if tracked else th
-        cheap = floor is None or floor < limit
+        # флора ещё нет (новая коллекция, лотов на рынке пока нет) — НЕ дешёвая: отслеживаем сразу,
+        # иначе первые лоты новой коллекции ушли бы в «тихую» ре-синхронизацию и не попали в канал
+        cheap = floor is not None and floor < limit
         if cheap and settings.collection_floor_mode == "skip":
             self.skipped.add(gid)
             self.low_prio.discard(gid)
