@@ -686,11 +686,12 @@ class MarketplaceCoordinator:
         now = time.monotonic()
         for gid in self.states:
             self._due.setdefault(gid, now)
+        from tracker.worker import supervise
+        # каждую петлю держит супервизор: упала — перезапуск, а не тихая смерть трекера
         self._tasks = [
-            asyncio.create_task(self._live_loop(), name="live-loop"),
-            asyncio.create_task(self._catalog_loop(), name="catalog-loop"),
-            asyncio.create_task(self._persist_loop(), name="persist-loop"),
-            asyncio.create_task(self._sync_loop(), name="sync-loop"),
+            asyncio.create_task(supervise(n, f, self._stop), name=n)
+            for n, f in (("live-loop", self._live_loop), ("catalog-loop", self._catalog_loop),
+                         ("persist-loop", self._persist_loop), ("sync-loop", self._sync_loop))
         ]
         for t in self._tasks:
             t.add_done_callback(_log_task_death)
