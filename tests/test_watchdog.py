@@ -122,3 +122,22 @@ async def diagnostics():
     assert not sent
     print("DIAGNOSTICS OK")
 asyncio.run(diagnostics())
+
+
+async def conflict():
+    app = main.App.__new__(main.App)
+    sent = []
+    class B:
+        async def send_message(s, uid, text): sent.append(text)
+    app.bot = B(); app._alerts = {}
+    settings.admin_ids = {1}
+    w = main.CONFLICT_WATCH
+    now = time.time()
+    w.first, w.last, w.count = now - 60, now, 20          # минута пересечения при деплое — тихо
+    await app._watchdog_conflict()
+    assert not sent
+    w.first = now - 400                                  # 6+ минут подряд — тревога
+    await app._watchdog_conflict()
+    assert sent and "кто-то ещё" in sent[0], sent
+    print("CONFLICT ALERT OK")
+asyncio.run(conflict())

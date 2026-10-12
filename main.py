@@ -13,6 +13,7 @@ import asyncio
 import os
 import html
 import json
+import logging
 import re
 import signal
 import time
@@ -76,6 +77,30 @@ _WHY_RU = (
     ("level N >", "уровень продавца выше MAX_SELLER_LEVEL"),
     ("N NFT >", "у продавца больше NFT, чем MAX_SELLER_NFTS"),
 )
+
+
+class _ConflictWatch(logging.Handler):
+    """aiogram пишет «Failed to fetch updates - TelegramConflictError», когда тот же токен бота
+    запущен где-то ещё (токен утёк / второй деплой). Запоминаем время — сторож предупредит админов."""
+    def __init__(self):
+        super().__init__(logging.ERROR)
+        self.last: float = 0.0
+        self.first: float = 0.0
+        self.count = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if "TelegramConflictError" in record.getMessage():
+                now = time.time()
+                if now - self.last > 120:
+                    self.first, self.count = now, 0       # новая серия (старая давно кончилась)
+                self.last, self.count = now, self.count + 1
+        except Exception:
+            pass
+
+
+CONFLICT_WATCH = _ConflictWatch()
+logging.getLogger("aiogram.dispatcher").addHandler(CONFLICT_WATCH)
 
 
 class App:
@@ -358,6 +383,7 @@ class App:
                 await self._save_speeds()
                 await self._watchdog()
                 await self._watchdog_sent()
+                await self._watchdog_conflict()
                 await self._daily_report()
             except Exception as e:
                 log.debug("watchdog failed: %s", e)
@@ -599,6 +625,17 @@ class App:
                 why = ""
             await self._alert("no_lots", f"⚠️ <b>{int(quiet // 60)} минут ни одного нового лота.</b>"
                                          + (why or "\nОбычно лоты идут каждые несколько минут — проверьте /status"), 3600)
+
+    async def _watchdog_conflict(self) -> None:
+        """Тот же токен бота работает где-то ещё → наши пользователи получают чужие ответы."""
+        w = CONFLICT_WATCH
+        # при своём же деплое старая и новая копии пересекаются на минуту — это не тревога;
+        # тревога — если конфликт идёт дольше 3 минут подряд
+        if w.count >= 3 and time.time() - w.last < 300 and w.last - w.first > 180:
+            await self._alert("token_conflict",
+                              "🚨 <b>Этим токеном бота пользуется кто-то ещё</b> (Telegram: Conflict).\n"
+                              "Либо запущена вторая копия бота, либо токен утёк. Если второй копии нет — "
+                              "@BotFather → /revoke, новый токен в BOT_TOKEN, репозиторий — приватный.", 3600)
 
     async def _watchdog_sent(self) -> None:
         """Лоты находятся, но в группу ничего не уходит 30+ минут — сразу говорим админам почему."""
