@@ -682,6 +682,8 @@ class App:
                          f"9 из 10 быстрее {tot[min(len(tot) - 1, int(len(tot) * 0.9))]:.1f} с")
         elif "total" in self.pipeline.latency:
             lines.append(f"⏱ Средняя задержка лота: {self.pipeline.latency['total']:.1f} с")
+        if found >= 10 and day.get("SENT", 0) < found * 0.2:
+            lines.append("🧹 Больше 80% найденных лотов отсеяно — причины: /why 24 · фильтры кнопками: /panel")
         muted = self.backup.flags.get("muted") if hasattr(self.backup, "flags") else None
         if muted:
             lines.append(f"🔇 Выключено коллекций: {len(muted)} (/mute)")
