@@ -36,6 +36,10 @@ from telethon.tl import types
 from telethon.tl.functions.payments import (GetResaleStarGiftsRequest, GetSavedStarGiftsRequest,
                                             GetStarGiftsRequest, GetUniqueStarGiftRequest)
 from telethon.tl.functions.users import GetFullUserRequest
+
+from utils.logger import get_logger
+
+log = get_logger("marketplace")
 from telethon.tl.functions.stories import GetPeerStoriesRequest
 
 
@@ -160,20 +164,20 @@ def parse_unique_gift(g: Any, users: dict[int, Any], chats: dict[int, Any]) -> R
     return ResaleItem(
         unique_id=g.id,
         gift_id=g.gift_id,
-        title=g.title,
+        title=g.title or "",
         slug=g.slug,
-        num=g.num,
+        num=getattr(g, "num", None),
         model=model,
         backdrop=backdrop,
         symbol=symbol,
         seller_key=seller_key,
         owner_type=owner_type,
         owner_id=owner_id,
-        owner_name=g.owner_name,
-        owner_address=g.owner_address,
+        owner_name=getattr(g, "owner_name", None),
+        owner_address=getattr(g, "owner_address", None),
         stars=stars,
         ton_nano=ton,
-        ton_only=bool(g.resale_ton_only),
+        ton_only=bool(getattr(g, "resale_ton_only", False)),
         model_rarity=mr, backdrop_rarity=br, symbol_rarity=sr,
         user=users.get(owner_id) if owner_type == "user" else None,
         chat=chats.get(owner_id) if owner_type in ("channel", "chat") else None,
@@ -215,7 +219,12 @@ async def fetch_resale_page(client: TelegramClient, gift_id: int, offset: str, l
     chats = {c.id: c for c in (res.chats or [])}
     items = []
     for g in res.gifts or []:
-        it = parse_unique_gift(g, users, chats)
+        try:
+            it = parse_unique_gift(g, users, chats)
+        except Exception as e:      # новый тип подарка/атрибута — один кривой лот не ломает всю страницу
+            log.warning("Gift %s: cannot parse resale item (%s: %s) — skipped",
+                        getattr(g, "slug", "?"), type(e).__name__, e)
+            continue
         if it is not None:
             items.append(it)
     return ResalePage(items=items, next_offset=res.next_offset or None, count=res.count, raw_users=users)
