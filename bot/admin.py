@@ -240,6 +240,8 @@ SETTING_DESC: dict[str, str] = {
     "ALLOW_TON_ONLY": "слать лоты, которые продаются только за TON (true/false)",
     "RUSSIAN_ONLY": "только русские продавцы (true/false)",
     "UNKNOWN_SELLER_POLICY": "продавец без явных данных: block (отсеять) | allow (пропускать)",
+    "SELLER_NAME_SIGNAL": "true — имя кириллицей («Дмитрий») считается русскоязычным продавцом (больше лотов)",
+    "PHONE_MISMATCH_BLOCKS": "false — чужой телефон не отсеивает сразу, решает язык профиля (больше лотов)",
     "REQUIRE_FREE_MESSAGES": "продавцу можно написать бесплатно (true/false)",
     "MAX_SELLER_LEVEL": "макс. Level продавца (0 = не проверять)",
     "MAX_SELLER_NFTS": "макс. число NFT у продавца (0 = не проверять)",

@@ -165,6 +165,8 @@ class Settings:
     # --- фильтр продавца ---
     russian_only: bool = True
     unknown_seller_policy: str = "block"      # allow | block
+    seller_name_signal: bool = False          # имя/фамилия кириллицей = русскоязычный продавец (по умолчанию выкл.)
+    phone_mismatch_blocks: bool = True        # чужой телефон отсеивает сразу; false — решают тексты профиля
     require_free_messages: bool = True        # продавцу можно написать бесплатно (без платных сообщений / Premium-only)
     max_seller_nfts: int = 12                 # не больше N NFT в профиле продавца (0 = не проверять)
     max_seller_level: int = 5                 # максимальный Level продавца (0 = не проверять)
@@ -299,6 +301,8 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "ALLOW_TON_ONLY": ("allow_ton_only", _bool_strict),
     "RUSSIAN_ONLY": ("russian_only", _bool_strict),
     "UNKNOWN_SELLER_POLICY": ("unknown_seller_policy", lambda v: _choice(v, {"allow", "block"})),
+    "SELLER_NAME_SIGNAL": ("seller_name_signal", _bool_strict),
+    "PHONE_MISMATCH_BLOCKS": ("phone_mismatch_blocks", _bool_strict),
     "SELLER_PHONE_PREFIXES": ("seller_phone_prefixes", _str_list),
     "TRACKER_INTERVAL": ("tracker_interval", _rng(0.2, 3600)),
     "PAGE_LIMIT": ("page_limit", lambda v: max(1, min(100, int(v)))),
@@ -358,6 +362,8 @@ def _from_env() -> Settings:
         allow_ton_only=_bool(e("ALLOW_TON_ONLY"), False),
         russian_only=_bool(e("RUSSIAN_ONLY"), True),
         unknown_seller_policy=(e("UNKNOWN_SELLER_POLICY") or "block").strip().lower(),
+        seller_name_signal=_bool(e("SELLER_NAME_SIGNAL"), False),
+        phone_mismatch_blocks=_bool(e("PHONE_MISMATCH_BLOCKS"), True),
         unique_gifts=_bool(e("UNIQUE_GIFTS"), True),
         require_free_messages=_bool(e("REQUIRE_FREE_MESSAGES"), True),
         max_seller_nfts=max(0, _int(e("MAX_SELLER_NFTS"), 12)),
