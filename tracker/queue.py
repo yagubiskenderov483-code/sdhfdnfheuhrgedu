@@ -288,15 +288,27 @@ class ListingPipeline:
             uid = l.seller_id
             try:
                 # access_hash продавца есть у той session, которая получила лот → сначала на ней
+                now_m = time.monotonic()
                 nc = self._nft_cache.get(uid)
-                if (self._is_expensive(l) and settings.max_seller_nfts > 0
-                        and not (nc and time.monotonic() - nc[0] < settings.seller_cache_ttl)):
-                    # дорогой лот: профиль и число NFT одним заходом — минус одна пауза аккаунта
-                    (full, nfts), _ = await self.sessions.run(lambda c: fetch_seller_bundle(c, uid),
-                                                              only=l.session_source, priority=True, attempts=2,
-                                                              timeout=15)
+                tc = self._gift_text_cache.get(uid)
+                want_nfts = settings.max_seller_nfts > 0 and not (nc and now_m - nc[0] < settings.seller_cache_ttl)
+                # тексты подарков нужны, когда в профиле не окажется русского — для дорогих лотов берём их
+                # сразу, в том же заходе (иначе это ещё одна пауза аккаунта после профиля)
+                want_texts = (settings.russian_only and settings.unknown_seller_policy == "block"
+                              and not (tc and now_m - tc[0] < settings.seller_cache_ttl))
+                if self._is_expensive(l) and (want_nfts or want_texts):
+                    # дорогой лот: профиль + число NFT + тексты подарков одним заходом
+                    (full, nfts, texts), _ = await self.sessions.run(
+                        lambda c: fetch_seller_bundle(c, uid, nfts=want_nfts, texts=want_texts),
+                        only=l.session_source, priority=True, attempts=2, timeout=15)
+                    now_m = time.monotonic()
+                    if texts is not None:
+                        txt, tn = texts
+                        self._gift_text_cache[uid] = (now_m, txt)
+                        if tn is not None and nfts is None:
+                            nfts = tn
                     if nfts is not None:
-                        self._nft_cache[uid] = (time.monotonic(), nfts)
+                        self._nft_cache[uid] = (now_m, nfts)
                 else:
                     full, _ = await self.sessions.run(lambda c: fetch_full_user(c, uid),
                                                       only=l.session_source, priority=True, attempts=2, timeout=15)
@@ -669,11 +681,17 @@ class ListingPipeline:
                         self._last_sent_gift_id, self._streak = l.gift_id, 1
 
 
-async def fetch_seller_bundle(client, user_id: int):
-    """Профиль продавца и число его NFT ОДНИМ заходом (оба запроса уходят параллельно в одном «окне»
-    аккаунта) — для дорогих лотов: вместо двух пауз между запросами одна. Сбой счётчика NFT → None."""
-    full, nfts = await asyncio.gather(fetch_full_user(client, user_id), fetch_nft_count(client, user_id),
-                                      return_exceptions=True)
+async def fetch_seller_bundle(client, user_id: int, nfts: bool = True, texts: bool = False):
+    """Профиль продавца, число его NFT и тексты к подаркам ОДНИМ заходом (запросы уходят параллельно
+    в одном «окне» аккаунта) — для дорогих лотов: вместо 2-3 пауз между запросами одна.
+    → (профиль, число NFT | None, (тексты, NFT) | None); сбой второстепенных запросов → None."""
+    async def _none():
+        return None
+    full, n, t = await asyncio.gather(
+        fetch_full_user(client, user_id),
+        fetch_nft_count(client, user_id) if nfts else _none(),
+        fetch_gift_texts(client, user_id) if texts else _none(),
+        return_exceptions=True)
     if isinstance(full, BaseException):
         raise full
-    return full, (None if isinstance(nfts, BaseException) else nfts)
+    return full, (None if isinstance(n, BaseException) else n), (None if isinstance(t, BaseException) else t)
