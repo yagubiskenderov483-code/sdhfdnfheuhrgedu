@@ -964,7 +964,12 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
 
     # ---------------- админам: список и ручная выдача
     # те же админы, что видят эти команды в /help (в т.ч. назначенные через /claim, если ADMIN_IDS пуст)
-    _ADM = F.from_user.func(lambda u: u is not None and is_manager(u.id))
+    def _sub_admin(uid: int) -> bool:
+        if settings.admin_ids:
+            return uid in settings.admin_ids
+        from bot.admin import all_admins      # назначенные через /claim, но НЕ владельцы аккаунтов
+        return uid in all_admins()
+    _ADM = F.from_user.func(lambda u: u is not None and _sub_admin(u.id))
     @r.message(Command("subs"), _ADM)
     async def cmd_subs(m: Message) -> None:
         await subs.load()

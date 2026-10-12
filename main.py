@@ -519,7 +519,9 @@ class App:
 
     async def _chat_rights_report(self) -> list[str]:
         """Проверка прав бота во всех группах, куда идут посты (частая причина «не кидает лоты»)."""
-        chats = {settings.target_chat_id} | {c for _, _, c, _ in settings.price_routes} | \
+        from bot.subscription import sub_chat_id
+        sub = sub_chat_id()
+        chats = {settings.target_chat_id, sub} | {c for _, _, c, _ in settings.price_routes} | \
                 {c for _, c, _ in settings.backdrop_routes}
         out = []
         me = await self.bot.get_me()
@@ -536,10 +538,10 @@ class App:
                 miss = []
                 if getattr(m, "can_manage_topics", None) is False:
                     miss.append("управление темами")
-                if getattr(m, "can_invite_users", None) is False:
-                    miss.append("приглашения")
-                if getattr(m, "can_restrict_members", None) is False:
-                    miss.append("бан")
+                if chat == sub and getattr(m, "can_invite_users", None) is False:
+                    miss.append("приглашения (для подписок)")
+                if chat == sub and getattr(m, "can_restrict_members", None) is False:
+                    miss.append("бан (для подписок)")
                 if miss:
                     out.append(f"⚠️ Группа <code>{chat}</code>: нет прав — {', '.join(miss)}")
         return out
@@ -600,7 +602,7 @@ class App:
 
     async def _watchdog_sent(self) -> None:
         """Лоты находятся, но в группу ничего не уходит 30+ минут — сразу говорим админам почему."""
-        if self.booting or self.coordinator.paused or self.coordinator.mode != "LIVE":
+        if self.booting or self.coordinator.paused or self.coordinator.mode != "LIVE" or settings.test_mode:
             return
         last_new = self.pipeline.last_new_at
         last_sent = getattr(self.pipeline, "last_sent_at", None) or self._started_at

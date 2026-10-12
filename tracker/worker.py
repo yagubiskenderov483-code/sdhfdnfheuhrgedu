@@ -119,7 +119,12 @@ class SessionWorker:
         self.status = WorkerStatus.CONNECTING
         self.reason = None
         if self.client is None:
-            self.client = self._make_client()
+            try:
+                self.client = self._make_client()
+            except Exception as e:      # битый/занятый файл сессии, неверный API_ID — это ERROR, не «вечный CONNECTING»
+                self.status, self.reason = WorkerStatus.ERROR, f"{type(e).__name__}: {e}"
+                log.warning("Session %s client init failed: %s", self.name, self.reason)
+                return False
         cl = self.client
         try:
             return await self._connect(cl)
