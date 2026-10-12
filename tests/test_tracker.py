@@ -1056,6 +1056,32 @@ async def test_36_muted_collection():
     print("✔ TEST 36 /mute: лоты выключенной коллекции не приходят, после /unmute — приходят")
 
 
+async def test_37_new_collection_first_lots():
+    """Новая коллекция появилась в каталоге во время работы (пока без лотов и без флора) —
+    первые выставленные лоты должны уйти в канал."""
+    for mode in ("full", "fast"):
+        e, tmp = await fresh(10)
+        settings.sync_mode = mode
+        settings.collection_min_floor = 300
+        NEW = 999
+        e.market.lots[NEW] = []
+        e.market.floors = {GID: 9000, NEW: None}
+        await e.coord.refresh_catalog()
+        assert NEW in e.coord.states and NEW not in e.coord.skipped, "новая коллекция без флора отслеживается"
+        await e.coord.sync_pending()
+        await e.pipe.queue.join()
+        first = e.market.item(9000, gid=NEW)
+        e.market.list_new(first, gid=NEW)
+        e.market.floors[NEW] = 9000
+        await e.coord.refresh_catalog()
+        for _ in range(2):
+            await e.poll(NEW)
+        sent = len(e.sender.sent)
+        await e.shutdown(); shutil.rmtree(tmp)
+        assert sent == 1, (mode, sent, "первый лот новой коллекции не отправлен")
+    print("✔ TEST 37 новая коллекция: первые лоты уходят в канал")
+
+
 async def run() -> None:
     for t in (test_1_initial_sync, test_2_one_new, test_3_price_change, test_4_moved_down,
               test_5_unknown_old_enters_window, test_6_recovery, test_7_two_sessions_same_listing,
@@ -1068,7 +1094,8 @@ async def run() -> None:
               test_27_reinclude_after_skip_no_burst,
               test_31_baseline_survives_restart, test_32_fast_sync,
               test_33_same_seller_failed_send_not_lost, test_34_fast_burst_and_false_anchor,
-              test_35_resold_top_and_false_anchor, test_36_muted_collection):
+              test_35_resold_top_and_false_anchor, test_36_muted_collection,
+              test_37_new_collection_first_lots):
         await t()
     test_15_seller_rules()
     test_20_proxies()
