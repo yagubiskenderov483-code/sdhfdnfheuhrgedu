@@ -536,6 +536,10 @@ class SessionBackup:
                 self.flags.setdefault(k, v)        # изменённое уже в этом запуске (например /mute) не затираем
             if mine_muted:
                 self.flags["muted"] = sorted(mine_muted | set(data["flags"].get("muted") or []))
+        if src_bot is not self.bot and settings.admin_ids:
+            # копия от прошлого бота: его токен мог утечь, и копию могли подменить — админов из неё
+            # не берём, когда админы и так заданы в ADMIN_IDS
+            data.pop("admins", None)
         if self._set_admins and isinstance(data.get("admins"), list):
             ids = set()
             for a in data["admins"]:
@@ -560,8 +564,9 @@ class SessionBackup:
                 log.warning("Subscriptions import failed: %s", e)
         if data.get("settings") and src_bot is not self.bot:
             # новый бот = новая группа/темы из .env: старые маршруты не переносим
-            for k in ("TARGET_CHAT_ID", "PRICE_ROUTES", "BACKDROP_ROUTES", "SUB_CHAT_ID"):
-                data["settings"].pop(k, None)
+            # (и /set-настройки прошлого бота не переносим вовсе: его токен мог утечь, а настройки
+            # фильтров/маршрутов теперь задаёт .env нового бота)
+            data["settings"] = {}
         if data.get("settings"):
             import_runtime_overrides(data["settings"])     # /set-настройки переживают деплой
             log.info("Restored settings changed via /set: %s", ", ".join(sorted(data["settings"])))
