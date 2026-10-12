@@ -33,7 +33,7 @@ _CYR = re.compile(r"[Ѐ-ӿ]", re.IGNORECASE)        # любая кирилли�
 # Буквы, которых НЕТ в русском/украинском/белорусском (казахский, таджикский, башкирский,
 # чувашский, осетинский, сербский, македонский и др.). Их наличие → текст не наш.
 # ў/і/ї/є/ґ/ъ (бел/укр/рус) НЕ включены — их не режем.
-_NON_SLAVIC = re.compile(r"[әғқңөұүһҳҷҙӣӯҫӑӕҝҕӧҭҡӳӗђћџњљјѓќѕ]", re.IGNORECASE)
+_NON_SLAVIC = re.compile(r"[әғқңөұүһҳҷҙҗӣӯҫӑӕҝҕӧҭҡӳӗђћџњљјѓќѕ]", re.IGNORECASE)
 
 
 # Письменности, которых нет у RU/UA/BY: арабская/персидская, иврит, индийские, тайская,
@@ -58,15 +58,17 @@ def is_russian_text(text: str | None) -> bool:
     t = text.strip()
     if _NON_SLAVIC.search(t):             # ә ғ қ ң ... → казахский и др., не наш
         return False
-    return len(_CYR.findall(t)) >= 2      # хоть немного кириллицы; латиница рядом не мешает
+    # хоть одно кириллическое слово (2+ буквы подряд); латиница рядом не мешает.
+    # «Gіfts fоr sale» — латиница с подменёнными і/о — русским не считается
+    return bool(re.search(r"[Ѐ-ӿ]{2,}", t))
 
 
 _FLAGS = ("🇷🇺", "🇺🇦", "🇧🇾")
 # Русскоязычные сервисы/деньги/города в тексте профиля (часто пишут латиницей)
 _RU_MARKERS = re.compile(
     r"(vk\.com|vk\.ru|\bvk\b|ok\.ru|mail\.ru|yandex|\.ru\b|\.su\b|\.by\b|\.ua\b|₽|\brub\b|\bрубл|"
-    r"sber|tinkoff|t-bank|tbank|ozon|wildberries|\bwb\b|avito|funpay|playerok|lolz|"
-    r"moscow|msk|\bspb\b|piter|saint.?petersburg|kazan|novosibirsk|ekaterinburg|ekb\b|krasnodar|minsk|kyiv|kiev|"
+    r"sber|tinkoff|t-bank|tbank|\bozon\b|wildberries|\bwb\b|avito|funpay|playerok|lolz|"
+    r"moscow|\bmsk\b|\bspb\b|\bpiter\b|saint.?petersburg|kazan|novosibirsk|ekaterinburg|ekb\b|krasnodar|minsk|kyiv|kiev|"
     r"kharkiv|odesa|odessa|country:(ru|ua|by))", re.IGNORECASE)
 
 
