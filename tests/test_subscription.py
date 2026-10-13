@@ -892,3 +892,37 @@ def test_supervisor_restarts_loops():
     print("SUPERVISOR OK")
 
 test_supervisor_restarts_loops()
+
+
+def test_backup_file_import():
+    import asyncio, json, tempfile, zlib
+    from pathlib import Path
+    from types import SimpleNamespace as NS
+    from telethon.sessions import StringSession
+    from telethon.crypto import AuthKey
+    import sessions.backup as B
+    from sessions.storage import SessionStorage
+    ss = StringSession(); ss.set_dc(2, "149.154.167.51", 443); ss.auth_key = AuthKey(b"\x07" * 256)
+    acc = ss.save()
+    body = {"v": 2, "sessions": [{"name": "session_001", "string": acc, "api_id": 1, "api_hash": "h" * 32}],
+            "admins": [999], "sent": [], "flags": {}, "settings": {"MIN_STARS": "99999"}}
+    blob = B._fernet().encrypt(b"Z1" + zlib.compress(json.dumps(body).encode()))
+    class FB:
+        async def get_my_description(s, language_code=None): return NS(description="")
+    st = SessionStorage(Path(tempfile.mkdtemp()), 1, "h")
+    b = B.SessionBackup(FB(), st, lambda: set())
+    async def run():
+        await b.restore()
+        n = await b.import_file(blob)
+        assert n == 1 and [r.name for r in st.list_sessions()] == ["session_001"], n
+        assert settings.min_stars != 99999                 # /set из чужого файла не применяются
+        assert await b.import_file(blob) == 0               # тот же аккаунт второй раз не дублируется
+        for bad in (b"junk", B._key("other:key").encrypt(b"x")):
+            try:
+                await b.import_file(bad); raise AssertionError("must fail")
+            except ValueError:
+                pass
+    asyncio.run(run())
+    print("BACKUP FILE IMPORT OK")
+
+test_backup_file_import()
