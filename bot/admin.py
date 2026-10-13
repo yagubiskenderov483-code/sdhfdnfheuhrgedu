@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import io
 import json
 import re
 import secrets
@@ -838,6 +839,38 @@ def build_routers(app: "App") -> list[Router]:
         await app.backup.save()
         await m.answer(f"{'✅' if ok else '⚠️'} {html.escape(name)}: {html.escape(mask_proxy(proxy))}"
                        + ("" if ok else f"\nНе подключился: {html.escape(w.reason or '')}"))
+
+    @admin.message(F.document, F.chat.type == "private")
+    async def on_backup_file(m: Message) -> None:
+        """Админ прислал файл sessions.backup (например от старого бота) → вернуть из него аккаунты."""
+        doc = m.document
+        if not doc or not (doc.file_name or "").endswith(".backup"):
+            return
+        if not app.backup.restore_done:
+            await m.answer("⏳ Бот ещё восстанавливает свою копию после запуска — пришлите файл через минуту.")
+            return
+        if (doc.file_size or 0) > 19 * 1024 * 1024:
+            await m.answer("❌ Файл больше 19 МБ — Telegram не даёт боту его скачать.")
+            return
+        note = await m.answer("📥 Читаю резервную копию…")
+        try:
+            buf = io.BytesIO()
+            await app.bot.download(doc, destination=buf)
+            n = await app.backup.import_file(buf.getvalue())
+        except ValueError as e:
+            await note.edit_text(f"❌ {html.escape(str(e))}")
+            return
+        except Exception as e:
+            log.warning("Backup import failed: %s", e)
+            await note.edit_text(f"❌ Не удалось импортировать: {html.escape(type(e).__name__)}")
+            return
+        added = await app.sessions.rescan()
+        saved = await app.backup.save()
+        await note.edit_text(
+            f"✅ Из файла добавлено аккаунтов: <b>{n}</b> (подключено: {len(added)}).\n"
+            "Подписки и история отправленных лотов тоже перенесены."
+            + ("" if saved else "\n⚠️ Новая копия пока не сохранилась — бот повторит сам.")
+            + "\nСостояние аккаунтов: /sessions")
 
     @admin.message(Command("lot"))
     async def cmd_lot(m: Message, command: CommandObject) -> None:

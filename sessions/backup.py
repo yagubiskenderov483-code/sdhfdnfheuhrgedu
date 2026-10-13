@@ -515,13 +515,43 @@ class SessionBackup:
             if old_bot:
                 await old_bot.session.close()
 
+        restored = await self._apply(data, foreign=src_bot is not self.bot)
+        if src_bot is not self.bot:
+            # перенесли копию с прошлого бота — отметка в указателе нового, чтобы не переносить повторно
+            self._ptr = dict(self._ptr or {})
+            self._ptr.pop("s", None)                 # своя старая копия нового бота больше не нужна
+            self._ptr["mig"] = old_id
+        return restored
+
+    async def import_file(self, blob: bytes) -> int:
+        """Ручной перенос: админ присылает боту файл sessions.backup (например от старого бота).
+        Расшифровываем любым известным ключом (SESSION_BACKUP_KEY / текущий / прошлые токены) и добавляем
+        аккаунты, подписки и историю к текущим. Админов и /set-настройки из файла не берём."""
+        f = _fernet()
+        if f is None:
+            raise ValueError("нет ключа: задайте SESSION_BACKUP_KEY или BOT_TOKEN")
+        try:
+            raw = f.decrypt(blob)
+        except InvalidToken:
+            raise ValueError("файл не расшифровывается — он от другого ключа (нужен тот же SESSION_BACKUP_KEY)")
+        try:
+            data = json.loads(zlib.decompress(raw[2:]) if raw[:2] == b"Z1" else raw)
+        except Exception:
+            raise ValueError("это не файл резервной копии трекера")
+        if not isinstance(data, dict) or not isinstance(data.get("sessions"), list):
+            raise ValueError("это не файл резервной копии трекера")
+        return await self._apply(data, foreign=True, merge=True)
+
+    async def _apply(self, data, foreign: bool, merge: bool = False) -> int:
+        """Применить расшифрованную копию: аккаунты, удалённые, флаги, подписки, история."""
         if not isinstance(data, dict):
             data = {}
         # чужие/битые записи в копии не должны ронять восстановление и писать файлы вне папки сессий
         data["sessions"] = [it for it in (data.get("sessions") if isinstance(data.get("sessions"), list) else [])
                             if isinstance(it, dict) and isinstance(it.get("string"), str) and it.get("string")
                             and _safe_name(it.get("name"))]
-        self.restored_paused = bool(data.get("paused"))
+        if not merge:
+            self.restored_paused = bool(data.get("paused"))
         # удалённые В ЭТОМ запуске (до чтения копии) — их не возвращаем; список удалённых из самой копии
         # тут не учитываем: в старой копии аккаунт мог быть и в удалённых, и уже возвращённым
         buried = {g.get("string") for g in self.graveyard.values()}
@@ -536,7 +566,7 @@ class SessionBackup:
                 self.flags.setdefault(k, v)        # изменённое уже в этом запуске (например /mute) не затираем
             if mine_muted:
                 self.flags["muted"] = sorted(mine_muted | set(data["flags"].get("muted") or []))
-        if src_bot is not self.bot and settings.admin_ids:
+        if foreign and settings.admin_ids:
             # копия от прошлого бота: его токен мог утечь, и копию могли подменить — админов из неё
             # не берём, когда админы и так заданы в ADMIN_IDS
             data.pop("admins", None)
@@ -562,7 +592,7 @@ class SessionBackup:
                 log.info("Restored %s subscriber(s) from backup", n)
             except Exception as e:
                 log.warning("Subscriptions import failed: %s", e)
-        if data.get("settings") and src_bot is not self.bot:
+        if data.get("settings") and foreign:
             # новый бот = новая группа/темы из .env: старые маршруты не переносим
             # (и /set-настройки прошлого бота не переносим вовсе: его токен мог утечь, а настройки
             # фильтров/маршрутов теперь задаёт .env нового бота)
@@ -573,8 +603,16 @@ class SessionBackup:
         if data.get("proxies") and not self.storage.load_pool():
             self.storage.save_pool(list(data["proxies"]))
         restored = 0
-        self.backup_names = {it.get("name") for it in data.get("sessions", [])}
-        self._prev_items = {it["name"]: it for it in data.get("sessions", []) if it.get("name")}
+        names = {it.get("name") for it in data.get("sessions", [])}
+        items = {it["name"]: it for it in data.get("sessions", []) if it.get("name")}
+        if merge:
+            # ручной импорт: имена из файла не должны совпасть с уже сохранёнными аккаунтами —
+            # переименуем при записи (ниже), а в «прошлую копию» добавим как есть
+            self.backup_names = set(self.backup_names or ()) | names
+            self._prev_items = {**items, **(self._prev_items or {})}
+        else:
+            self.backup_names = names
+            self._prev_items = items
         local_strings = set()
         for r in self.storage.list_sessions():
             ls = None
@@ -603,12 +641,7 @@ class SessionBackup:
                 restored += 1
             except Exception as e:
                 log.error("Restore %s failed: %s", it.get("name"), e)
-        log.info("Restored %s session(s) from Telegram backup", restored)
-        if src_bot is not self.bot:
-            # перенесли копию с прошлого бота — отметка в указателе нового, чтобы не переносить повторно
-            self._ptr = dict(self._ptr or {})
-            self._ptr.pop("s", None)                 # своя старая копия нового бота больше не нужна
-            self._ptr["mig"] = old_id
+        log.info("Restored %s session(s) from %s", restored, "imported file" if merge else "Telegram backup")
         return restored
 
     # ------------------------------------------------------------------ market snapshot
