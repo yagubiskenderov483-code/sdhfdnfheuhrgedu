@@ -840,6 +840,8 @@ def build_routers(app: "App") -> list[Router]:
         await m.answer(f"{'✅' if ok else '⚠️'} {html.escape(name)}: {html.escape(mask_proxy(proxy))}"
                        + ("" if ok else f"\nНе подключился: {html.escape(w.reason or '')}"))
 
+    import_lock = asyncio.Lock()          # несколько файлов сразу — по очереди, не вперемешку
+
     @admin.message(F.document, F.chat.type == "private")
     async def on_backup_file(m: Message) -> None:
         """Админ прислал файл sessions.backup (например от старого бота) → вернуть из него аккаунты."""
@@ -852,11 +854,14 @@ def build_routers(app: "App") -> list[Router]:
         if (doc.file_size or 0) > 19 * 1024 * 1024:
             await m.answer("❌ Файл больше 19 МБ — Telegram не даёт боту его скачать.")
             return
-        note = await m.answer("📥 Читаю резервную копию…")
+        note = await m.answer("📥 Читаю резервную копию…" + (" (жду очереди)" if import_lock.locked() else ""))
         try:
-            buf = io.BytesIO()
-            await app.bot.download(doc, destination=buf)
-            n = await app.backup.import_file(buf.getvalue())
+            async with import_lock:
+                buf = io.BytesIO()
+                await app.bot.download(doc, destination=buf)
+                n = await app.backup.import_file(buf.getvalue())
+                added = await app.sessions.rescan()
+                saved = await app.backup.save()
         except ValueError as e:
             await note.edit_text(f"❌ {html.escape(str(e))}")
             return
@@ -864,8 +869,6 @@ def build_routers(app: "App") -> list[Router]:
             log.warning("Backup import failed: %s", e)
             await note.edit_text(f"❌ Не удалось импортировать: {html.escape(type(e).__name__)}")
             return
-        added = await app.sessions.rescan()
-        saved = await app.backup.save()
         await note.edit_text(
             f"✅ Из файла добавлено аккаунтов: <b>{n}</b> (подключено: {len(added)}).\n"
             "Подписки и история отправленных лотов тоже перенесены."
