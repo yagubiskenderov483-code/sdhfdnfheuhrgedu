@@ -360,6 +360,29 @@ def build_routers(app: "App") -> list[Router]:
     # ------------------------------------------------------------ public
     @public.message(CommandStart())
     async def cmd_start(m: Message) -> None:
+        # первый /start от любого НЕ-админа → разовое уведомление всем админам
+        try:
+            u = m.from_user
+            uid = u.id if u else None
+            if uid and uid not in all_admins():
+                kv_key = f"start_seen:{uid}"
+                if await app.db.kv_get(kv_key) is None:
+                    await app.db.kv_set(kv_key, "1")
+                    name = (u.full_name or "").strip() or "—"
+                    uname = f"@{u.username}" if u.username else "—"
+                    text = ("🆕 <b>Новый юзер запустил бота</b>\n"
+                            f"ID: <code>{uid}</code>\n"
+                            f"Имя: {name}\n"
+                            f"Юзер: {uname}\n"
+                            f'<a href="tg://user?id={uid}">профиль</a>')
+                    for admin in all_admins():
+                        try:
+                            await app.bot.send_message(admin, text)
+                        except Exception as e:
+                            log.warning("notify admin %s about new /start user %s failed: %s", admin, uid, e)
+        except Exception as e:
+            log.warning("new-user notification failed: %s", e)
+
         if m.from_user and is_allowed(m.from_user.id):
             await m.answer((HELP if is_manager(m.from_user.id) else USER_HELP)
                            + f"\n\nВаш Telegram ID: <code>{m.from_user.id}</code>", reply_markup=MAIN_KB)
