@@ -368,8 +368,8 @@ def build_routers(app: "App") -> list[Router]:
                 kv_key = f"start_seen:{uid}"
                 if await app.db.kv_get(kv_key) is None:
                     await app.db.kv_set(kv_key, "1")
-                    name = (u.full_name or "").strip() or "—"
-                    uname = f"@{u.username}" if u.username else "—"
+                    name = html.escape((u.full_name or "").strip()) or "—"
+                    uname = f"@{html.escape(u.username)}" if u.username else "—"
                     text = ("🆕 <b>Новый юзер запустил бота</b>\n"
                             f"ID: <code>{uid}</code>\n"
                             f"Имя: {name}\n"
