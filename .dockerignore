@@ -1,0 +1,43 @@
+# VCS and dev artifacts — never ship these to the container
+.git/
+.gitignore
+.gitattributes
+
+# Local runtime state — entrypoint.sh symlinks these to the persistent disk anyway
+telegram_sessions/
+data/
+logs/
+sessions/*.session
+sessions/*.session-journal
+*.session
+*.session-journal
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Tests and docs — not needed in a production image
+tests/
+*.md
+LICENSE
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local env files (secrets must come from Render dashboard envVars, not from the image)
+.env.local
+.env.*.local
