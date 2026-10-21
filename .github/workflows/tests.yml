@@ -1,0 +1,48 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install aiohttp
+
+      - name: Syntax check
+        run: |
+          python -m compileall -q bot tracker sessions database utils filters config.py main.py
+
+      - name: Run tests
+        env:
+          PYTHONPATH: .
+        run: |
+          fail=0
+          for t in tests/test_tracker.py tests/test_subscription.py tests/test_watchdog.py tests/bot_audit.py; do
+            echo "::group::$t"
+            if timeout 300 python "$t"; then
+              echo "ok $t"
+            else
+              echo "FAIL $t"
+              fail=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $fail

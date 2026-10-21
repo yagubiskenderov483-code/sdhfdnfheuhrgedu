@@ -2,6 +2,7 @@
 .git/
 .gitignore
 .gitattributes
+.github/
 
 # Local runtime state — entrypoint.sh symlinks these to the persistent disk anyway
 telegram_sessions/
