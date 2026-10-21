@@ -361,6 +361,7 @@ def build_routers(app: "App") -> list[Router]:
     @public.message(CommandStart())
     async def cmd_start(m: Message) -> None:
         # первый /start от любого НЕ-админа → разовое уведомление всем админам
+        # защита от флуда: не больше 20 индивидуальных уведомлений в час; дальше тихо копим счётчик
         try:
             u = m.from_user
             uid = u.id if u else None
@@ -368,18 +369,39 @@ def build_routers(app: "App") -> list[Router]:
                 kv_key = f"start_seen:{uid}"
                 if await app.db.kv_get(kv_key) is None:
                     await app.db.kv_set(kv_key, "1")
-                    name = html.escape((u.full_name or "").strip()) or "—"
-                    uname = f"@{html.escape(u.username)}" if u.username else "—"
-                    text = ("🆕 <b>Новый юзер запустил бота</b>\n"
-                            f"ID: <code>{uid}</code>\n"
-                            f"Имя: {name}\n"
-                            f"Юзер: {uname}\n"
-                            f'<a href="tg://user?id={uid}">профиль</a>')
-                    for admin in all_admins():
-                        try:
-                            await app.bot.send_message(admin, text)
-                        except Exception as e:
-                            log.warning("notify admin %s about new /start user %s failed: %s", admin, uid, e)
+                    now = time.time()
+                    bucket = getattr(app, "_start_notify_bucket", None)
+                    if bucket is None:
+                        bucket = app._start_notify_bucket = {"ts": [], "skipped": 0, "reported_at": 0.0}
+                    # окно — последний час
+                    bucket["ts"] = [t for t in bucket["ts"] if now - t < 3600]
+                    if len(bucket["ts"]) < 20:
+                        bucket["ts"].append(now)
+                        name = html.escape((u.full_name or "").strip()) or "—"
+                        uname = f"@{html.escape(u.username)}" if u.username else "—"
+                        text = ("🆕 <b>Новый юзер запустил бота</b>\n"
+                                f"ID: <code>{uid}</code>\n"
+                                f"Имя: {name}\n"
+                                f"Юзер: {uname}\n"
+                                f'<a href="tg://user?id={uid}">профиль</a>')
+                        for admin in all_admins():
+                            try:
+                                await app.bot.send_message(admin, text)
+                            except Exception as e:
+                                log.warning("notify admin %s about new /start user %s failed: %s", admin, uid, e)
+                    else:
+                        bucket["skipped"] += 1
+                        # сводка — не чаще раза в 10 минут, чтобы не спамить
+                        if now - bucket["reported_at"] > 600:
+                            bucket["reported_at"] = now
+                            n = bucket["skipped"]
+                            bucket["skipped"] = 0
+                            summary = f"🆕 Ещё {n} новых юзеров запустили бота за последний час (поток слишком плотный, индивидуальные уведомления остановлены)"
+                            for admin in all_admins():
+                                try:
+                                    await app.bot.send_message(admin, summary)
+                                except Exception as e:
+                                    log.warning("notify admin %s with start-summary failed: %s", admin, e)
         except Exception as e:
             log.warning("new-user notification failed: %s", e)
 
