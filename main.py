@@ -465,7 +465,7 @@ class App:
                      + (f" · ошибки: {c.get('ERROR', 0) + c.get('AUTH_ERROR', 0)}"
                         if c.get("ERROR") or c.get("AUTH_ERROR") else ""),
                      f"📚 Коллекций в работе: {live}/{total}",
-                     f"⏸ Парсер выключен (/on)" if self.coordinator.paused else "🟢 Парсер работает"]
+                     "⏸ Парсер выключен (/on)" if self.coordinator.paused else "🟢 Парсер работает"]
             if getattr(self, "users_closed", False):
                 lines.append("🔒 Для пользователей закрыто (/open)")
             strict = []

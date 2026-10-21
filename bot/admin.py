@@ -1359,7 +1359,6 @@ def build_routers(app: "App") -> list[Router]:
         await _cleanup_pending(m.from_user.id)       # повторная отправка номера — старый вход закрываем
         data = await state.get_data()
         await m.answer("⏳ Подключаюсь к Telegram и запрашиваю код…")
-        name = "pending"
         proxy = app.storage.pick_proxy(settings.accounts_per_proxy)   # вход сразу через прокси аккаунта
 
         def _mk(px: str | None) -> TelegramClient:

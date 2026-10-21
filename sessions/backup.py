@@ -25,7 +25,6 @@ import base64
 import hashlib
 import io
 import json
-import re
 import sqlite3
 import time
 import zlib
