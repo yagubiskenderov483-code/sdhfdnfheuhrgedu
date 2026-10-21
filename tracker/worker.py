@@ -95,6 +95,7 @@ class SessionWorker:
         self._reconnect_attempt = 0
         self._running = True
         self._health_task: asyncio.Task | None = None
+        self._bg_tasks: set[asyncio.Task] = set()  # strong refs: иначе asyncio.create_task может быть съедена GC
         self.on_auth_error = None          # async callback(worker) — уведомить владельца
 
     # ------------------------------------------------------------------ lifecycle
@@ -242,7 +243,9 @@ class SessionWorker:
         log.error("Session %s: %s", self.name, self.reason)
         if first and self.on_auth_error:
             try:
-                asyncio.get_running_loop().create_task(self.on_auth_error(self))
+                t = asyncio.get_running_loop().create_task(self.on_auth_error(self))
+                self._bg_tasks.add(t)
+                t.add_done_callback(self._bg_tasks.discard)
             except RuntimeError:
                 pass
 
