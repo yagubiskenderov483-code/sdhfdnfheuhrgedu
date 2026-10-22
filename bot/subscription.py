@@ -27,7 +27,7 @@ from urllib.parse import quote
 
 import aiohttp
 from aiogram import F, Router
-from aiogram.filters import Command, CommandObject
+from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.types import (CallbackQuery, ChatMemberUpdated, InlineKeyboardButton, InlineKeyboardMarkup,
                            Message)
 
@@ -1074,6 +1074,31 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         await subs.flush_backup()
         await m.answer(f"✅ Доступ {uid} забран" if ok else
                        f"⚠️ Доступ {uid} снят, но выгнать из канала сейчас не вышло — бот повторит сам")
+
+    # ---------------- шорткат: "<ID> а" в личке от админа → подписка навсегда
+    #     (а|н|навсегда|forever|∞ — любое из этих слов). Это ускорение для /grant <id> навсегда.
+    _SHORTCUT_RE = re.compile(r"^\s*(\d{1,16})\s+(?:а|н|навсегда|forever|∞)\s*$", re.IGNORECASE)
+    @r.message(F.chat.type == "private", _ADM, StateFilter(None),
+               F.text.regexp(_SHORTCUT_RE))
+    async def cmd_grant_shortcut(m: Message) -> None:
+        mt = _SHORTCUT_RE.match(m.text or "")
+        if not mt:
+            return
+        uid = int(mt.group(1))
+        if uid <= 0 or uid > 10**15:
+            return
+        await subs.load()
+        try:
+            text = await subs.grant(uid, FOREVER, "Вам выдан доступ администратором.")
+        except Exception as e:
+            await m.answer(f"❌ Не удалось выдать: {html.escape(str(e))}\nПроверьте, что бот — админ в канале.")
+            return
+        try:
+            await app.bot.send_message(uid, text)
+            await m.answer(f"✅ Навсегда выдано <code>{uid}</code>, ссылка отправлена ему в личку.")
+        except Exception:
+            await m.answer(f"✅ Навсегда выдано <code>{uid}</code>, но написать ему бот не может (он не нажимал /start).\n"
+                           f"Перешлите ему это:\n\n{text}")
 
     # ---------------- всё остальное от не-админов → приветствие
     @tail.message(F.chat.type == "private", F.from_user.func(lambda u: u is not None and not is_manager(u.id)))
