@@ -269,6 +269,9 @@ async def fetch_catalog(client: TelegramClient) -> list[CollectionInfo]:
     return out
 
 
+_RESALE_DIAG_LOGGED = 0
+_RESALE_DIAG_LIMIT = 3
+
 async def fetch_resale_page(client: TelegramClient, gift_id: int, offset: str, limit: int) -> ResalePage:
     """Одна страница лотов коллекции, отсортированная по времени (новые сверху)."""
     res = await client(GetResaleStarGiftsRequest(gift_id=gift_id, offset=offset or "", limit=limit))
@@ -284,6 +287,18 @@ async def fetch_resale_page(client: TelegramClient, gift_id: int, offset: str, l
             continue
         if it is not None:
             items.append(it)
+    # Диагностика: сколько скрытых владельцев на странице vs сколько юзеров Telegram прислал.
+    # Если users > 0 для страницы со скрытыми — значит владельцы ТУТ, нужно только привязать их к gifts.
+    global _RESALE_DIAG_LOGGED
+    hidden = [it for it in items if it.owner_type is None]
+    if hidden and _RESALE_DIAG_LOGGED < _RESALE_DIAG_LIMIT:
+        _RESALE_DIAG_LOGGED += 1
+        try:
+            uinfo = [(u.id, getattr(u, "username", None)) for u in list(users.values())[:10]]
+            log.warning("RESALE_PAGE_DIAG gift_id=%s page: gifts=%d hidden=%d users=%d sample_users=%r",
+                        gift_id, len(items), len(hidden), len(users), uinfo)
+        except Exception:
+            pass
     return ResalePage(items=items, next_offset=res.next_offset or None, count=res.count, raw_users=users)
 
 
