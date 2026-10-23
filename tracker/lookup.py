@@ -41,7 +41,7 @@ _SERVICE_NAMES = {"joinchat", "addstickers", "addemoji", "share", "proxy", "sock
 _WAIT_WORDS = ("ищу", "поиск", "подожд", "загруж", "search", "wait", "loading", "⏳", "🔎")
 _MAX_PENDING = 300                # не больше N лотов в очереди на поиск (дальше — пропускаем)
 _CACHE_TTL = 3600.0               # кандидаты по одному имени — час
-_CAPTCHA_WORDS = ("captcha", "капч", "rasmga", "click the button")
+_CAPTCHA_WORDS = ("captcha", "kapch", "капч", "rasmga", "click the button", "looks like the picture")
 
 
 @dataclass
@@ -160,10 +160,39 @@ def _buttons(msg: Any) -> list[tuple[str, bytes | None]]:
     return out
 
 
+# Боты поиска пишут текст капчи «подменёнными» буквами (кириллица, ŋ, ɩ, ł …), чтобы его не читали
+# программы. Приводим похожие буквы к латинице и дополнительно узнаём капчу по виду сообщения.
+_LOOKALIKE = str.maketrans({
+    "а": "a", "в": "b", "е": "e", "ё": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p", "с": "c",
+    "т": "t", "у": "y", "х": "x", "і": "i", "ј": "j", "ԁ": "d", "ɩ": "l", "ł": "l", "ŋ": "n", "ɡ": "g",
+    "ϲ": "c", "α": "a", "ο": "o", "ρ": "p", "τ": "t", "κ": "k", "ν": "v", "ɑ": "a", "ʟ": "l", "ʜ": "h",
+    "ᴛ": "t", "ᴄ": "c", "ᴋ": "k", "ɪ": "i", "ᴏ": "o", "ᴘ": "p", "ᴀ": "a", "ʙ": "b", "ᴇ": "e", "ɴ": "n",
+})
+
+
+def _plain(text: str) -> str:
+    import unicodedata
+    t = unicodedata.normalize("NFKD", text or "")
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    return t.lower().translate(_LOOKALIKE)
+
+
+def _emoji_only(t: str) -> bool:
+    t = (t or "").strip()
+    return 0 < len(t) <= 6 and not any(ch.isalnum() for ch in t)
+
+
 def is_captcha(msg: Any) -> bool:
     """Бот поиска просит пройти капчу (картинка + «нажми кнопку с похожим значком»)."""
-    text = (getattr(msg, "message", None) or "").lower()
-    return any(w in text for w in _CAPTCHA_WORDS) and any(d for _, d in _buttons(msg))
+    btns = _buttons(msg)
+    cb = [t for t, d in btns if d]
+    if not cb:
+        return False
+    if any(w in _plain(getattr(msg, "message", None) or "") for w in _CAPTCHA_WORDS):
+        return True
+    # по виду: картинка + 2-8 кнопок, на которых только значки (🦊 🐰 🐶)
+    has_media = getattr(msg, "media", None) is not None or getattr(msg, "photo", None) is not None
+    return has_media and 2 <= len(cb) <= 8 and all(_emoji_only(t) for t in cb)
 
 
 def _gift_matches(saved: Any, slug: str | None, unique_id: int | None) -> bool:
@@ -201,7 +230,7 @@ class OwnerLookup:
         self._pending = 0
         self._cache: dict[str, tuple[float, list[Candidate]]] = {}
         self._started: set[tuple[str, str]] = set()      # (session, bot) — /start уже отправляли
-        self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0, "captcha": 0}
+        self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0, "captcha": 0, "too_many": 0}
         # капча: решает человек. on_captcha(token, session, photo_bytes, button_texts) — задаёт App
         # (шлёт админам картинку и кнопки); нажатие админа → solve_captcha(token, index).
         self.on_captcha = None
@@ -297,12 +326,19 @@ class OwnerLookup:
             if cands is None:
                 self.stats["no_answer"] += 1
                 return None
-            self._cache[key] = (time.monotonic(), cands)
+            if cands:
+                self._cache[key] = (time.monotonic(), cands)
             if len(self._cache) > 5000:
                 self._cache.clear()
         if not cands:
             self.stats["not_found"] += 1
             llog("LOOKUP", f"@{bot} /human {seller_name!r}: кандидатов нет")
+            return None
+        if settings.lookup_skip_over and len(cands) >= settings.lookup_skip_over:
+            # слишком частое имя — проверять всех долго, такой лот сразу пропускаем
+            self.stats["not_found"] += 1
+            self.stats["too_many"] = self.stats.get("too_many", 0) + 1
+            llog("LOOKUP", f"/human {seller_name!r}: {len(cands)} кандидатов (≥{settings.lookup_skip_over}) — скип")
             return None
         # сначала кандидаты с @username (их бот показывает как «01. Имя (@username)»), потом голые ID
         cands = sorted(cands, key=lambda c: c.username is None)

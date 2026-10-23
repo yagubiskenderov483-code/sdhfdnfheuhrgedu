@@ -314,7 +314,14 @@ class App:
         text = (f"🧩 <b>Капча в @{html.escape(bot_u)}</b> (аккаунт {html.escape(session)})\n"
                 "Нажмите кнопку со значком, похожим на картинку — поиск владельцев продолжится.\n"
                 f"Пока капча не пройдена, этот аккаунт не ищет (ждёт до {settings.lookup_captcha_wait:.0f} с).")
-        for uid in sorted(settings.admin_ids or all_admins()):
+        # всем админам + владельцу аккаунта поиска (тот, кто добавил session) — в личку
+        targets = set(settings.admin_ids or set()) | set(all_admins())
+        owner = next((r.owner_id for r in self.storage.list_sessions() if r.name == session), None)
+        if owner:
+            targets.add(owner)
+        if not targets:
+            log.warning("Captcha from @%s on %s: no admins to send it to", bot_u, session)
+        for uid in sorted(targets):
             try:
                 if photo:
                     await self.bot.send_photo(uid, BufferedInputFile(photo, "captcha.jpg"), caption=text,

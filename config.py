@@ -182,6 +182,7 @@ class Settings:
     lookup_interval: float = 6.0              # пауза между запросами к боту поиска с одного аккаунта, сек
     lookup_captcha_wait: float = 600.0        # сколько ждать, пока админ пройдёт капчу бота поиска, сек
     lookup_timeout: float = 25.0              # сколько секунд ждать ответа бота поиска
+    lookup_skip_over: int = 20                # в ответе бота поиска N+ человек — лот сразу пропустить (0 = выкл)
     lookup_max_candidates: int = 8            # сколько кандидатов из ответа проверять
     trade_bot_username: str = ""              # @username торгового бота (напр. "iostherobot") —
                                               # кнопка «Написать» открывает его с готовым
@@ -332,6 +333,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOOKUP_TIMEOUT": ("lookup_timeout", _rng(5, 180)),
     "LOOKUP_INTERVAL": ("lookup_interval", _rng(0, 600)),
     "LOOKUP_CAPTCHA_WAIT": ("lookup_captcha_wait", _rng(30, 7200)),
+    "LOOKUP_SKIP_OVER": ("lookup_skip_over", lambda v: max(0, min(1000, int(v)))),
     "LOOKUP_MAX_CANDIDATES": ("lookup_max_candidates", lambda v: max(1, min(30, int(v)))),
     "TRADE_BOT_USERNAME": ("trade_bot_username", lambda v: v.strip().lstrip("@")),
     "SELLER_PHONE_PREFIXES": ("seller_phone_prefixes", _str_list),
@@ -404,6 +406,7 @@ def _from_env() -> Settings:
         lookup_timeout=min(180.0, max(5.0, _float(e("LOOKUP_TIMEOUT"), 25.0))),
         lookup_interval=min(600.0, max(0.0, _float(e("LOOKUP_INTERVAL"), 6.0))),
         lookup_captcha_wait=min(7200.0, max(30.0, _float(e("LOOKUP_CAPTCHA_WAIT"), 600.0))),
+        lookup_skip_over=max(0, min(1000, _int(e("LOOKUP_SKIP_OVER"), 20))),
         lookup_max_candidates=max(1, min(30, _int(e("LOOKUP_MAX_CANDIDATES"), 8))),
         trade_bot_username=(e("TRADE_BOT_USERNAME") or "").strip().lstrip("@"),
         unique_gifts=_bool(e("UNIQUE_GIFTS"), True),

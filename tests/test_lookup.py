@@ -177,7 +177,7 @@ async def main():
                 kb = types.ReplyInlineMarkup(rows=[types.KeyboardInlineButtonRow(buttons=[
                     types.KeyboardInlineButton(text=e, type=types.InlineButtonTypeCallback(data=d))
                     for e, d in (("🦊", b"a"), ("🐰", b"b"), ("🐶", b"c"))])])
-                return [bot_msg(min_id + 1, "⚠️ Captcha.\nClick the button with the icon that looks like the picture.",
+                return [bot_msg(min_id + 1, "⚠️ Cαptchα.\nCʟick тhe buттon wiтh тhe icoŋ тhaт looкs liкe тhe picтure.",
                                 None, kb)]
             return await super().get_messages(ent, limit, min_id)
 
@@ -205,6 +205,32 @@ async def main():
     check(cc.clicked == b"a", "нажатие админа передано боту поиска")
     check(f is not None and f.user_id == 222, "после капчи поиск продолжился и нашёл владельца")
     check(cc.sent.count("/human Иван Иванов") == 2, "команда повторена после капчи")
+
+    # капча без узнаваемого текста: картинка + кнопки-значки
+    kb = types.ReplyInlineMarkup(rows=[types.KeyboardInlineButtonRow(buttons=[
+        types.KeyboardInlineButton(text=e, type=types.InlineButtonTypeCallback(data=d))
+        for e, d in (("🦊", b"a"), ("⭐", b"b"), ("🐵", b"c"))])])
+    m = types.Message(id=5, peer_id=types.PeerUser(777), date=NOW, message="⚠️ ????",
+                      media=types.MessageMediaPhoto(), reply_markup=kb)
+    check(L.is_captcha(m), "капча узнаётся по виду (картинка + кнопки-значки)")
+    m2 = types.Message(id=6, peer_id=types.PeerUser(777), date=NOW, message="01. Иван (@ivan)", reply_markup=None)
+    check(not L.is_captcha(m2), "обычный ответ — не капча")
+
+    # 20+ человек в ответе → сразу скип, профили не проверяются
+    many = "\n".join(f"{i:02d}. Иван (@ivan_n{i})" for i in range(1, 22))
+    class ManyClient(FakeClient):
+        resolved = 0
+        async def get_messages(self, ent, limit=10, min_id=0):
+            if not min_id:
+                return []
+            return [bot_msg(min_id + 1, many)]
+        async def get_entity(self, x):
+            ManyClient.resolved += 1
+            return await super().get_entity(x)
+    settings.lookup_skip_over = 20
+    mc = ManyClient(many, gifts, users)
+    check(await L.OwnerLookup(FakeSessions(mc)).find_owner("Иван", "PlushPepe-77", 5555) is None
+          and ManyClient.resolved == 0, "в списке 21 человек → скип без проверки профилей")
 
     # несколько выделенных аккаунтов: первый не смог написать боту → пишет второй
     class TwoSessions(FakeSessions):

@@ -264,6 +264,7 @@ SETTING_DESC: dict[str, str] = {
     "LOOKUP_TIMEOUT": "сколько секунд ждать ответ бота поиска",
     "LOOKUP_INTERVAL": "пауза между запросами к боту поиска с одного аккаунта, сек (меньше капч)",
     "LOOKUP_CAPTCHA_WAIT": "сколько ждать, пока вы пройдёте капчу бота поиска, сек",
+    "LOOKUP_SKIP_OVER": "в ответе бота поиска N и больше человек — лот сразу пропускается (0 = проверять всё равно)",
     "LOOKUP_MAX_CANDIDATES": "сколько кандидатов из ответа бота поиска проверять (1–30)",
     "TRADE_BOT_USERNAME": "@username торгового бота (напр. iostherobot); кнопка «Написать» → оффер со скидкой",
     "SELLER_NAME_SIGNAL": "true — имя кириллицей («Дмитрий») считается русскоязычным продавцом (больше лотов)",
@@ -300,7 +301,7 @@ SETTING_GROUPS: list[tuple[str, list[str]]] = [
     ("⚡ Скорость", ["PRIORITY_FLOOR", "PRIORITY_SHARE", "PRIORITY_POLL_INTERVAL", "CATALOG_INTERVAL", "COLD_POLL_INTERVAL", "TRACKER_INTERVAL", "PAGE_LIMIT",
                     "SESSION_RPS", "GLOBAL_RPS", "MAX_CONCURRENT_SESSIONS", "LOW_PRIORITY_POLL_INTERVAL", "SYNC_MODE"]),
     ("🔗 Внешние боты", ["TRADE_BOT_USERNAME", "LOOKUP_BOT_USERNAME", "AUTO_LOOKUP", "LOOKUP_REQUIRED", "LOOKUP_SESSIONS",
-                          "LOOKUP_DEDICATED", "LOOKUP_TIMEOUT", "LOOKUP_INTERVAL", "LOOKUP_CAPTCHA_WAIT", "LOOKUP_MAX_CANDIDATES"]),
+                          "LOOKUP_DEDICATED", "LOOKUP_TIMEOUT", "LOOKUP_INTERVAL", "LOOKUP_CAPTCHA_WAIT", "LOOKUP_SKIP_OVER", "LOOKUP_MAX_CANDIDATES"]),
     ("⚙️ Прочее", ["COLLECTION_FLOOR_MODE", "TEST_MODE", "ALLOW_ALL_USERS", "FETCH_FULL_SELLER"]),
     ("📢 Общий и каналы по цене", ["TARGET_CHAT_ID", "PRICE_ROUTES", "ROUTE_BY"]),
     ("🎨 Каналы по фону", ["BACKDROP_ROUTES"]),
@@ -1314,6 +1315,8 @@ def build_routers(app: "App") -> list[Router]:
                                           callback_data="lka:~TO")])
         rows.append([InlineKeyboardButton(text=f"🐢 Пауза между запросами: {settings.lookup_interval:g} с",
                                           callback_data="lka:~IV")])
+        rows.append([InlineKeyboardButton(
+            text=f"👥 Скип, если в списке от: {settings.lookup_skip_over or 'выкл'}", callback_data="lka:~SK")])
         lk = app.lookup.stats
         rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="lka:~BACK")])
         lb = settings.lookup_bot_username
@@ -1327,7 +1330,7 @@ def build_routers(app: "App") -> list[Router]:
                 "Если бот поиска спросит капчу — она придёт вам сюда с кнопками.\n\n"
                 f"Поисков: {lk.get('lookups', 0)} · найдено: {lk.get('found', 0)} · "
                 f"не найдено: {lk.get('not_found', 0)} · без ответа: {lk.get('no_answer', 0)} · "
-                f"капч: {lk.get('captcha', 0)} · в очереди: {len(app.pipeline._lookup_tasks)}")
+                f"капч: {lk.get('captcha', 0)} · скип (много людей): {lk.get('too_many', 0)} · в очереди: {len(app.pipeline._lookup_tasks)}")
         return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
     @public.callback_query(F.data.startswith("cap:"))
@@ -1367,6 +1370,11 @@ def build_routers(app: "App") -> list[Router]:
         try:
             if key == "~DED":
                 set_runtime_value("LOOKUP_DEDICATED", "false" if settings.lookup_dedicated else "true")
+            elif key == "~SK":
+                steps = (10, 20, 30, 50, 0)
+                cur = settings.lookup_skip_over
+                nxt = steps[(steps.index(cur) + 1) % len(steps)] if cur in steps else 20
+                set_runtime_value("LOOKUP_SKIP_OVER", str(nxt))
             elif key == "~IV":
                 steps = (3, 6, 10, 20)
                 cur = settings.lookup_interval
