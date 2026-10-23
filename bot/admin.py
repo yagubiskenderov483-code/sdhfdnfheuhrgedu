@@ -953,6 +953,52 @@ def build_routers(app: "App") -> list[Router]:
                        + (f": {html.escape(str(r.get('reason') or '')[:200])}" if r.get("reason") else ""))
         await m.answer("\n".join(out))
 
+    @admin.message(Command("raw"))
+    async def cmd_raw(m: Message, command: CommandObject) -> None:
+        """/raw <slug> — сырой ответ Telegram на GetUniqueStarGiftRequest(slug): какие поля
+        владельца приходят и кто в res.users[]. Для диагностики скрытых владельцев."""
+        arg = (command.args or "").strip()
+        mt = re.search(r"(?:nft/)?([A-Za-z0-9]+-\d+)\s*$", arg)
+        if not mt:
+            await m.answer("Использование: <code>/raw PlushPepe-123</code> или <code>/raw https://t.me/nft/PlushPepe-123</code>")
+            return
+        slug = mt.group(1)
+        try:
+            from telethon.tl.functions.payments import GetUniqueStarGiftRequest
+            res, _sess = await app.sessions.run(
+                lambda c: c(GetUniqueStarGiftRequest(slug=slug)), priority=True, attempts=2, timeout=15)
+        except Exception as e:
+            await m.answer(f"❌ Запрос не прошёл: <code>{html.escape(type(e).__name__)}: {html.escape(str(e)[:200])}</code>")
+            return
+        g = getattr(res, "gift", None)
+        if g is None:
+            await m.answer("Telegram ответил без gift.")
+            return
+        def _peer(p):
+            t = type(p).__name__
+            uid = getattr(p, "user_id", None) or getattr(p, "channel_id", None) or getattr(p, "chat_id", None)
+            return f"{t}({uid})" if uid is not None else t if p is not None else "None"
+        users = res.users or []
+        chats = res.chats or []
+        lines = [f"🔬 <b>raw {html.escape(slug)}</b>", "", "<b>gift fields:</b>",
+                 f"owner_id: <code>{html.escape(_peer(getattr(g, 'owner_id', None)))}</code>",
+                 f"host_id: <code>{html.escape(_peer(getattr(g, 'host_id', None)))}</code>",
+                 f"released_by: <code>{html.escape(_peer(getattr(g, 'released_by', None)))}</code>",
+                 f"theme_peer: <code>{html.escape(_peer(getattr(g, 'theme_peer', None)))}</code>",
+                 f"owner_address: <code>{html.escape(str(getattr(g, 'owner_address', None) or '—'))}</code>",
+                 f"gift_address: <code>{html.escape(str(getattr(g, 'gift_address', None) or '—'))}</code>",
+                 f"owner_name: <code>{html.escape(str(getattr(g, 'owner_name', None) or '—'))}</code>",
+                 "", f"<b>users[{len(users)}]:</b>"]
+        for u in users[:10]:
+            name = " ".join(x for x in (getattr(u, "first_name", None), getattr(u, "last_name", None)) if x) or "—"
+            uname = f"@{u.username}" if getattr(u, "username", None) else "—"
+            lines.append(f"• <code>{getattr(u, 'id', '?')}</code> {html.escape(uname)} ({html.escape(name)})")
+        if len(users) > 10:
+            lines.append(f"… ещё {len(users) - 10}")
+        if chats:
+            lines.append(f"\n<b>chats[{len(chats)}]:</b> " + ", ".join(f"<code>{getattr(c, 'id', '?')}</code>" for c in chats[:10]))
+        await m.answer("\n".join(lines))
+
     @admin.message(Command("why"))
     async def cmd_why(m: Message, command: CommandObject) -> None:
         try:
