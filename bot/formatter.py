@@ -56,23 +56,66 @@ def seller_url(l: Listing) -> str | None:
     return None
 
 
+def _trade_offer(l: Listing) -> tuple[int, str] | None:
+    """Сумма и единица для оффера в торговый бот.
+    Правила скидки от текущей цены лота (по требованию админа):
+      Stars: ≤700 → −35; 701–1800 → −50; 1801–2500 → −60; 2501–5000 → −100;
+             5001–10000 → −140; 10001+ → −215.
+      TON (целых): <48 → −1 g; ≥48 → −2 g.
+    Для ton-only лотов используется TON, иначе — Stars. Если ни того ни другого — None."""
+    stars = l.stars_price
+    ton_int = int(l.ton_price) if l.ton_price else 0
+    if getattr(l, "ton_only", False) and ton_int > 0:
+        off = ton_int - (2 if ton_int >= 48 else 1)
+        return (max(1, off), "g")
+    if stars and stars > 0:
+        if stars <= 700:
+            d = 35
+        elif stars <= 1800:
+            d = 50
+        elif stars <= 2500:
+            d = 60
+        elif stars <= 5000:
+            d = 100
+        elif stars <= 10000:
+            d = 140
+        else:
+            d = 215
+        return (max(1, stars - d), "")
+    if ton_int > 0:
+        off = ton_int - (2 if ton_int >= 48 else 1)
+        return (max(1, off), "g")
+    return None
+
+
 def listing_keyboard(l: Listing, with_seller: bool = True) -> InlineKeyboardMarkup:
-    """Кнопки: [Занять] / [Лот] [Написать] / [🔍 Найти по имени] — последняя только для скрытых
-    владельцев, когда задан LOOKUP_BOT_USERNAME (бот поиска, напр. funstat)."""
+    """Кнопки: [Занять] / [Лот] [Написать] / [🔍 Найти по имени].
+    «Написать» ведёт либо на профиль продавца (стандарт), либо, когда задан TRADE_BOT_USERNAME,
+    на торговый бот с ГОТОВЫМ оффером «@<бот> <ссылка на NFT> <сниженная_цена>» в input'е."""
     rows = [[InlineKeyboardButton(text="Занять", callback_data=f"take:{l.gift_unique_id}"[:64])]]
     second = []
     if l.gift_link:
         second.append(InlineKeyboardButton(text="Лот", url=l.gift_link))
-    url = seller_url(l) if with_seller else None
-    if url:
-        second.append(InlineKeyboardButton(text="Написать", url=url))
+    # «Написать»: либо торговый бот (приоритет), либо профиль продавца
+    trade_bot = (getattr(settings, "trade_bot_username", "") or "").lstrip("@")
+    offer = _trade_offer(l) if trade_bot else None
+    if trade_bot and offer and l.gift_link:
+        amount, unit = offer
+        tail = f" {amount} {unit}".rstrip()
+        text = f"@{trade_bot} {l.gift_link}{tail}"
+        second.append(InlineKeyboardButton(text="Написать",
+                                           url=f"https://t.me/{trade_bot}?text={quote(text, safe='/')}"))
+    else:
+        url = seller_url(l) if with_seller else None
+        if url:
+            second.append(InlineKeyboardButton(text="Написать", url=url))
     # Для лотов со скрытым Telegram-ом владельцем — кнопка открывает бота поиска
     # (например, funstat) с ПРЕДЗАПОЛНЕННЫМ текстом «/human <имя>».
     # URL-формат  t.me/<bot>?text=<cmd>  поддерживается большинством клиентов (Desktop, Android,
     # большинство версий iOS) — текст автоматически попадает в input, админу остаётся нажать «Отправить».
     # На клиенте, где не предзаполнит, бот всё равно откроется — имя всегда можно скопировать
     # из <code>…</code> в самом сообщении.
-    if with_seller and not url and l.seller_name and getattr(settings, "lookup_bot_username", ""):
+    if with_seller and not seller_url(l) and l.seller_name and getattr(settings, "lookup_bot_username", ""):
         bot = settings.lookup_bot_username.lstrip("@")
         cmd = f"/human {l.seller_name}"
         second.append(InlineKeyboardButton(text="🔍 Клик",

@@ -137,6 +137,10 @@ class SetLookupBot(StatesGroup):
     waiting = State()
 
 
+class SetTradeBot(StatesGroup):
+    waiting = State()
+
+
 _REJ = {"PAID_MESSAGES": "платные сообщения / только Premium", "TOO_MANY_NFTS": "много NFT",
         "LEVEL_TOO_HIGH": "Level выше лимита", "UNKNOWN_BLOCKED": "нет признаков русского",
         "PHONE_MISMATCH": "номер не +7/+375/+380", "FOREIGN_TEXT": "профиль на чужом языке",
@@ -252,6 +256,7 @@ SETTING_DESC: dict[str, str] = {
     "UNKNOWN_SELLER_POLICY": "продавец без явных данных: block (отсеять) | allow (пропускать)",
     "ALLOW_HIDDEN_OWNER": "true — пропускать лоты со скрытым Telegram-ом владельцем (без языкового фильтра)",
     "LOOKUP_BOT_USERNAME": "@username бота поиска по имени (напр. funstat); пусто = кнопки нет",
+    "TRADE_BOT_USERNAME": "@username торгового бота (напр. iostherobot); кнопка «Написать» → оффер со скидкой",
     "SELLER_NAME_SIGNAL": "true — имя кириллицей («Дмитрий») считается русскоязычным продавцом (больше лотов)",
     "PHONE_MISMATCH_BLOCKS": "false — чужой телефон не отсеивает сразу, решает язык профиля (больше лотов)",
     "REQUIRE_FREE_MESSAGES": "продавцу можно написать бесплатно (true/false)",
@@ -1264,6 +1269,10 @@ def build_routers(app: "App") -> list[Router]:
         rows.append([InlineKeyboardButton(
             text=f"🔍 Бот поиска: @{lb}" if lb else "🔍 Добавить бота поиска (funstat)",
             callback_data="flt:LOOKUPBOT")])
+        tb = settings.trade_bot_username or ""
+        rows.append([InlineKeyboardButton(
+            text=f"💰 Торговый бот: @{tb}" if tb else "💰 Добавить торгового бота (оффер)",
+            callback_data="flt:TRADEBOT")])
         text = ("🎛 <b>Фильтры лотов</b>\nНажмите, чтобы переключить — применяется сразу и переживает деплой.\n"
                 f"Мин. цена: {settings.min_stars}⭐ · флор коллекции от {settings.collection_min_floor}⭐ "
                 "(менять: /set MIN_STARS …)\nПочему лоты отсеиваются: /why")
@@ -1292,6 +1301,22 @@ def build_routers(app: "App") -> list[Router]:
             await q.message.answer(msg)
             await q.answer()
             return
+        if key == "TRADEBOT":
+            cur = settings.trade_bot_username or ""
+            msg = ("💰 <b>Торговый бот для оффера</b>\n\n"
+                   f"Сейчас: {('@' + cur) if cur else '<i>не задан</i>'}\n\n"
+                   "Пришлите @username бота (например: <code>iostherobot</code>). "
+                   "Кнопка «Написать» под постом будет открывать его с готовым оффером:\n"
+                   "<code>@&lt;бот&gt; &lt;ссылка&gt; &lt;цена со скидкой&gt;</code>\n\n"
+                   "Скидка от цены лота:\n"
+                   "⭐ ≤700 → −35 · 701-1800 → −50 · 1801-2500 → −60 · 2501-5000 → −100 · "
+                   "5001-10000 → −140 · 10001+ → −215\n"
+                   "💎 TON &lt;48 → −1 · ≥48 → −2\n\n"
+                   "Отправьте «<code>-</code>» или <code>off</code>, чтобы вернуть обычное «Написать». /cancel — отмена.")
+            await state.set_state(SetTradeBot.waiting)
+            await q.message.answer(msg)
+            await q.answer()
+            return
         try:
             if key == "REPEAT":
                 cur = settings.seller_repeat_hours
@@ -1317,37 +1342,48 @@ def build_routers(app: "App") -> list[Router]:
             pass
         await q.answer("Сохранено")
 
-    @admin.message(SetLookupBot.waiting, F.text)
-    async def cmd_set_lookup_bot(m: Message, state: FSMContext) -> None:
+    async def _accept_bot_handle(m: Message, state: FSMContext, key: str,
+                                 clear_msg: str, ok_msg_fmt: str) -> None:
         raw = (m.text or "").strip()
         if raw.lower() in ("/cancel", "cancel", "отмена"):
             await state.clear()
             await m.answer("Отменено.")
             return
         if raw in ("-", "off", "очистить", "clear", "0", "нет"):
-            set_runtime_value("LOOKUP_BOT_USERNAME", "")
+            set_runtime_value(key, "")
             try:
                 await app.backup.save()
             except Exception:
                 pass
             await state.clear()
-            await m.answer("✅ Бот поиска убран — кнопка «🔍 Клик» больше не будет появляться.")
+            await m.answer(clear_msg)
             return
         uname = raw.lstrip("@").strip()
-        # @username Telegram: 5–32 символа, [A-Za-z0-9_], не начинается с цифры, не оканчивается на _
         if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,30}[A-Za-z0-9]", uname):
-            await m.answer("Неверный @username. Должно быть 5–32 символа: латиница, цифры, _ "
+            await m.answer("Неверный @username. 5–32 символа: латиница, цифры, _ "
                            "(не начинается с цифры, не заканчивается на _). Попробуйте снова или /cancel.")
             return
         try:
-            set_runtime_value("LOOKUP_BOT_USERNAME", uname)
+            set_runtime_value(key, uname)
             await app.backup.save()
         except Exception as e:
             await state.clear()
             await m.answer(f"❌ Не удалось сохранить: {html.escape(str(e))}")
             return
         await state.clear()
-        await m.answer(f"✅ Бот поиска: @{uname}. В постах со скрытым продавцом появится кнопка «🔍 Клик».")
+        await m.answer(ok_msg_fmt.format(uname=uname))
+
+    @admin.message(SetLookupBot.waiting, F.text)
+    async def cmd_set_lookup_bot(m: Message, state: FSMContext) -> None:
+        await _accept_bot_handle(m, state, "LOOKUP_BOT_USERNAME",
+                                 "✅ Бот поиска убран — кнопка «🔍 Клик» больше не будет появляться.",
+                                 "✅ Бот поиска: @{uname}. В постах со скрытым продавцом появится кнопка «🔍 Клик».")
+
+    @admin.message(SetTradeBot.waiting, F.text)
+    async def cmd_set_trade_bot(m: Message, state: FSMContext) -> None:
+        await _accept_bot_handle(m, state, "TRADE_BOT_USERNAME",
+                                 "✅ Торговый бот убран — «Написать» снова будет вести на профиль продавца.",
+                                 "✅ Торговый бот: @{uname}. Кнопка «Написать» теперь откроет его с готовым оффером.")
 
     @admin.message(Command("proxies", "proxy"))
     async def cmd_proxy_group(m: Message) -> None:

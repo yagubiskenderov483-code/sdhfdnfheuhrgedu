@@ -172,6 +172,10 @@ class Settings:
     lookup_bot_username: str = ""             # @username бота ручного поиска (напр. "funstat") —
                                               # для лотов со скрытым владельцем в пост добавится
                                               # кнопка «🔍 Найти в @<бот>». Пусто = кнопки нет.
+    trade_bot_username: str = ""              # @username торгового бота (напр. "iostherobot") —
+                                              # кнопка «Написать» открывает его с готовым
+                                              # оффером: «@<бот> <ссылка на NFT> <сниженная_цена>».
+                                              # Пусто = обычная кнопка «Написать» продавцу.
     require_free_messages: bool = True        # продавцу можно написать бесплатно (без платных сообщений / Premium-only)
     max_seller_nfts: int = 12                 # не больше N NFT в профиле продавца (0 = не проверять)
     max_seller_level: int = 5                 # максимальный Level продавца (0 = не проверять)
@@ -310,6 +314,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "PHONE_MISMATCH_BLOCKS": ("phone_mismatch_blocks", _bool_strict),
     "ALLOW_HIDDEN_OWNER": ("allow_hidden_owner", _bool_strict),
     "LOOKUP_BOT_USERNAME": ("lookup_bot_username", lambda v: v.strip().lstrip("@")),
+    "TRADE_BOT_USERNAME": ("trade_bot_username", lambda v: v.strip().lstrip("@")),
     "SELLER_PHONE_PREFIXES": ("seller_phone_prefixes", _str_list),
     "TRACKER_INTERVAL": ("tracker_interval", _rng(0.2, 3600)),
     "PAGE_LIMIT": ("page_limit", lambda v: max(1, min(100, int(v)))),
@@ -373,6 +378,7 @@ def _from_env() -> Settings:
         phone_mismatch_blocks=_bool(e("PHONE_MISMATCH_BLOCKS"), True),
         allow_hidden_owner=_bool(e("ALLOW_HIDDEN_OWNER"), False),
         lookup_bot_username=(e("LOOKUP_BOT_USERNAME") or "").strip().lstrip("@"),
+        trade_bot_username=(e("TRADE_BOT_USERNAME") or "").strip().lstrip("@"),
         unique_gifts=_bool(e("UNIQUE_GIFTS"), True),
         require_free_messages=_bool(e("REQUIRE_FREE_MESSAGES"), True),
         max_seller_nfts=max(0, _int(e("MAX_SELLER_NFTS"), 12)),
