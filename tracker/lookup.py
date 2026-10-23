@@ -1,20 +1,19 @@
 """
-Автопоиск скрытого владельца через бота поиска (LOOKUP_BOT_USERNAME, например funstat).
+Автопоиск скрытого владельца через бота поиска (LOOKUP_BOT_USERNAME, например funstat / infostat).
 
-Раньше в посте была кнопка «🔍 Клик», которая открывала бота с предзаполненным «/human <имя>» —
-отправлять команду и проверять кандидатов приходилось вручную. Теперь это делает трекер сам:
+Лот со скрытым владельцем (видно только имя) перед отправкой в канал проходит поиск:
 
-  1. один из аккаунтов (LOOKUP_SESSION или первый рабочий) пишет боту «/human <имя продавца>»;
+  1. аккаунт поиска (LOOKUP_SESSIONS или первый рабочий) пишет боту «/human <имя продавца>»;
   2. ждёт ответ (бот может сначала прислать «ищу…» и потом отредактировать сообщение — это учтено);
-  3. из ответа достаёт кандидатов: @username, ссылки t.me/…, tg://user?id=…, упоминания по ID;
+  3. из ответа «01. Имя (@username)» достаёт кандидатов: @username, t.me/…, tg://user?id=…, ID;
   4. у каждого кандидата смотрит открытые NFT в профиле (payments.getSavedStarGifts) и ищет
-     ИМЕННО этот лот по slug / id. Владелец считается найденным только если NFT виден у него в профиле.
+     ИМЕННО этот лот по slug / id. Владелец найден только если NFT виден у него в профиле.
 
-Пост в канал уходит сразу, как и раньше (поиск не замедляет отправку); когда владелец найден,
-пост редактируется: в строке продавца появляется @username, кнопка «Написать» ведёт к нему.
+Найденный владелец становится обычным продавцом лота (@username, проверка профиля, «Написать»
+в ЛС). Не найден и LOOKUP_REQUIRED=true — лот не отправляется.
 
-Запросы к боту идут строго по одному (иначе ответы перепутаются), ответы кэшируются по имени,
-чтобы не тратить лимиты бота поиска на одно и то же имя.
+На одном аккаунте — один разговор с ботом за раз; несколько аккаунтов поиска работают параллельно.
+Ответы бота кэшируются по имени, чтобы не тратить его лимиты на одно и то же имя.
 """
 from __future__ import annotations
 
@@ -39,7 +38,7 @@ _ID_NEAR_RE = re.compile(r"\b(?:id|ид)\s*[:#№]?\s*(\d{5,12})\b", re.I)
 _SERVICE_NAMES = {"joinchat", "addstickers", "addemoji", "share", "proxy", "socks", "nft", "boost",
                   "c", "s", "iv", "m", "contact", "addlist", "invoice", "giftcode"}
 _WAIT_WORDS = ("ищу", "поиск", "подожд", "загруж", "search", "wait", "loading", "⏳", "🔎")
-_MAX_PENDING = 30                 # не больше N лотов в очереди на поиск (дальше — пропускаем)
+_MAX_PENDING = 300                # не больше N лотов в очереди на поиск (дальше — пропускаем)
 _CACHE_TTL = 3600.0               # кандидаты по одному имени — час
 
 
@@ -58,6 +57,7 @@ class FoundOwner:
     username: str | None
     name: str | None
     premium: bool | None = None
+    session: str | None = None          # аккаунт, который видит этого пользователя (есть access_hash)
 
 
 def _norm_name(s: str | None) -> str:
@@ -171,11 +171,12 @@ async def profile_has_gift(client, entity, slug: str | None, unique_id: int | No
 
 
 class OwnerLookup:
-    """Очередь поиска владельцев через бота поиска. Один разговор с ботом за раз."""
+    """Поиск владельцев через бота поиска. На одном аккаунте — один разговор с ботом за раз
+    (иначе ответы перепутаются); несколько аккаунтов поиска работают параллельно."""
 
     def __init__(self, sessions):
         self.sessions = sessions
-        self._lock = asyncio.Lock()
+        self._slocks: dict[str, asyncio.Lock] = {}
         self._pending = 0
         self._cache: dict[str, tuple[float, list[Candidate]]] = {}
         self._started: set[tuple[str, str]] = set()      # (session, bot) — /start уже отправляли
@@ -194,19 +195,27 @@ class OwnerLookup:
             return None
         self._pending += 1
         try:
-            async with self._lock:
-                return await self._find(seller_name, slug, unique_id)
+            return await self._find(seller_name, slug, unique_id)
         finally:
             self._pending -= 1
 
     # ------------------------------------------------------------------ internals
-    def _pick_session(self) -> str | None:
-        want = (settings.lookup_session or "").strip()
+    def _pick_sessions(self) -> list[str]:
+        """Аккаунты для бота поиска: выделенные (LOOKUP_SESSIONS) по кругу, иначе первый рабочий."""
+        want = [n for n in settings.lookup_sessions if n]
         if want:
-            w = self.sessions.get(want)
-            return want if w is not None and w.is_usable() else None
-        usable = sorted(w.name for w in self.sessions.usable())
-        return usable[0] if usable else None
+            ok = [n for n in want if (w := self.sessions.get(n)) is not None and w.is_usable()]
+            if ok:
+                self._rr = (getattr(self, "_rr", -1) + 1) % len(ok)
+                order = ok[self._rr:] + ok[:self._rr]
+                # свободные аккаунты (не ведут сейчас разговор с ботом) — первыми
+                return sorted(order, key=lambda n: self._slock(n).locked())
+            return []
+        usable = sorted(w.name for w in self.sessions.usable(include_reserved=True))
+        return usable[:1]
+
+    def _slock(self, session: str) -> asyncio.Lock:
+        return self._slocks.setdefault(session, asyncio.Lock())
 
     async def _run(self, session: str, fn, timeout: float = 30):
         res, _ = await self.sessions.run(fn, only=session, attempts=1, timeout=timeout)
@@ -214,18 +223,23 @@ class OwnerLookup:
 
     async def _find(self, seller_name: str, slug: str | None, unique_id: int | None) -> FoundOwner | None:
         bot = settings.lookup_bot_username.lstrip("@")
-        session = self._pick_session()
-        if session is None:
-            log.warning("Lookup: нет рабочего аккаунта%s", f" {settings.lookup_session}"
-                        if settings.lookup_session else "")
+        order = self._pick_sessions()
+        if not order:
+            log.warning("Lookup: нет рабочего аккаунта для бота поиска%s",
+                        f" ({', '.join(settings.lookup_sessions)})" if settings.lookup_sessions else "")
             return None
+        session = order[0]
         self.stats["lookups"] += 1
         key = _norm_name(seller_name)
         cached = self._cache.get(key)
         if cached and time.monotonic() - cached[0] < _CACHE_TTL:
             cands = cached[1]
         else:
-            cands = await self._ask_bot(session, bot, seller_name)
+            cands = None
+            for session in order:          # аккаунт не смог (лимит бота, FloodWait) — пробуем следующий
+                cands = await self._ask_bot(session, bot, seller_name)
+                if cands is not None:
+                    break
             if cands is None:
                 self.stats["no_answer"] += 1
                 return None
@@ -251,6 +265,10 @@ class OwnerLookup:
 
     async def _ask_bot(self, session: str, bot: str, seller_name: str) -> list[Candidate] | None:
         """Отправить «/human <имя>» и дождаться ответа. None — бот не ответил / ошибка."""
+        async with self._slock(session):
+            return await self._ask_bot_locked(session, bot, seller_name)
+
+    async def _ask_bot_locked(self, session: str, bot: str, seller_name: str) -> list[Candidate] | None:
         cmd = f"/human {seller_name}"
 
         async def _send(client):
@@ -342,5 +360,5 @@ class OwnerLookup:
                             uname = u.username
                             break
                 full = " ".join(x for x in (user.first_name, user.last_name) if x) or None
-                return FoundOwner(user.id, uname, full, getattr(user, "premium", None))
+                return FoundOwner(user.id, uname, full, getattr(user, "premium", None), session)
         return None

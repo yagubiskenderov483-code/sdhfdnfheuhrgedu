@@ -78,8 +78,20 @@ class SessionManager:
     def get(self, name: str | None) -> SessionWorker | None:
         return self.workers.get(name) if name else None
 
-    def usable(self) -> list[SessionWorker]:
-        return [w for w in self.workers.values() if w.is_usable()]
+    def reserved(self) -> set[str]:
+        """Аккаунты, выделенные только под бота поиска (LOOKUP_SESSIONS + LOOKUP_DEDICATED).
+        Если выделены вообще все рабочие аккаунты — резерв не действует, иначе трекер встанет."""
+        if not (settings.lookup_dedicated and settings.auto_lookup and settings.lookup_bot_username
+                and settings.lookup_sessions):
+            return set()
+        names = set(settings.lookup_sessions)
+        if all(w.name in names for w in self.workers.values() if w.is_usable()):
+            return set()
+        return names
+
+    def usable(self, include_reserved: bool = False) -> list[SessionWorker]:
+        res = set() if include_reserved else self.reserved()
+        return [w for w in self.workers.values() if w.is_usable() and w.name not in res]
 
     def effective(self) -> float:
         """Реальная мощность аккаунтов с учётом замедления после FloodWait:
@@ -128,8 +140,9 @@ class SessionManager:
                     raise WorkerUnavailable(f"session {only} is {w.status.value}")
                 candidates = [w] if (w.is_usable() and not w.busy) else []
             else:
+                res = self.reserved()
                 candidates = [w for w in self.workers.values()
-                              if w.is_usable() and not w.busy and not w.priority_waiters]
+                              if w.is_usable() and not w.busy and not w.priority_waiters and w.name not in res]
             if candidates:
                 pw = self.workers.get(prefer) if prefer else None
                 soonest = min(candidates, key=lambda w: w.ready_at())

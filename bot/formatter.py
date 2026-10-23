@@ -59,7 +59,7 @@ def seller_url(l: Listing) -> str | None:
 def _trade_offer(l: Listing) -> tuple[int, str] | None:
     """Сумма и единица для оффера в торговый бот.
     Правила скидки от текущей цены лота (по требованию админа):
-      Stars: ≤700 → −35; 701–1800 → −50; 1801–2500 → −60; 2501–5000 → −100;
+      Stars: ≤1000 → −30; 1001–1800 → −50; 1801–2500 → −60; 2501–5000 → −100;
              5001–10000 → −140; 10001+ → −215.
       TON (целых): <48 → −1 g; ≥48 → −2 g.
     Для ton-only лотов используется TON, иначе — Stars. Если ни того ни другого — None."""
@@ -69,8 +69,8 @@ def _trade_offer(l: Listing) -> tuple[int, str] | None:
         off = ton_int - (2 if ton_int >= 48 else 1)
         return (max(1, off), "g")
     if stars and stars > 0:
-        if stars <= 700:
-            d = 35
+        if stars <= 1000:
+            d = 30
         elif stars <= 1800:
             d = 50
         elif stars <= 2500:
@@ -89,37 +89,32 @@ def _trade_offer(l: Listing) -> tuple[int, str] | None:
 
 
 def listing_keyboard(l: Listing, with_seller: bool = True) -> InlineKeyboardMarkup:
-    """Кнопки: [Занять] / [Лот] [Написать] / [🔍 Найти по имени].
-    «Написать» ведёт либо на профиль продавца (стандарт), либо, когда задан TRADE_BOT_USERNAME,
-    на торговый бот с ГОТОВЫМ оффером «@<бот> <ссылка на NFT> <сниженная_цена>» в input'е."""
+    """Кнопки: [Занять] / [Лот] [Написать].
+    «Написать» открывает ЛС продавца. Если задан TRADE_BOT_USERNAME, в поле ввода уже стоит оффер
+    «@<бот> <ссылка на NFT> <сниженная_цена>» — остаётся нажать «Отправить» (inline-оффер прямо в ЛС).
+    Без @username продавца ЛС с текстом не открыть — тогда профиль по ID, иначе торговый бот."""
     rows = [[InlineKeyboardButton(text="Занять", callback_data=f"take:{l.gift_unique_id}"[:64])]]
     second = []
     if l.gift_link:
         second.append(InlineKeyboardButton(text="Лот", url=l.gift_link))
-    # «Написать»: либо торговый бот (приоритет), либо профиль продавца
     trade_bot = (getattr(settings, "trade_bot_username", "") or "").lstrip("@")
     offer = _trade_offer(l) if trade_bot else None
+    offer_text = None
     if trade_bot and offer and l.gift_link:
         amount, unit = offer
         tail = f" {amount} {unit}".rstrip()
-        text = f"@{trade_bot} {l.gift_link}{tail}"
-        second.append(InlineKeyboardButton(text="Написать",
-                                           url=f"https://t.me/{trade_bot}?text={quote(text, safe='/')}"))
-    else:
-        url = seller_url(l) if with_seller else None
-        if url:
-            second.append(InlineKeyboardButton(text="Написать", url=url))
-    # Для лотов со скрытым Telegram-ом владельцем — кнопка открывает бота поиска
-    # (например, funstat) с ПРЕДЗАПОЛНЕННЫМ текстом «/human <имя>».
-    # URL-формат  t.me/<bot>?text=<cmd>  поддерживается большинством клиентов (Desktop, Android,
-    # большинство версий iOS) — текст автоматически попадает в input, админу остаётся нажать «Отправить».
-    # На клиенте, где не предзаполнит, бот всё равно откроется — имя всегда можно скопировать
-    # из <code>…</code> в самом сообщении.
-    if with_seller and not seller_url(l) and l.seller_name and getattr(settings, "lookup_bot_username", ""):
-        bot = settings.lookup_bot_username.lstrip("@")
-        cmd = f"/human {l.seller_name}"
-        second.append(InlineKeyboardButton(text="🔍 Клик",
-                                           url=f"https://t.me/{bot}?text={quote(cmd, safe='/')}"))
+        offer_text = f"@{trade_bot} {l.gift_link}{tail}"
+    url = None
+    if with_seller and l.seller_username:
+        url = f"https://t.me/{l.seller_username}"
+        if offer_text:
+            url += f"?text={quote(offer_text, safe='/')}"
+    elif with_seller and seller_url(l):
+        url = seller_url(l)
+    elif offer_text:
+        url = f"https://t.me/{trade_bot}?text={quote(offer_text, safe='/')}"
+    if url:
+        second.append(InlineKeyboardButton(text="Написать", url=url))
     if second:
         rows.append(second)
     return InlineKeyboardMarkup(inline_keyboard=rows)

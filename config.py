@@ -175,7 +175,10 @@ class Settings:
     auto_lookup: bool = True                  # трекер сам пишет боту поиска «/human <имя>», проверяет
                                               # кандидатов (открыт ли у них этот NFT) и дописывает
                                               # найденного владельца в пост
-    lookup_session: str = ""                  # с какого аккаунта писать боту поиска (пусто = первый рабочий)
+    lookup_sessions: list[str] = field(default_factory=list)  # аккаунты, которые пишут боту поиска
+                                              # (пусто = первый рабочий аккаунт трекера)
+    lookup_required: bool = True              # скрытый владелец не найден ботом поиска → лот не слать
+    lookup_dedicated: bool = True             # аккаунты поиска НЕ опрашивают маркет — только пишут боту
     lookup_timeout: float = 25.0              # сколько секунд ждать ответа бота поиска
     lookup_max_candidates: int = 8            # сколько кандидатов из ответа проверять
     trade_bot_username: str = ""              # @username торгового бота (напр. "iostherobot") —
@@ -321,7 +324,9 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "ALLOW_HIDDEN_OWNER": ("allow_hidden_owner", _bool_strict),
     "LOOKUP_BOT_USERNAME": ("lookup_bot_username", lambda v: v.strip().lstrip("@")),
     "AUTO_LOOKUP": ("auto_lookup", _bool_strict),
-    "LOOKUP_SESSION": ("lookup_session", lambda v: "" if v.strip() in ("", "-") else v.strip()),
+    "LOOKUP_SESSIONS": ("lookup_sessions", lambda v: [] if v.strip() in ("", "-") else _str_list(v)),
+    "LOOKUP_DEDICATED": ("lookup_dedicated", _bool_strict),
+    "LOOKUP_REQUIRED": ("lookup_required", _bool_strict),
     "LOOKUP_TIMEOUT": ("lookup_timeout", _rng(5, 180)),
     "LOOKUP_MAX_CANDIDATES": ("lookup_max_candidates", lambda v: max(1, min(30, int(v)))),
     "TRADE_BOT_USERNAME": ("trade_bot_username", lambda v: v.strip().lstrip("@")),
@@ -389,7 +394,9 @@ def _from_env() -> Settings:
         allow_hidden_owner=_bool(e("ALLOW_HIDDEN_OWNER"), False),
         lookup_bot_username=(e("LOOKUP_BOT_USERNAME") or "").strip().lstrip("@"),
         auto_lookup=_bool(e("AUTO_LOOKUP"), True),
-        lookup_session=(e("LOOKUP_SESSION") or "").strip(),
+        lookup_sessions=_str_list(e("LOOKUP_SESSIONS") or e("LOOKUP_SESSION") or ""),
+        lookup_dedicated=_bool(e("LOOKUP_DEDICATED"), True),
+        lookup_required=_bool(e("LOOKUP_REQUIRED"), True),
         lookup_timeout=min(180.0, max(5.0, _float(e("LOOKUP_TIMEOUT"), 25.0))),
         lookup_max_candidates=max(1, min(30, _int(e("LOOKUP_MAX_CANDIDATES"), 8))),
         trade_bot_username=(e("TRADE_BOT_USERNAME") or "").strip().lstrip("@"),

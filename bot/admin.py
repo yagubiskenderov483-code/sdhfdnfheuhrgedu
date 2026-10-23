@@ -145,6 +145,7 @@ _REJ = {"PAID_MESSAGES": "платные сообщения / только Premi
         "LEVEL_TOO_HIGH": "Level выше лимита", "UNKNOWN_BLOCKED": "нет признаков русского",
         "PHONE_MISMATCH": "номер не +7/+375/+380", "FOREIGN_TEXT": "профиль на чужом языке",
         "LOOKUP_FAILED": "профиль не прочитался (аккаунты заняты)", "BLACKLIST": "blacklist",
+        "OWNER_NOT_FOUND": "скрытый владелец не найден ботом поиска",
         "FOREIGN_NAME_HIDDEN": "имя продавца на чужом языке (профиль скрыт Telegram)",
         "SHORT_NAME_HIDDEN": "имя продавца короче 5 букв (профиль скрыт)",
         "FOREIGN_LETTER_HIDDEN": "иностранные буквы (ö ü ğ ə ç ş ı) в имени (профиль скрыт)"}
@@ -257,7 +258,9 @@ SETTING_DESC: dict[str, str] = {
     "ALLOW_HIDDEN_OWNER": "true — пропускать лоты со скрытым Telegram-ом владельцем (без языкового фильтра)",
     "LOOKUP_BOT_USERNAME": "@username бота поиска по имени (напр. funstat); пусто = кнопки нет",
     "AUTO_LOOKUP": "true — трекер сам шлёт боту поиска /human «имя» и дописывает в пост владельца, у которого открыт этот NFT",
-    "LOOKUP_SESSION": "аккаунт, который пишет боту поиска (напр. session_001); - = первый рабочий",
+    "LOOKUP_SESSIONS": "аккаунты, которые пишут боту поиска, через запятую (напр. session_005,session_006); - = первый рабочий",
+    "LOOKUP_REQUIRED": "true — лот со скрытым владельцем уходит только если бот поиска нашёл его @юз",
+    "LOOKUP_DEDICATED": "true — аккаунты поиска не опрашивают маркет, только пишут боту поиска",
     "LOOKUP_TIMEOUT": "сколько секунд ждать ответ бота поиска",
     "LOOKUP_MAX_CANDIDATES": "сколько кандидатов из ответа бота поиска проверять (1–30)",
     "TRADE_BOT_USERNAME": "@username торгового бота (напр. iostherobot); кнопка «Написать» → оффер со скидкой",
@@ -294,8 +297,8 @@ SETTING_GROUPS: list[tuple[str, list[str]]] = [
                          "SELLER_REPEAT_HOURS"]),
     ("⚡ Скорость", ["PRIORITY_FLOOR", "PRIORITY_SHARE", "PRIORITY_POLL_INTERVAL", "CATALOG_INTERVAL", "COLD_POLL_INTERVAL", "TRACKER_INTERVAL", "PAGE_LIMIT",
                     "SESSION_RPS", "GLOBAL_RPS", "MAX_CONCURRENT_SESSIONS", "LOW_PRIORITY_POLL_INTERVAL", "SYNC_MODE"]),
-    ("🔗 Внешние боты", ["TRADE_BOT_USERNAME", "LOOKUP_BOT_USERNAME", "AUTO_LOOKUP", "LOOKUP_SESSION",
-                          "LOOKUP_TIMEOUT", "LOOKUP_MAX_CANDIDATES"]),
+    ("🔗 Внешние боты", ["TRADE_BOT_USERNAME", "LOOKUP_BOT_USERNAME", "AUTO_LOOKUP", "LOOKUP_REQUIRED", "LOOKUP_SESSIONS",
+                          "LOOKUP_DEDICATED", "LOOKUP_TIMEOUT", "LOOKUP_MAX_CANDIDATES"]),
     ("⚙️ Прочее", ["COLLECTION_FLOOR_MODE", "TEST_MODE", "ALLOW_ALL_USERS", "FETCH_FULL_SELLER"]),
     ("📢 Общий и каналы по цене", ["TARGET_CHAT_ID", "PRICE_ROUTES", "ROUTE_BY"]),
     ("🎨 Каналы по фону", ["BACKDROP_ROUTES"]),
@@ -1259,7 +1262,10 @@ def build_routers(app: "App") -> list[Router]:
                 ("PHONE_MISMATCH_BLOCKS", "phone_mismatch_blocks", "Чужой телефон — отсеять"),
                 ("UNIQUE_SELLERS", "unique_sellers", "Продавец не повторяется"),
                 ("UNIQUE_GIFTS", "unique_gifts", "NFT не повторяется"),
-                ("ALLOW_TON_ONLY", "allow_ton_only", "Лоты только за TON"))
+                ("ALLOW_TON_ONLY", "allow_ton_only", "Лоты только за TON"),
+                ("ALLOW_HIDDEN_OWNER", "allow_hidden_owner", "Лоты со скрытым владельцем"),
+                ("AUTO_LOOKUP", "auto_lookup", "Автопоиск владельца (бот поиска)"),
+                ("LOOKUP_REQUIRED", "lookup_required", "Скрытый владелец — только с найденным юзом"))
     _REPEAT_STEPS = (0, 6, 24, 72)
 
     def _panel() -> tuple[str, InlineKeyboardMarkup]:
@@ -1275,6 +1281,10 @@ def build_routers(app: "App") -> list[Router]:
         rows.append([InlineKeyboardButton(
             text=f"🔍 Бот поиска: @{lb}" if lb else "🔍 Добавить бота поиска (funstat)",
             callback_data="flt:LOOKUPBOT")])
+        accs = settings.lookup_sessions
+        rows.append([InlineKeyboardButton(
+            text="👤 Аккаунты для поиска: " + (", ".join(accs) if accs else "авто (первый рабочий)"),
+            callback_data="flt:LKACC")])
         tb = settings.trade_bot_username or ""
         rows.append([InlineKeyboardButton(
             text=f"💰 Торговый бот: @{tb}" if tb else "💰 Добавить торгового бота (оффер)",
@@ -1283,6 +1293,79 @@ def build_routers(app: "App") -> list[Router]:
                 f"Мин. цена: {settings.min_stars}⭐ · флор коллекции от {settings.collection_min_floor}⭐ "
                 "(менять: /set MIN_STARS …)\nПочему лоты отсеиваются: /why")
         return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    _LOOKUP_TIMEOUTS = (15, 25, 40, 60)
+
+    def _lookup_panel() -> tuple[str, InlineKeyboardMarkup]:
+        """Подменю: какие аккаунты пишут боту поиска («/human имя») и как."""
+        chosen = set(settings.lookup_sessions)
+        rows = []
+        for name in sorted(app.sessions.workers):
+            w = app.sessions.workers[name]
+            mark = "✅" if name in chosen else "⬜"
+            alive = "" if w.is_usable() else " ⚠️"
+            rows.append([InlineKeyboardButton(text=f"{mark} {name}{alive}", callback_data=f"lka:{name}"[:64])])
+        rows.append([InlineKeyboardButton(
+            text=f"{'✅' if settings.lookup_dedicated else '⬜'} Только поиск (не опрашивают маркет)",
+            callback_data="lka:~DED")])
+        rows.append([InlineKeyboardButton(text=f"⏱ Ждать ответ бота: {settings.lookup_timeout:g} с",
+                                          callback_data="lka:~TO")])
+        rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="lka:~BACK")])
+        lb = settings.lookup_bot_username
+        text = ("👤 <b>Аккаунты для бота поиска</b>\n"
+                f"Бот поиска: {('@' + html.escape(lb)) if lb else '<i>не задан — /panel → 🔍</i>'}\n"
+                f"Автопоиск: {'включён' if settings.auto_lookup else 'выключен'}\n\n"
+                "Отмеченные аккаунты пишут боту <code>/human имя</code> по очереди (если один упёрся в лимит — "
+                "пишет следующий). Ничего не отмечено — пишет первый рабочий аккаунт трекера.\n"
+                "«Только поиск» — отмеченные аккаунты не опрашивают маркет, работают только на поиск.\n"
+                "⚠️ — аккаунт сейчас не работает. Добавить аккаунт: /add_session")
+        return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @public.callback_query(F.data.startswith("lka:"))
+    async def cb_lookup_accounts(q: CallbackQuery) -> None:
+        if not is_manager(q.from_user.id):
+            await q.answer("Только для админов", show_alert=True)
+            return
+        key = q.data.split(":", 1)[1]
+        if key == "~BACK":
+            text, kb = _panel()
+            try:
+                await q.message.edit_text(text, reply_markup=kb)
+            except Exception:
+                pass
+            await q.answer()
+            return
+        try:
+            if key == "~DED":
+                set_runtime_value("LOOKUP_DEDICATED", "false" if settings.lookup_dedicated else "true")
+            elif key == "~TO":
+                steps = _LOOKUP_TIMEOUTS
+                cur = int(settings.lookup_timeout)
+                nxt = next((x for x in steps if x > cur), steps[0])
+                set_runtime_value("LOOKUP_TIMEOUT", str(nxt))
+            else:
+                if key not in app.sessions.workers and key not in settings.lookup_sessions:
+                    await q.answer("Такого аккаунта нет")
+                    return
+                cur = list(settings.lookup_sessions)
+                if key in cur:
+                    cur.remove(key)
+                else:
+                    cur.append(key)
+                set_runtime_value("LOOKUP_SESSIONS", ",".join(cur) or "-")
+        except (KeyError, ValueError):
+            await q.answer("Не удалось сохранить")
+            return
+        try:
+            await app.backup.save()
+        except Exception:
+            pass
+        text, kb = _lookup_panel()
+        try:
+            await q.message.edit_text(text, reply_markup=kb)
+        except Exception:
+            pass
+        await q.answer("Сохранено")
 
     @admin.message(Command("panel"))
     async def cmd_panel(m: Message) -> None:
@@ -1300,11 +1383,20 @@ def build_routers(app: "App") -> list[Router]:
             msg = ("🔍 <b>Бот поиска по имени</b>\n\n"
                    f"Сейчас: {('@' + cur) if cur else '<i>не задан</i>'}\n\n"
                    "Пришлите @username бота (например: <code>funstat</code> или <code>@funstat</code>) — "
-                   "в постах со скрытым продавцом появится кнопка «🔍 Клик», открывающая этого бота "
-                   "с уже введённой командой <code>/human &lt;имя&gt;</code>.\n\n"
+                   "для лотов со скрытым продавцом трекер сам напишет ему <code>/human &lt;имя&gt;</code>, "
+                   "найдёт @юз владельца (у кого этот NFT открыт в профиле) и только потом отправит лот.\n"
+                   "Какие аккаунты пишут боту — /panel → «👤 Аккаунты для поиска».\n\n"
                    "Отправьте «<code>-</code>» или <code>off</code>, чтобы убрать кнопку. /cancel — отмена.")
             await state.set_state(SetLookupBot.waiting)
             await q.message.answer(msg)
+            await q.answer()
+            return
+        if key == "LKACC":
+            text, kb = _lookup_panel()
+            try:
+                await q.message.edit_text(text, reply_markup=kb)
+            except Exception:
+                await q.message.answer(text, reply_markup=kb)
             await q.answer()
             return
         if key == "TRADEBOT":
@@ -1312,10 +1404,10 @@ def build_routers(app: "App") -> list[Router]:
             msg = ("💰 <b>Торговый бот для оффера</b>\n\n"
                    f"Сейчас: {('@' + cur) if cur else '<i>не задан</i>'}\n\n"
                    "Пришлите @username бота (например: <code>iostherobot</code>). "
-                   "Кнопка «Написать» под постом будет открывать его с готовым оффером:\n"
+                   "Кнопка «Написать» под постом откроет ЛС продавца с уже введённым оффером:\n"
                    "<code>@&lt;бот&gt; &lt;ссылка&gt; &lt;цена со скидкой&gt;</code>\n\n"
                    "Скидка от цены лота:\n"
-                   "⭐ ≤700 → −35 · 701-1800 → −50 · 1801-2500 → −60 · 2501-5000 → −100 · "
+                   "⭐ ≤1000 → −30 · 1001-1800 → −50 · 1801-2500 → −60 · 2501-5000 → −100 · "
                    "5001-10000 → −140 · 10001+ → −215\n"
                    "💎 TON &lt;48 → −1 · ≥48 → −2\n\n"
                    "Отправьте «<code>-</code>» или <code>off</code>, чтобы вернуть обычное «Написать». /cancel — отмена.")
@@ -1382,14 +1474,14 @@ def build_routers(app: "App") -> list[Router]:
     @admin.message(SetLookupBot.waiting, F.text)
     async def cmd_set_lookup_bot(m: Message, state: FSMContext) -> None:
         await _accept_bot_handle(m, state, "LOOKUP_BOT_USERNAME",
-                                 "✅ Бот поиска убран — кнопка «🔍 Клик» больше не будет появляться.",
-                                 "✅ Бот поиска: @{uname}. В постах со скрытым продавцом появится кнопка «🔍 Клик».")
+                                 "✅ Бот поиска убран — автопоиск скрытых владельцев выключен.",
+                                 "✅ Бот поиска: @{uname}. Скрытых владельцев трекер теперь ищет через него сам.")
 
     @admin.message(SetTradeBot.waiting, F.text)
     async def cmd_set_trade_bot(m: Message, state: FSMContext) -> None:
         await _accept_bot_handle(m, state, "TRADE_BOT_USERNAME",
-                                 "✅ Торговый бот убран — «Написать» снова будет вести на профиль продавца.",
-                                 "✅ Торговый бот: @{uname}. Кнопка «Написать» теперь откроет его с готовым оффером.")
+                                 "✅ Торговый бот убран — «Написать» откроет ЛС продавца без оффера.",
+                                 "✅ Торговый бот: @{uname}. «Написать» откроет ЛС продавца с готовым оффером через @{uname}.")
 
     @admin.message(Command("proxies", "proxy"))
     async def cmd_proxy_group(m: Message) -> None:

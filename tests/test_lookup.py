@@ -102,7 +102,7 @@ class FakeSessions:
     def get(self, name):
         return self.workers.get(name)
 
-    def usable(self):
+    def usable(self, include_reserved=False):
         return list(self.workers.values())
 
     async def run(self, fn, only=None, attempts=1, timeout=None, **kw):
@@ -115,7 +115,7 @@ REPLY = "Найдено 3:\n1. @ivan_real — Иван\n2. Иван Иванов
 async def main():
     settings.lookup_bot_username = "funstat"
     settings.auto_lookup = True
-    settings.lookup_session = ""
+    settings.lookup_sessions = []
     settings.lookup_timeout = 8
 
     # --- парсер кандидатов
@@ -164,6 +164,41 @@ async def main():
     settings.lookup_timeout = 5
     check(await lk.find_owner("Иван Иванов", "PlushPepe-77", 5555) is None, "бот не ответил → None")
 
+    # несколько выделенных аккаунтов: первый не смог написать боту → пишет второй
+    class TwoSessions(FakeSessions):
+        def __init__(self, client):
+            super().__init__(client)
+            self.workers = {"s1": FakeWorker("s1"), "s2": FakeWorker("s2")}
+            self.used = []
+
+        async def run(self, fn, only=None, **kw):
+            self.used.append(only)
+            if only == "s1":
+                raise RuntimeError("limit")
+            return await fn(self.client), only
+
+    settings.lookup_sessions = ["s1", "s2"]
+    settings.lookup_timeout = 8
+    ts = TwoSessions(FakeClient(REPLY, gifts, users))
+    f = await L.OwnerLookup(ts).find_owner("Иван Иванов", "PlushPepe-77", 5555)
+    check(f is not None and f.user_id == 222 and "s2" in ts.used, "аккаунт s1 упал → поиск через s2")
+    settings.lookup_sessions = []
+
+    # отдельные аккаунты поиска не берут опросы маркета
+    from sessions.manager import SessionManager
+    sm = SessionManager.__new__(SessionManager)
+    sm.workers = {n: FakeWorker(n) for n in ("session_001", "session_002", "session_003")}
+    settings.lookup_sessions, settings.lookup_dedicated = ["session_003"], True
+    names = [w.name for w in sm.usable()]
+    check(names == ["session_001", "session_002"], "выделенный аккаунт не опрашивает маркет")
+    check(len(sm.usable(include_reserved=True)) == 3, "но поиск его видит")
+    settings.lookup_dedicated = False
+    check(len(sm.usable()) == 3, "LOOKUP_DEDICATED=false — аккаунт работает и на маркет")
+    settings.lookup_dedicated = True
+    settings.lookup_sessions = ["session_001", "session_002", "session_003"]
+    check(len(sm.usable()) == 3, "выделены все аккаунты — резерв не действует, трекер не встаёт")
+    settings.lookup_sessions = []
+
     # выключено → ничего не делаем
     settings.auto_lookup = False
     c = FakeClient(REPLY, gifts, users)
@@ -172,48 +207,86 @@ async def main():
           "AUTO_LOOKUP=false → боту не пишем")
     settings.auto_lookup = True
 
-    # --- конвейер: пост редактируется, в нём @username
+    # --- конвейер: скрытый владелец ищется ДО отправки, лот уходит уже с @username
     from tracker.queue import ListingPipeline
-    from bot.formatter import MessageFormatter
-
-    class FakeSender:
-        def __init__(self):
-            self.edits = []
-
-        async def edit_listing(self, chat_id, message_id, text, preview, markup=None, fallback=None):
-            self.edits.append((chat_id, message_id, text, markup))
-            return True
+    from bot.formatter import MessageFormatter, listing_keyboard
+    from database.models import ListingStatus
 
     class FakeDB:
         async def update_listing(self, l):
             self.l = l
 
-    c = FakeClient(REPLY, gifts, users)
-    p = ListingPipeline.__new__(ListingPipeline)
-    p.owner_lookup = L.OwnerLookup(FakeSessions(c))
-    p.sender, p.db = FakeSender(), FakeDB()
-    p.formatter = MessageFormatter(settings.path(settings.template_path))
-    p.stats = {}
-    l = Listing(listing_id="5555:n:Иван Иванов", gift_unique_id=5555, gift_id=1, gift_name="Plush Pepe",
-                gift_slug="PlushPepe-77", gift_link="https://t.me/nft/PlushPepe-77", seller_key="n:Иван Иванов",
-                seller_name="Иван Иванов", stars_price=10000)
-    check(p._needs_lookup(l), "лот со скрытым владельцем требует поиска")
-    await p._lookup_and_edit(l, -100123, 42)
-    check(len(p.sender.edits) == 1, "пост отредактирован")
-    chat, mid, text, markup = p.sender.edits[0]
-    check(chat == -100123 and mid == 42, "правится нужное сообщение")
-    check("@ivan_222" in text and "funstat" in text, "в посте @username и пометка о поиске")
-    btns = [b.text for row in markup.inline_keyboard for b in row]
-    check("🔍 Клик" not in btns, "кнопка ручного поиска убрана после находки")
-    check(p.db.l.seller_username == "ivan_222", "найденный владелец сохранён в БД")
+    def pipeline(client):
+        p = ListingPipeline.__new__(ListingPipeline)
+        p.owner_lookup = L.OwnerLookup(FakeSessions(client))
+        p.db = FakeDB()
+        p.stats = {"filtered_seller": 0}
+        p.paused_getter = p.muted_getter = None
+        p.price_filter = type("PF", (), {"check": lambda self, l: type("R", (), {"passed": True})()})()
+        from filters.seller_filter import SellerFilter
+        import tempfile, pathlib
+        p.seller_filter = SellerFilter(pathlib.Path(tempfile.mkdtemp()))
+        p.sent_l = None
 
-    # «Написать» после находки владельца ведёт в торговый бот с оффером, а не в ЛС продавцу
-    from bot.formatter import listing_keyboard
+        async def resolve(l):
+            return None
+        p._resolve_hidden_owner = resolve
+
+        async def sent_before(l):
+            return None
+        p._sent_before = sent_before
+
+        async def check(l):
+            from filters.seller_filter import SellerResult
+            return SellerResult(True, "OK", "ok")
+        p._check_seller = check
+        p._seller_locks = {}
+
+        async def send_stage(ev, l, base, t0):
+            p.sent_l = l
+        p._send_stage = send_stage
+        return p
+
+    def hidden():
+        return Listing(listing_id="5555:n:Иван Иванов", gift_unique_id=5555, gift_id=1, gift_name="Plush Pepe",
+                       gift_slug="PlushPepe-77", gift_link="https://t.me/nft/PlushPepe-77",
+                       seller_key="n:Иван Иванов", seller_name="Иван Иванов", stars_price=10000)
+
+    from tracker.queue import ListingEvent
+    import time as _t
+    settings.lookup_required = True
+    p = pipeline(FakeClient(REPLY, gifts, users))
+    l = hidden()
+    check(p._needs_lookup(l), "лот со скрытым владельцем требует поиска")
+    await p.process(ListingEvent(l, _t.monotonic(), "live"))
+    check(p.sent_l is l, "лот отправлен после поиска")
+    check(l.seller_username == "ivan_222" and l.seller_id == 222 and l.seller_key == "u222",
+          "владелец подставлен как обычный продавец")
+    text = MessageFormatter(settings.path(settings.template_path)).render(l)
+    check("@ivan_222" in text, "в посте @username владельца")
     settings.trade_bot_username = "iostherobot"
     kb = listing_keyboard(l)
-    w = [b for row in kb.inline_keyboard for b in row if b.text == "Написать"]
-    check(w and w[0].url.startswith("https://t.me/iostherobot?text="), "«Написать» → торговый бот")
+    btns = {b.text: b for row in kb.inline_keyboard for b in row}
+    check(set(btns) == {"Занять", "Лот", "Написать"}, "кнопки: Занять / Лот / Написать (без «Клик»)")
+    check(btns["Написать"].url.startswith("https://t.me/ivan_222?text=%40iostherobot"),
+          "«Написать» → ЛС продавца с готовым оффером")
     settings.trade_bot_username = ""
+    check(btns and listing_keyboard(l).inline_keyboard[1][1].url == "https://t.me/ivan_222",
+          "без торгового бота «Написать» → просто ЛС продавца")
+
+    # скидка оффера: до 1000 ⭐ включительно −30, дальше как было
+    from bot.formatter import _trade_offer
+    def off(stars):
+        return _trade_offer(Listing(listing_id="x", gift_unique_id=1, gift_id=1, gift_name="x", stars_price=stars))
+    check(off(1000) == (970, "") and off(500) == (470, ""), "до 1000 ⭐ → −30 (1000 → 970)")
+    check(off(1001) == (951, "") and off(1800) == (1750, "") and off(3000) == (2900, ""),
+          "от 1001 ⭐ — прежние скидки")
+
+    # не нашли и LOOKUP_REQUIRED=true → лот не уходит
+    p = pipeline(FakeClient(REPLY, {111: [], 222: [], 333: []}, users))
+    l = hidden()
+    await p.process(ListingEvent(l, _t.monotonic(), "live"))
+    check(p.sent_l is None and l.status == ListingStatus.FILTERED_SELLER, "владелец не найден → лот не отправлен")
 
     l2 = Listing(listing_id="1:u1", gift_unique_id=1, gift_id=1, gift_name="x", seller_type="user",
                  seller_id=1, seller_name="A")

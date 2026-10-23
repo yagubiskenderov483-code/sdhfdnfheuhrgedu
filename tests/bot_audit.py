@@ -175,6 +175,29 @@ async def run():
     before = settings.russian_only
     await click(app, STRANGER, "flt:RUSSIAN_ONLY")
     if settings.russian_only != before: problems.append("stranger could toggle filters")
+    # автопоиск владельца: переключатели и подменю аккаунтов поиска
+    was = settings.auto_lookup
+    await click(app, 8852171067, "flt:AUTO_LOOKUP")
+    if settings.auto_lookup == was: problems.append("/panel toggle did not change AUTO_LOOKUP")
+    await click(app, 8852171067, "flt:AUTO_LOOKUP")
+    await click(app, 8852171067, "flt:LKACC")
+    acc = sorted(app.sessions.workers)[0] if app.sessions.workers else None
+    if acc:
+        await click(app, 8852171067, f"lka:{acc}")
+        if acc not in settings.lookup_sessions: problems.append("lookup account was not selected")
+        await click(app, 8852171067, f"lka:{acc}")
+        if acc in settings.lookup_sessions: problems.append("lookup account was not unselected")
+    was = settings.lookup_dedicated
+    await click(app, 8852171067, "lka:~DED")
+    if settings.lookup_dedicated == was: problems.append("LOOKUP_DEDICATED toggle failed")
+    await click(app, 8852171067, "lka:~DED")
+    t0 = settings.lookup_timeout
+    await click(app, 8852171067, "lka:~TO")
+    if settings.lookup_timeout == t0: problems.append("LOOKUP_TIMEOUT step failed")
+    await click(app, 8852171067, "lka:~BACK")
+    before = list(settings.lookup_sessions)
+    await click(app, STRANGER, f"lka:{acc}")
+    if settings.lookup_sessions != before: problems.append("stranger could change lookup accounts")
     settings.seller_repeat_hours = 0
     for c in ("/why", "/lot https://t.me/nft/X-1", "/lot"):
         if not await say(app, 8852171067, c): problems.append(f"NO REPLY to {c!r}")
