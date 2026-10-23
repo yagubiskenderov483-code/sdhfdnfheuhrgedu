@@ -149,6 +149,10 @@ def _peer_to_owner(p: Any) -> tuple[str, str, int] | None:
     return None
 
 
+_OWNER_DIAG_LOGGED = 0           # разовая диагностика: сколько полностью-скрытых лотов уже сдампили
+_OWNER_DIAG_LIMIT = 5             # не больше 5 дампов за время жизни процесса — чтобы не засрать логи
+
+
 def _owner(g: types.StarGiftUnique) -> tuple[str, str | None, int | None]:
     """Определяет продавца по starGiftUnique.
     Приоритет (по схеме Layer 229, core.telegram.org/constructor/starGiftUnique):
@@ -164,6 +168,19 @@ def _owner(g: types.StarGiftUnique) -> tuple[str, str | None, int | None]:
     o = _peer_to_owner(getattr(g, "host_id", None))
     if o is not None:
         return o
+    # Диагностика: первые N полностью-скрытых лотов — одной строкой в warning, чтобы увидеть
+    # что реально отдаёт Telegram и понять, есть ли ещё поле, в котором спрятан продавец.
+    global _OWNER_DIAG_LOGGED
+    if _OWNER_DIAG_LOGGED < _OWNER_DIAG_LIMIT:
+        _OWNER_DIAG_LOGGED += 1
+        try:
+            log.warning("HIDDEN_OWNER_DIAG slug=%s owner_id=%r host_id=%r released_by=%r theme_peer=%r "
+                        "owner_address=%r gift_address=%r owner_name=%r",
+                        getattr(g, "slug", None), g.owner_id, getattr(g, "host_id", None),
+                        getattr(g, "released_by", None), getattr(g, "theme_peer", None),
+                        g.owner_address, getattr(g, "gift_address", None), g.owner_name)
+        except Exception:
+            pass
     if g.owner_address:
         return f"a{g.owner_address}", "address", None
     if g.owner_name:
