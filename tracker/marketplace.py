@@ -219,10 +219,13 @@ def parse_unique_gift(g: Any, users: dict[int, Any], chats: dict[int, Any]) -> R
 
 
 async def fetch_gift_owner(client: TelegramClient, slug: str) -> Any:
-    """Владелец/хост конкретного NFT по ссылке t.me/nft/<slug>. Для не-TON подарков это owner_id;
-    для NFT на TON-блокчейне owner_id пуст, но есть host_id — профиль, на котором подарок
-    отображается (= продавец, выставивший лот). → telethon User или None.
-    Namespace: только PeerUser; каналы/чаты через этот путь не раскрываем."""
+    """Владелец NFT по ссылке t.me/nft/<slug>. Три пути (в порядке приоритета):
+      1) gift.owner_id = PeerUser   — обычные (не-TON) подарки
+      2) gift.host_id = PeerUser    — NFT на TON-блокчейне, кто демонстрирует на профиле
+      3) res.users[] содержит ровно одного (или одного не-released_by) юзера — Telegram возвращает
+         владельца через users-масив, даже когда peer-поле в самом gift пустое.
+    Namespace: только PeerUser; каналы/чаты не раскрываем здесь.
+    Возвращает telethon User или None."""
     res = await client(GetUniqueStarGiftRequest(slug=slug))
     g = getattr(res, "gift", None)
     for peer in (getattr(g, "owner_id", None), getattr(g, "host_id", None)):
@@ -230,6 +233,21 @@ async def fetch_gift_owner(client: TelegramClient, slug: str) -> Any:
             u = next((u for u in (res.users or []) if getattr(u, "id", None) == peer.user_id), None)
             if u is not None:
                 return u
+    # Fallback: owner пришёл в users[], но ни owner_id ни host_id на него не указывают.
+    # Исключаем released_by (автор коллекции) и theme_peer (чат-тема).
+    users = res.users or []
+    exclude: set[int] = set()
+    for peer_attr in ("released_by", "theme_peer"):
+        peer = getattr(g, peer_attr, None)
+        if isinstance(peer, types.PeerUser):
+            exclude.add(peer.user_id)
+    candidates = [u for u in users if getattr(u, "id", None) and u.id not in exclude]
+    if len(candidates) == 1:
+        log.info("Owner of %s resolved from users[] fallback (no peer-field pointed to them)", slug)
+        return candidates[0]
+    if candidates:
+        log.info("Owner of %s ambiguous: users[]=%s — not guessing",
+                 slug, [getattr(u, "id", None) for u in candidates])
     return None
 
 

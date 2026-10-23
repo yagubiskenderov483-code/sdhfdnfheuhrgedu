@@ -627,9 +627,33 @@ def test_fetch_gift_owner_prefers_host():
     assert u2 is not None and u2.id == 777
 
     # ни того, ни другого — None
-    gift_hidden = _t.SimpleNamespace(owner_id=None, host_id=None, owner_address="EQ...", owner_name="X")
-    u3 = asyncio.run(fetch_gift_owner(FakeClient(gift_hidden), "slug-3"))
+    gift_hidden = _t.SimpleNamespace(owner_id=None, host_id=None, owner_address="EQ...", owner_name="X",
+                                     released_by=None, theme_peer=None)
+    class EmptyClient:
+        async def __call__(self, req):
+            return _t.SimpleNamespace(gift=gift_hidden, users=[], chats=[])
+    u3 = asyncio.run(fetch_gift_owner(EmptyClient(), "slug-3"))
     assert u3 is None
+
+    # NEW FALLBACK: owner_id/host_id пусты, но users[] содержит одного юзера → он и есть владелец.
+    # Это та схема, через которую конкурентные боты вытаскивают @username для скрытых TON-NFT.
+    users_fb = [_t.SimpleNamespace(id=5440199267, username="gwllnk", first_name="g")]
+    gift_in_users = _t.SimpleNamespace(owner_id=None, host_id=None, owner_address="EQ...",
+                                       owner_name="gwllnk", released_by=None, theme_peer=None)
+    class FallbackClient:
+        async def __call__(self, req):
+            return _t.SimpleNamespace(gift=gift_in_users, users=users_fb, chats=[])
+    u4 = asyncio.run(fetch_gift_owner(FallbackClient(), "slug-4"))
+    assert u4 is not None and u4.id == 5440199267 and u4.username == "gwllnk", u4
+
+    # Если в users[] двое и ни один не привязан peer-полем — не угадываем.
+    users_ambig = [_t.SimpleNamespace(id=1, username="a", first_name="a"),
+                   _t.SimpleNamespace(id=2, username="b", first_name="b")]
+    class AmbigClient:
+        async def __call__(self, req):
+            return _t.SimpleNamespace(gift=gift_in_users, users=users_ambig, chats=[])
+    u5 = asyncio.run(fetch_gift_owner(AmbigClient(), "slug-5"))
+    assert u5 is None, "неоднозначный users[] — не угадываем"
     print("FETCH GIFT OWNER OK")
 
 test_fetch_gift_owner_prefers_host()
