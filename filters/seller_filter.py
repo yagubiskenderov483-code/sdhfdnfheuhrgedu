@@ -134,6 +134,12 @@ class SellerFilter:
         if self._match(l, self.black_ids, self.black_names):
             return SellerResult(False, "BLACKLIST", "seller in blacklist")
 
+        # Telegram в октябре 26 начал скрывать владельцев NFT: owner_id отсутствует, видно только имя.
+        # Профиль недоступен — RUSSIAN_ONLY к такому лоту неприменим. С ALLOW_HIDDEN_OWNER=true
+        # такие лоты идут в канал без языкового фильтра (иначе падали бы в UNKNOWN_BLOCKED).
+        if settings.allow_hidden_owner and l.seller_type is None and l.seller_id is None:
+            return SellerResult(True, "OWNER_HIDDEN", "owner hidden by Telegram — no profile to filter on")
+
         # продавцу должно быть можно написать бесплатно
         if settings.require_free_messages and l.seller_type == "user" and l.messages != "бесплатно":
             return SellerResult(False, "PAID_MESSAGES",

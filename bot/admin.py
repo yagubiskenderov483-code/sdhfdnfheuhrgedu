@@ -243,6 +243,7 @@ SETTING_DESC: dict[str, str] = {
     "ALLOW_TON_ONLY": "слать лоты, которые продаются только за TON (true/false)",
     "RUSSIAN_ONLY": "только русские продавцы (true/false)",
     "UNKNOWN_SELLER_POLICY": "продавец без явных данных: block (отсеять) | allow (пропускать)",
+    "ALLOW_HIDDEN_OWNER": "true — пропускать лоты со скрытым Telegram-ом владельцем (без языкового фильтра)",
     "SELLER_NAME_SIGNAL": "true — имя кириллицей («Дмитрий») считается русскоязычным продавцом (больше лотов)",
     "PHONE_MISMATCH_BLOCKS": "false — чужой телефон не отсеивает сразу, решает язык профиля (больше лотов)",
     "REQUIRE_FREE_MESSAGES": "продавцу можно написать бесплатно (true/false)",
@@ -270,8 +271,8 @@ SETTING_DESC: dict[str, str] = {
 }
 SETTING_GROUPS: list[tuple[str, list[str]]] = [
     ("🎯 Фильтр цены", ["COLLECTION_MIN_FLOOR", "MAX_ABOVE_FLOOR", "MIN_STARS", "MIN_TON", "ALLOW_TON_ONLY"]),
-    ("👤 Фильтр продавца", ["RUSSIAN_ONLY", "UNKNOWN_SELLER_POLICY", "REQUIRE_FREE_MESSAGES",
-                            "MAX_SELLER_LEVEL", "MAX_SELLER_NFTS", "SELLER_PHONE_PREFIXES"]),
+    ("👤 Фильтр продавца", ["RUSSIAN_ONLY", "UNKNOWN_SELLER_POLICY", "ALLOW_HIDDEN_OWNER",
+                            "REQUIRE_FREE_MESSAGES", "MAX_SELLER_LEVEL", "MAX_SELLER_NFTS", "SELLER_PHONE_PREFIXES"]),
     ("🔁 Без повторов", ["UNIQUE_GIFTS", "UNIQUE_SELLERS", "MAX_SAME_COLLECTION_STREAK",
                          "SELLER_REPEAT_HOURS"]),
     ("⚡ Скорость", ["PRIORITY_FLOOR", "PRIORITY_SHARE", "PRIORITY_POLL_INTERVAL", "CATALOG_INTERVAL", "COLD_POLL_INTERVAL", "TRACKER_INTERVAL", "PAGE_LIMIT",
