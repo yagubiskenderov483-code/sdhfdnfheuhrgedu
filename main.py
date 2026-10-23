@@ -38,6 +38,7 @@ from sessions.manager import SessionManager
 from sessions.storage import SessionStorage
 from tracker.coordinator import MarketplaceCoordinator
 from tracker.marketplace import fetch_catalog, fetch_resale_page
+from tracker.lookup import OwnerLookup
 from tracker.queue import ListingPipeline, build_listing
 from utils.logger import get_logger, register_secret, setup_logging
 
@@ -124,6 +125,8 @@ class App:
         self.pipeline = ListingPipeline(self.db, self.sessions, self.sender, self.formatter,
                                         self.price_filter, self.seller_filter)
         self.coordinator = MarketplaceCoordinator(self.db, self.sessions, self.pipeline)
+        self.lookup = OwnerLookup(self.sessions)       # автопоиск скрытого владельца через бота поиска
+        self.pipeline.owner_lookup = self.lookup
         self.pipeline.paused_getter = lambda: self.coordinator.paused
         self.pipeline.floor_getter = lambda gid: getattr(self.coordinator.states.get(gid), "floor_stars", None)
         # коллекции, выключенные админом через /mute (хранятся в резервной копии)

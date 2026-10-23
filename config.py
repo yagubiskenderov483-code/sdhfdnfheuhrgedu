@@ -172,6 +172,12 @@ class Settings:
     lookup_bot_username: str = ""             # @username бота ручного поиска (напр. "funstat") —
                                               # для лотов со скрытым владельцем в пост добавится
                                               # кнопка «🔍 Найти в @<бот>». Пусто = кнопки нет.
+    auto_lookup: bool = True                  # трекер сам пишет боту поиска «/human <имя>», проверяет
+                                              # кандидатов (открыт ли у них этот NFT) и дописывает
+                                              # найденного владельца в пост
+    lookup_session: str = ""                  # с какого аккаунта писать боту поиска (пусто = первый рабочий)
+    lookup_timeout: float = 25.0              # сколько секунд ждать ответа бота поиска
+    lookup_max_candidates: int = 8            # сколько кандидатов из ответа проверять
     trade_bot_username: str = ""              # @username торгового бота (напр. "iostherobot") —
                                               # кнопка «Написать» открывает его с готовым
                                               # оффером: «@<бот> <ссылка на NFT> <сниженная_цена>».
@@ -314,6 +320,10 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "PHONE_MISMATCH_BLOCKS": ("phone_mismatch_blocks", _bool_strict),
     "ALLOW_HIDDEN_OWNER": ("allow_hidden_owner", _bool_strict),
     "LOOKUP_BOT_USERNAME": ("lookup_bot_username", lambda v: v.strip().lstrip("@")),
+    "AUTO_LOOKUP": ("auto_lookup", _bool_strict),
+    "LOOKUP_SESSION": ("lookup_session", lambda v: "" if v.strip() in ("", "-") else v.strip()),
+    "LOOKUP_TIMEOUT": ("lookup_timeout", _rng(5, 180)),
+    "LOOKUP_MAX_CANDIDATES": ("lookup_max_candidates", lambda v: max(1, min(30, int(v)))),
     "TRADE_BOT_USERNAME": ("trade_bot_username", lambda v: v.strip().lstrip("@")),
     "SELLER_PHONE_PREFIXES": ("seller_phone_prefixes", _str_list),
     "TRACKER_INTERVAL": ("tracker_interval", _rng(0.2, 3600)),
@@ -378,6 +388,10 @@ def _from_env() -> Settings:
         phone_mismatch_blocks=_bool(e("PHONE_MISMATCH_BLOCKS"), True),
         allow_hidden_owner=_bool(e("ALLOW_HIDDEN_OWNER"), False),
         lookup_bot_username=(e("LOOKUP_BOT_USERNAME") or "").strip().lstrip("@"),
+        auto_lookup=_bool(e("AUTO_LOOKUP"), True),
+        lookup_session=(e("LOOKUP_SESSION") or "").strip(),
+        lookup_timeout=min(180.0, max(5.0, _float(e("LOOKUP_TIMEOUT"), 25.0))),
+        lookup_max_candidates=max(1, min(30, _int(e("LOOKUP_MAX_CANDIDATES"), 8))),
         trade_bot_username=(e("TRADE_BOT_USERNAME") or "").strip().lstrip("@"),
         unique_gifts=_bool(e("UNIQUE_GIFTS"), True),
         require_free_messages=_bool(e("REQUIRE_FREE_MESSAGES"), True),

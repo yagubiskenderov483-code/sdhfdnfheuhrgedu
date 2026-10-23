@@ -186,10 +186,14 @@ class MessageFormatter:
         if l.seller_username:
             handle = f"@{l.seller_username}"
             seller_line = f'<a href="{html.escape(l.seller_profile_link or f"https://t.me/{l.seller_username}")}">{html.escape(handle)}</a>'
+            if l.owner_found_via:
+                seller_line += f" (найден через @{html.escape(l.owner_found_via)}, NFT в профиле ✅)"
         elif l.seller_type == "user" and l.seller_id:
             # без @username — ссылка на профиль по ID и сам ID (можно скопировать и найти)
             seller_line = (f'<a href="tg://user?id={l.seller_id}">{html.escape(l.seller_name or "профиль")}</a>'
                            f' · ID <code>{l.seller_id}</code>')
+            if l.owner_found_via:
+                seller_line += f" (найден через @{html.escape(l.owner_found_via)}, NFT в профиле ✅)"
         elif l.seller_type == "address":
             seller_line = "TON-кошелёк"
         elif l.seller_type in ("channel", "chat") and l.seller_name:

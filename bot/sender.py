@@ -25,8 +25,11 @@ log = get_logger("sender")
 
 
 class SendResult:
-    def __init__(self, ok: bool, message_id: int | None = None, test_only: bool = False, error: str | None = None):
+    def __init__(self, ok: bool, message_id: int | None = None, test_only: bool = False, error: str | None = None,
+                 chat_id: int | None = None):
         self.ok, self.message_id, self.test_only, self.error = ok, message_id, test_only, error
+        self.chat_id = chat_id             # куда реально ушёл пост (для последующего редактирования)
+        self.prefix = ""                   # текст, добавленный перед постом (TEST MODE)
 
 
 class _PriorityLock:
@@ -102,9 +105,11 @@ class TelegramSender:
                 log.info("[TEST_MODE] message not sent (log only)")
                 return SendResult(True, None, test_only=True)
             self.test_sent += 1
-            res = await self.send(chat, "🧪 <b>TEST MODE</b>\n" + text, preview_url, markup, fallback_markup,
+            prefix = "🧪 <b>TEST MODE</b>\n"
+            res = await self.send(chat, prefix + text, preview_url, markup, fallback_markup,
                                   priority=priority)
             res.test_only = True
+            res.prefix = prefix
             return res
         # target/thread — канал и тема по маршруту (PRICE/BACKDROP_ROUTES); иначе общий TARGET_CHAT_ID
         return await self.send(target or settings.target_chat_id, text, preview_url, markup,
@@ -144,7 +149,7 @@ class TelegramSender:
                                                       **extra)
                     self._last = time.monotonic()
                     self._recent.setdefault(chat_id, deque()).append(self._last)
-                    return SendResult(True, msg.message_id)
+                    return SendResult(True, msg.message_id, chat_id=chat_id)
                 except TelegramRetryAfter as e:
                     log.warning("Bot API RetryAfter %ss", e.retry_after)
                     # ждём БЕЗ общей очереди: пока эта группа под лимитом, посты в другие темы/группы идут;
@@ -222,3 +227,39 @@ class TelegramSender:
             finally:
                 if held:
                     self._lock.release()
+
+
+    async def edit_listing(self, chat_id: int, message_id: int, text: str, preview_url: str | None,
+                           markup: InlineKeyboardMarkup | None = None,
+                           fallback_markup: InlineKeyboardMarkup | None = None) -> bool:
+        """Обновить уже отправленный пост (например, дописать найденного владельца)."""
+        preview = (LinkPreviewOptions(url=preview_url, prefer_small_media=True, show_above_text=False)
+                   if preview_url else LinkPreviewOptions(is_disabled=True))
+        for attempt in range(4):
+            try:
+                await self.bot.edit_message_text(text=text, chat_id=chat_id, message_id=message_id,
+                                                 parse_mode="HTML", link_preview_options=preview,
+                                                 reply_markup=markup)
+                return True
+            except TelegramRetryAfter as e:
+                await asyncio.sleep(e.retry_after + 0.5)
+            except (TelegramNetworkError, TelegramServerError):
+                await asyncio.sleep(2 ** attempt)
+            except TelegramBadRequest as e:
+                es = str(e)
+                if "message is not modified" in es:
+                    return True
+                if ("BUTTON_USER_PRIVACY_RESTRICTED" in es or "BUTTON_URL_INVALID" in es
+                        or "BUTTON_USER_INVALID" in es) and fallback_markup is not None \
+                        and markup is not fallback_markup:
+                    markup = fallback_markup
+                    continue
+                if preview.is_disabled is not True:
+                    preview = LinkPreviewOptions(is_disabled=True)
+                    continue
+                log.warning("Edit post %s/%s failed: %s", chat_id, message_id, e)
+                return False
+            except TelegramAPIError as e:
+                log.warning("Edit post %s/%s failed: %s", chat_id, message_id, e)
+                return False
+        return False

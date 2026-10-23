@@ -178,6 +178,8 @@ class ListingPipeline:
         self.muted_getter = None                   # задаёт App: названия выключенных коллекций (lower)
         self._seen_ids: dict[str, None] = {}       # недавние listing_id (RAM-кэш дедупа, по порядку)
         self.last_sent_at: float | None = None
+        self.owner_lookup = None                   # задаёт App: OwnerLookup (автопоиск скрытого владельца)
+        self._lookup_tasks: set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------ admission (global dedup)
     async def admit(self, items: list[ResaleItem], session: str | None, mode: str,
@@ -255,7 +257,7 @@ class ListingPipeline:
                 supervise(f"processor-{i}", (lambda i=i: self._worker_loop(i)), delay=1.0), name=f"processor-{i}"))
 
     async def stop(self) -> None:
-        for t in list(self._workers) + list(self._retries):
+        for t in list(self._workers) + list(self._retries) + list(self._lookup_tasks):
             t.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
@@ -649,6 +651,7 @@ class ListingPipeline:
                 latency = t_sent - ev.detected_mono
                 dest = "test" if res.test_only else (f"{_chat}/topic{_thread}" if _thread else f"{_chat}")
                 llog("SEND", f"listing={l.listing_id} → {dest} latency={latency:.2f}s")
+                self._schedule_lookup(l, res)
                 if l.t_detect is not None and l.t_found is not None:
                     parts = {"request": l.t_found - l.t_detect, "queue": t_start - l.t_found,
                              "check": t_checked - t_start, "send": t_sent - t_checked,
@@ -679,6 +682,46 @@ class ListingPipeline:
                         self._streak += 1
                     else:
                         self._last_sent_gift_id, self._streak = l.gift_id, 1
+
+
+    # ------------------------------------------------------------------ автопоиск скрытого владельца
+    def _needs_lookup(self, l: Listing) -> bool:
+        lk = self.owner_lookup
+        return (lk is not None and lk.enabled() and l.seller_type is None and bool(l.seller_name)
+                and bool(l.gift_slug or l.gift_unique_id))
+
+    def _schedule_lookup(self, l: Listing, res) -> None:
+        if not self._needs_lookup(l) or not res.message_id or not getattr(res, "chat_id", None):
+            return
+        t = asyncio.get_running_loop().create_task(self._lookup_and_edit(l, res.chat_id, res.message_id,
+                                                                         getattr(res, "prefix", "")))
+        self._lookup_tasks.add(t)
+        t.add_done_callback(self._lookup_tasks.discard)
+
+    async def _lookup_and_edit(self, l: Listing, chat_id: int, message_id: int, prefix: str = "") -> None:
+        """Пост уже в канале — ищем владельца через бота поиска и, если нашли, дописываем его в пост."""
+        try:
+            owner = await self.owner_lookup.find_owner(l.seller_name, l.gift_slug, l.gift_unique_id)
+            if owner is None:
+                return
+            l.seller_type, l.seller_id = "user", owner.user_id
+            l.seller_username = owner.username
+            l.seller_profile_link = username_link(owner.username) if owner.username else None
+            if owner.premium is not None:
+                l.premium = owner.premium
+            l.owner_found_via = settings.lookup_bot_username.lstrip("@")
+            text = prefix + self.formatter.render(l)
+            ok = await self.sender.edit_listing(chat_id, message_id, text, l.gift_link,
+                                                listing_keyboard(l), listing_keyboard(l, with_seller=False))
+            self.stats["owner_found"] = self.stats.get("owner_found", 0) + 1
+            llog("LOOKUP", f"#{l.listing_id} owner u{owner.user_id}"
+                           + (f" @{owner.username}" if owner.username else "")
+                           + (" → пост обновлён" if ok else " → пост не обновился"))
+            await self.db.update_listing(l)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Owner lookup for %s failed", l.listing_id)
 
 
 async def fetch_seller_bundle(client, user_id: int, nfts: bool = True, texts: bool = False):

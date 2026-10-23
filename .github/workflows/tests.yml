@@ -35,7 +35,7 @@ jobs:
           PYTHONPATH: .
         run: |
           fail=0
-          for t in tests/test_tracker.py tests/test_subscription.py tests/test_watchdog.py tests/bot_audit.py; do
+          for t in tests/test_tracker.py tests/test_subscription.py tests/test_watchdog.py tests/test_lookup.py tests/bot_audit.py; do
             echo "::group::$t"
             if timeout 300 python "$t"; then
               echo "ok $t"
