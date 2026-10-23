@@ -133,6 +133,10 @@ class AddSession(StatesGroup):
     password = State()
 
 
+class SetLookupBot(StatesGroup):
+    waiting = State()
+
+
 _REJ = {"PAID_MESSAGES": "платные сообщения / только Premium", "TOO_MANY_NFTS": "много NFT",
         "LEVEL_TOO_HIGH": "Level выше лимита", "UNKNOWN_BLOCKED": "нет признаков русского",
         "PHONE_MISMATCH": "номер не +7/+375/+380", "FOREIGN_TEXT": "профиль на чужом языке",
@@ -1208,6 +1212,10 @@ def build_routers(app: "App") -> list[Router]:
         rows.append([InlineKeyboardButton(
             text=f"📚 Коллекция подряд: {'до ' + str(settings.max_same_collection_streak) if settings.max_same_collection_streak else 'без ограничений'}",
             callback_data="flt:STREAK")])
+        lb = settings.lookup_bot_username or ""
+        rows.append([InlineKeyboardButton(
+            text=f"🔍 Бот поиска: @{lb}" if lb else "🔍 Добавить бота поиска (funstat)",
+            callback_data="flt:LOOKUPBOT")])
         text = ("🎛 <b>Фильтры лотов</b>\nНажмите, чтобы переключить — применяется сразу и переживает деплой.\n"
                 f"Мин. цена: {settings.min_stars}⭐ · флор коллекции от {settings.collection_min_floor}⭐ "
                 "(менять: /set MIN_STARS …)\nПочему лоты отсеиваются: /why")
@@ -1219,11 +1227,23 @@ def build_routers(app: "App") -> list[Router]:
         await m.answer(text, reply_markup=kb)
 
     @public.callback_query(F.data.startswith("flt:"))
-    async def cb_filter(q: CallbackQuery) -> None:
+    async def cb_filter(q: CallbackQuery, state: FSMContext) -> None:
         if not is_manager(q.from_user.id):
             await q.answer("Только для админов", show_alert=True)
             return
         key = q.data.split(":", 1)[1]
+        if key == "LOOKUPBOT":
+            cur = settings.lookup_bot_username or ""
+            msg = ("🔍 <b>Бот поиска по имени</b>\n\n"
+                   f"Сейчас: {('@' + cur) if cur else '<i>не задан</i>'}\n\n"
+                   "Пришлите @username бота (например: <code>funstat</code> или <code>@funstat</code>) — "
+                   "в постах со скрытым продавцом появится кнопка «🔍 Клик», открывающая этого бота "
+                   "с уже введённой командой <code>/human &lt;имя&gt;</code>.\n\n"
+                   "Отправьте «<code>-</code>» или <code>off</code>, чтобы убрать кнопку. /cancel — отмена.")
+            await state.set_state(SetLookupBot.waiting)
+            await q.message.answer(msg)
+            await q.answer()
+            return
         try:
             if key == "REPEAT":
                 cur = settings.seller_repeat_hours
@@ -1248,6 +1268,38 @@ def build_routers(app: "App") -> list[Router]:
         except Exception:
             pass
         await q.answer("Сохранено")
+
+    @admin.message(SetLookupBot.waiting, F.text)
+    async def cmd_set_lookup_bot(m: Message, state: FSMContext) -> None:
+        raw = (m.text or "").strip()
+        if raw.lower() in ("/cancel", "cancel", "отмена"):
+            await state.clear()
+            await m.answer("Отменено.")
+            return
+        if raw in ("-", "off", "очистить", "clear", "0", "нет"):
+            set_runtime_value("LOOKUP_BOT_USERNAME", "")
+            try:
+                await app.backup.save()
+            except Exception:
+                pass
+            await state.clear()
+            await m.answer("✅ Бот поиска убран — кнопка «🔍 Клик» больше не будет появляться.")
+            return
+        uname = raw.lstrip("@").strip()
+        # @username Telegram: 5–32 символа, [A-Za-z0-9_], не начинается с цифры, не оканчивается на _
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,30}[A-Za-z0-9]", uname):
+            await m.answer("Неверный @username. Должно быть 5–32 символа: латиница, цифры, _ "
+                           "(не начинается с цифры, не заканчивается на _). Попробуйте снова или /cancel.")
+            return
+        try:
+            set_runtime_value("LOOKUP_BOT_USERNAME", uname)
+            await app.backup.save()
+        except Exception as e:
+            await state.clear()
+            await m.answer(f"❌ Не удалось сохранить: {html.escape(str(e))}")
+            return
+        await state.clear()
+        await m.answer(f"✅ Бот поиска: @{uname}. В постах со скрытым продавцом появится кнопка «🔍 Клик».")
 
     @admin.message(Command("proxies", "proxy"))
     async def cmd_proxy_group(m: Message) -> None:
