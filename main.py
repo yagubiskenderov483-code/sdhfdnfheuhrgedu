@@ -125,7 +125,7 @@ class App:
         self.pipeline = ListingPipeline(self.db, self.sessions, self.sender, self.formatter,
                                         self.price_filter, self.seller_filter)
         self.coordinator = MarketplaceCoordinator(self.db, self.sessions, self.pipeline)
-        self.lookup = OwnerLookup(self.sessions)       # автопоиск скрытого владельца через бота поиска
+        self.lookup = OwnerLookup(self.sessions, self.db)       # автопоиск скрытого владельца через бота поиска
         self.pipeline.owner_lookup = self.lookup
         self.lookup.on_captcha = self._send_lookup_captcha  # капчу бота поиска решает админ
         self.pipeline.paused_getter = lambda: self.coordinator.paused
@@ -739,6 +739,7 @@ class App:
             BotCommand(command="status", description="Состояние трекера"),
             BotCommand(command="why", description="Почему нет постов"),
             BotCommand(command="panel", description="Фильтры кнопками"),
+            BotCommand(command="lookup", description="Проверить бота поиска: /lookup имя"),
             BotCommand(command="lot", description="Почему не пришёл лот (ссылка t.me/nft/…)"),
             BotCommand(command="stats", description="Статистика"),
             BotCommand(command="last", description="Последние лоты и почему не отправлены"),

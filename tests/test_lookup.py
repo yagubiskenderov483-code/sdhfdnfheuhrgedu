@@ -232,6 +232,42 @@ async def main():
     check(await L.OwnerLookup(FakeSessions(mc)).find_owner("Иван", "PlushPepe-77", 5555) is None
           and ManyClient.resolved == 0, "в списке 21 человек → скип без проверки профилей")
 
+    # память: владелец, найденный раньше под этим именем, проверяется без бота поиска
+    class FakeKV:
+        def __init__(self):
+            self.d = {}
+        async def kv_get(self, k, default=None):
+            return self.d.get(k, default)
+        async def kv_set(self, k, v):
+            self.d[k] = v
+    kv = FakeKV()
+    c1 = FakeClient(REPLY, gifts, users)
+    await L.OwnerLookup(FakeSessions(c1), kv).find_owner("Иван Иванов", "PlushPepe-77", 5555)
+    c2 = FakeClient(REPLY, gifts, users)
+    lk2 = L.OwnerLookup(FakeSessions(c2), kv)               # «после деплоя»: кэш в памяти пуст
+    f = await lk2.find_owner("Иван Иванов", "PlushPepe-77", 5555)
+    check(f is not None and f.user_id == 222 and not c2.sent and lk2.stats["from_memory"] == 1,
+          "владелец из памяти — боту поиска не пишем")
+
+    # приоритет: дорогой лот получает аккаунт раньше дешёвого
+    pl = L._PrioLock()
+    order = []
+    await pl.acquire(0)
+    async def w(name, prio):
+        await pl.acquire(prio)
+        order.append(name)
+        pl.release()
+    t1 = asyncio.ensure_future(w("cheap", -500))
+    t2 = asyncio.ensure_future(w("expensive", -20000))
+    await asyncio.sleep(0.01)
+    pl.release()
+    await asyncio.gather(t1, t2)
+    check(order == ["expensive", "cheap"], "дорогие лоты — первыми в очереди поиска")
+
+    # /lookup: разбор ответа без проверки профилей
+    sess, cands, err = await L.OwnerLookup(FakeSessions(FakeClient(REPLY, gifts, users))).debug("Иван Иванов")
+    check(not err and any(c.key() == "@ivan_real" for c in cands), "/lookup показывает юзы из ответа")
+
     # несколько выделенных аккаунтов: первый не смог написать боту → пишет второй
     class TwoSessions(FakeSessions):
         def __init__(self, client):
@@ -359,6 +395,50 @@ async def main():
     await p.process(ListingEvent(l, _t.monotonic(), "live"))
     await asyncio.gather(*list(p._lookup_tasks))
     check(p.sent_l is None and l.status == ListingStatus.FILTERED_SELLER, "владелец не найден → лот не отправлен")
+
+    # лот продали, пока искали владельца → не шлём
+    settings.lookup_check_onsale = True
+    p = pipeline(FakeClient(REPLY, gifts, users))
+    async def sold(l):
+        return False
+    p._still_on_sale = sold
+    l = hidden()
+    await p.process(ListingEvent(l, _t.monotonic(), "live"))
+    await asyncio.gather(*list(p._lookup_tasks))
+    check(p.sent_l is None and "продан" in (l.reason or ""), "лот продан, пока искали → не отправлен")
+
+    # LOOKUP_REQUIRED=false: не нашли → шлём с пометкой
+    settings.lookup_required = False
+    p = pipeline(FakeClient(REPLY, {111: [], 222: [], 333: []}, users))
+    async def on_sale(l):
+        return True
+    p._still_on_sale = on_sale
+    real_check = ListingPipeline._check_seller
+    async def chk(l, p=p):
+        return await real_check(p, l)
+    p._check_seller = chk
+    l = hidden()
+    await p.process(ListingEvent(l, _t.monotonic(), "live"))
+    await asyncio.gather(*list(p._lookup_tasks))
+    text = MessageFormatter(settings.path(settings.template_path)).render(l)
+    check(p.sent_l is l and "владелец не найден" in text, "не нашли и LOOKUP_REQUIRED=false → лот с пометкой")
+    settings.lookup_required = True
+
+    # найденный владелец не режется языком профиля (но лимит NFT проверяется)
+    from filters.seller_filter import SellerResult
+    p = pipeline(FakeClient(REPLY, gifts, users))
+    async def lang_fail(l):
+        return SellerResult(False, "UNKNOWN_BLOCKED", "x")
+    p._check_seller_found = lang_fail
+    async def nfts(l):
+        return 3
+    p._nft_count = nfts
+    l = hidden(); l.seller_type, l.seller_id, l.owner_found_via = "user", 222, "funstat"
+    settings.lookup_lang_filter = False
+    check((await ListingPipeline._check_seller(p, l)).passed, "найденный владелец проходит без языкового фильтра")
+    settings.lookup_lang_filter = True
+    check(not (await ListingPipeline._check_seller(p, l)).passed, "LOOKUP_LANG_FILTER=true — язык проверяется")
+    settings.lookup_lang_filter = False
 
     l2 = Listing(listing_id="1:u1", gift_unique_id=1, gift_id=1, gift_name="x", seller_type="user",
                  seller_id=1, seller_name="A")

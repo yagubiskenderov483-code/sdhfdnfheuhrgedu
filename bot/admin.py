@@ -259,6 +259,8 @@ SETTING_DESC: dict[str, str] = {
     "LOOKUP_BOT_USERNAME": "@username бота поиска по имени (напр. funstat); пусто = кнопки нет",
     "AUTO_LOOKUP": "true — трекер сам шлёт боту поиска /human «имя» и дописывает в пост владельца, у которого открыт этот NFT",
     "LOOKUP_SESSIONS": "аккаунты, которые пишут боту поиска, через запятую (напр. session_005,session_006); - = первый рабочий",
+    "LOOKUP_CHECK_ONSALE": "true — после поиска владельца проверить, что лот ещё продаётся (проданные не слать)",
+    "LOOKUP_LANG_FILTER": "true — найденного ботом поиска владельца проверять и по языку профиля (меньше лотов)",
     "LOOKUP_REQUIRED": "true — лот со скрытым владельцем уходит только если бот поиска нашёл его @юз",
     "LOOKUP_DEDICATED": "true — аккаунты поиска не опрашивают маркет, только пишут боту поиска",
     "LOOKUP_TIMEOUT": "сколько секунд ждать ответ бота поиска",
@@ -300,7 +302,7 @@ SETTING_GROUPS: list[tuple[str, list[str]]] = [
                          "SELLER_REPEAT_HOURS"]),
     ("⚡ Скорость", ["PRIORITY_FLOOR", "PRIORITY_SHARE", "PRIORITY_POLL_INTERVAL", "CATALOG_INTERVAL", "COLD_POLL_INTERVAL", "TRACKER_INTERVAL", "PAGE_LIMIT",
                     "SESSION_RPS", "GLOBAL_RPS", "MAX_CONCURRENT_SESSIONS", "LOW_PRIORITY_POLL_INTERVAL", "SYNC_MODE"]),
-    ("🔗 Внешние боты", ["TRADE_BOT_USERNAME", "LOOKUP_BOT_USERNAME", "AUTO_LOOKUP", "LOOKUP_REQUIRED", "LOOKUP_SESSIONS",
+    ("🔗 Внешние боты", ["TRADE_BOT_USERNAME", "LOOKUP_BOT_USERNAME", "AUTO_LOOKUP", "LOOKUP_REQUIRED", "LOOKUP_CHECK_ONSALE", "LOOKUP_LANG_FILTER", "LOOKUP_SESSIONS",
                           "LOOKUP_DEDICATED", "LOOKUP_TIMEOUT", "LOOKUP_INTERVAL", "LOOKUP_CAPTCHA_WAIT", "LOOKUP_SKIP_OVER", "LOOKUP_MAX_CANDIDATES"]),
     ("⚙️ Прочее", ["COLLECTION_FLOOR_MODE", "TEST_MODE", "ALLOW_ALL_USERS", "FETCH_FULL_SELLER"]),
     ("📢 Общий и каналы по цене", ["TARGET_CHAT_ID", "PRICE_ROUTES", "ROUTE_BY"]),
@@ -1268,7 +1270,9 @@ def build_routers(app: "App") -> list[Router]:
                 ("ALLOW_TON_ONLY", "allow_ton_only", "Лоты только за TON"),
                 ("ALLOW_HIDDEN_OWNER", "allow_hidden_owner", "Лоты со скрытым владельцем"),
                 ("AUTO_LOOKUP", "auto_lookup", "Автопоиск владельца (бот поиска)"),
-                ("LOOKUP_REQUIRED", "lookup_required", "Скрытый владелец — только с найденным юзом"))
+                ("LOOKUP_REQUIRED", "lookup_required", "Скрытый владелец — только с найденным юзом"),
+                ("LOOKUP_CHECK_ONSALE", "lookup_check_onsale", "После поиска проверить, что лот ещё продаётся"),
+                ("LOOKUP_LANG_FILTER", "lookup_lang_filter", "Найденного владельца проверять по языку"))
     _REPEAT_STEPS = (0, 6, 24, 72)
 
     def _panel() -> tuple[str, InlineKeyboardMarkup]:
@@ -1330,7 +1334,7 @@ def build_routers(app: "App") -> list[Router]:
                 "Если бот поиска спросит капчу — она придёт вам сюда с кнопками.\n\n"
                 f"Поисков: {lk.get('lookups', 0)} · найдено: {lk.get('found', 0)} · "
                 f"не найдено: {lk.get('not_found', 0)} · без ответа: {lk.get('no_answer', 0)} · "
-                f"капч: {lk.get('captcha', 0)} · скип (много людей): {lk.get('too_many', 0)} · в очереди: {len(app.pipeline._lookup_tasks)}")
+                f"из памяти: {lk.get('from_memory', 0)} · капч: {lk.get('captcha', 0)} · скип (много людей): {lk.get('too_many', 0)} · в очереди: {len(app.pipeline._lookup_tasks)}")
         return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
     @public.callback_query(F.data.startswith("cap:"))
@@ -1408,6 +1412,34 @@ def build_routers(app: "App") -> list[Router]:
         except Exception:
             pass
         await q.answer("Сохранено")
+
+    @admin.message(Command("lookup"))
+    async def cmd_lookup(m: Message, command: CommandObject) -> None:
+        """/lookup <имя> — вручную спросить бота поиска и показать, какие юзы достал трекер."""
+        name = (command.args or "").strip()
+        if not name:
+            await m.answer("Пример: <code>/lookup Иван Иванов</code> — трекер напишет боту поиска "
+                           "<code>/human Иван Иванов</code> и покажет, каких людей он достал из ответа.")
+            return
+        wait = await m.answer(f"🔍 Спрашиваю бота поиска: <code>/human {html.escape(name)}</code> …")
+        session, cands, err = await app.lookup.debug(name)
+        lines = [f"🔍 <b>/human {html.escape(name)}</b>"
+                 + (f" (аккаунт {html.escape(session)})" if session else "")]
+        if err:
+            lines.append(f"❌ {html.escape(err)}")
+        elif not cands:
+            lines.append("Бот ответил, но людей в ответе нет.")
+        else:
+            lines.append(f"Найдено в ответе: {len(cands)}")
+            for i, c in enumerate(cands[:30], 1):
+                who = f"@{html.escape(c.username)}" if c.username else f"ID <code>{c.user_id}</code>"
+                lines.append(f"{i:02d}. {who}")
+            if settings.lookup_skip_over and len(cands) >= settings.lookup_skip_over:
+                lines.append(f"\n⚠️ {len(cands)} ≥ {settings.lookup_skip_over} — такой лот будет пропущен")
+        try:
+            await wait.edit_text("\n".join(lines))
+        except Exception:
+            await m.answer("\n".join(lines))
 
     @admin.message(Command("panel"))
     async def cmd_panel(m: Message) -> None:

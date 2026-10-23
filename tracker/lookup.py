@@ -18,6 +18,8 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
+import json
 import re
 import time
 from dataclasses import dataclass
@@ -220,17 +222,58 @@ async def profile_has_gift(client, entity, slug: str | None, unique_id: int | No
     return False
 
 
+class _PrioLock:
+    """Как asyncio.Lock, но следующим получает доступ ждущий с меньшим prio (дорогие лоты — первыми)."""
+
+    def __init__(self):
+        self._busy = False
+        self._waiters: list[tuple[float, int, asyncio.Future]] = []
+        self._seq = 0
+
+    def locked(self) -> bool:
+        return self._busy
+
+    def waiting(self) -> int:
+        return sum(1 for *_, f in self._waiters if not f.done())
+
+    async def acquire(self, prio: float = 0.0) -> None:
+        if not self._busy and not self._waiters:
+            self._busy = True
+            return
+        self._seq += 1
+        fut = asyncio.get_running_loop().create_future()
+        heapq.heappush(self._waiters, (prio, self._seq, fut))
+        try:
+            await fut
+        except asyncio.CancelledError:
+            if fut.done() and not fut.cancelled():
+                self.release()
+            else:
+                self._waiters = [w for w in self._waiters if w[2] is not fut]
+                heapq.heapify(self._waiters)
+            raise
+
+    def release(self) -> None:
+        while self._waiters:
+            _, _, fut = heapq.heappop(self._waiters)
+            if not fut.done():
+                fut.set_result(None)
+                return
+        self._busy = False
+
+
 class OwnerLookup:
     """Поиск владельцев через бота поиска. На одном аккаунте — один разговор с ботом за раз
     (иначе ответы перепутаются); несколько аккаунтов поиска работают параллельно."""
 
-    def __init__(self, sessions):
+    def __init__(self, sessions, db=None):
         self.sessions = sessions
-        self._slocks: dict[str, asyncio.Lock] = {}
+        self.db = db                                     # kv: имя → уже найденные владельцы (переживает деплой)
+        self._slocks: dict[str, _PrioLock] = {}
         self._pending = 0
         self._cache: dict[str, tuple[float, list[Candidate]]] = {}
         self._started: set[tuple[str, str]] = set()      # (session, bot) — /start уже отправляли
-        self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0, "captcha": 0, "too_many": 0}
+        self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0, "captcha": 0, "too_many": 0, "from_memory": 0}
         # капча: решает человек. on_captcha(token, session, photo_bytes, button_texts) — задаёт App
         # (шлёт админам картинку и кнопки); нажатие админа → solve_captcha(token, index).
         self.on_captcha = None
@@ -242,7 +285,9 @@ class OwnerLookup:
     def enabled(self) -> bool:
         return bool(settings.auto_lookup and settings.lookup_bot_username)
 
-    async def find_owner(self, seller_name: str, slug: str | None, unique_id: int | None) -> FoundOwner | None:
+    async def find_owner(self, seller_name: str, slug: str | None, unique_id: int | None,
+                         prio: float = 0.0) -> FoundOwner | None:
+        """prio — чем меньше, тем раньше в очереди к боту поиска (передаём −цена: дорогие первыми)."""
         if not self.enabled() or not seller_name or not (slug or unique_id):
             return None
         if self._pending >= _MAX_PENDING:
@@ -251,7 +296,7 @@ class OwnerLookup:
             return None
         self._pending += 1
         try:
-            return await self._find(seller_name, slug, unique_id)
+            return await self._find(seller_name, slug, unique_id, prio)
         finally:
             self._pending -= 1
 
@@ -297,14 +342,55 @@ class OwnerLookup:
         usable = sorted(w.name for w in self.sessions.usable(include_reserved=True))
         return usable[:1]
 
-    def _slock(self, session: str) -> asyncio.Lock:
-        return self._slocks.setdefault(session, asyncio.Lock())
+    def _slock(self, session: str) -> _PrioLock:
+        return self._slocks.setdefault(session, _PrioLock())
+
+    def queue_size(self) -> int:
+        return self._pending
+
+    # ---------------------------------------------------- память найденных владельцев (kv в БД)
+    async def _known(self, name: str) -> list[Candidate]:
+        if self.db is None:
+            return []
+        try:
+            raw = await self.db.kv_get(f"owner:{_norm_name(name)}")
+            items = json.loads(raw) if raw else []
+        except Exception:
+            return []
+        return [Candidate(username=i.get("u"), user_id=i.get("id")) for i in items if i.get("u") or i.get("id")]
+
+    async def _remember(self, name: str, owner: FoundOwner) -> None:
+        if self.db is None:
+            return
+        key = f"owner:{_norm_name(name)}"
+        try:
+            raw = await self.db.kv_get(key)
+            items = [i for i in (json.loads(raw) if raw else []) if i.get("id") != owner.user_id]
+            items.insert(0, {"id": owner.user_id, "u": owner.username})
+            await self.db.kv_set(key, json.dumps(items[:5], ensure_ascii=False))
+        except Exception as e:
+            log.debug("remember owner failed: %s", e)
+
+    async def debug(self, name: str) -> tuple[str | None, list[Candidate], str]:
+        """Для /lookup: спросить бота поиска «как есть» → (аккаунт, кандидаты, текст ошибки)."""
+        if not settings.lookup_bot_username:
+            return None, [], "бот поиска не задан"
+        order = self._pick_sessions()
+        if not order:
+            return None, [], "нет рабочего аккаунта для поиска"
+        bot = settings.lookup_bot_username.lstrip("@")
+        for session in order:
+            cands = await self._ask_bot(session, bot, name, prio=-1e12)
+            if cands is not None:
+                return session, cands, ""
+        return order[0], [], "бот поиска не ответил (или капча не пройдена)"
 
     async def _run(self, session: str, fn, timeout: float = 30):
         res, _ = await self.sessions.run(fn, only=session, attempts=1, timeout=timeout)
         return res
 
-    async def _find(self, seller_name: str, slug: str | None, unique_id: int | None) -> FoundOwner | None:
+    async def _find(self, seller_name: str, slug: str | None, unique_id: int | None,
+                    prio: float = 0.0) -> FoundOwner | None:
         bot = settings.lookup_bot_username.lstrip("@")
         order = self._pick_sessions()
         if not order:
@@ -313,6 +399,15 @@ class OwnerLookup:
             return None
         session = order[0]
         self.stats["lookups"] += 1
+        # владельцы, уже найденные раньше под этим именем — проверяем без бота поиска (и без капчи)
+        known = await self._known(seller_name)
+        if known:
+            found = await self._verify(session, known, seller_name, slug, unique_id)
+            if found:
+                self.stats["found"] += 1
+                self.stats["from_memory"] = self.stats.get("from_memory", 0) + 1
+                llog("LOOKUP", f"{seller_name!r} → u{found.user_id} из памяти (без бота поиска)")
+                return found
         key = _norm_name(seller_name)
         cached = self._cache.get(key)
         if cached and time.monotonic() - cached[0] < _CACHE_TTL:
@@ -320,7 +415,7 @@ class OwnerLookup:
         else:
             cands = None
             for session in order:          # аккаунт не смог (лимит бота, FloodWait) — пробуем следующий
-                cands = await self._ask_bot(session, bot, seller_name)
+                cands = await self._ask_bot(session, bot, seller_name, prio=prio)
                 if cands is not None:
                     break
             if cands is None:
@@ -346,6 +441,7 @@ class OwnerLookup:
                                    seller_name, slug, unique_id)
         if found:
             self.stats["found"] += 1
+            await self._remember(seller_name, found)
             llog("LOOKUP", f"/human {seller_name!r} → u{found.user_id}"
                            + (f" @{found.username}" if found.username else "") + " (NFT в профиле)")
         else:
@@ -353,10 +449,15 @@ class OwnerLookup:
             llog("LOOKUP", f"/human {seller_name!r}: {len(cands)} кандидат(ов), NFT ни у кого не виден")
         return found
 
-    async def _ask_bot(self, session: str, bot: str, seller_name: str) -> list[Candidate] | None:
+    async def _ask_bot(self, session: str, bot: str, seller_name: str,
+                       prio: float = 0.0) -> list[Candidate] | None:
         """Отправить «/human <имя>» и дождаться ответа. None — бот не ответил / ошибка."""
-        async with self._slock(session):
+        lock = self._slock(session)
+        await lock.acquire(prio)
+        try:
             return await self._ask_bot_locked(session, bot, seller_name)
+        finally:
+            lock.release()
 
     async def _ask_bot_locked(self, session: str, bot: str, seller_name: str,
                               _retry: bool = True) -> list[Candidate] | None:
@@ -478,7 +579,11 @@ class OwnerLookup:
         for c in cands:
             async def _resolve(client, c=c):
                 if c.username:
-                    return await client.get_entity(c.username)
+                    try:
+                        return await client.get_entity(c.username)
+                    except (ValueError, TypeError):
+                        if not c.user_id:              # юз сменили — пробуем по ID, если он известен
+                            raise
                 return await client.get_entity(types.PeerUser(c.user_id))
             try:
                 user = await self._run(session, _resolve, timeout=20)

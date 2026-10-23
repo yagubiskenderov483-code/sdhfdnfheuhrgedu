@@ -199,7 +199,7 @@ async def run():
     await click(app, STRANGER, f"lka:{acc}")
     if settings.lookup_sessions != before: problems.append("stranger could change lookup accounts")
     settings.seller_repeat_hours = 0
-    for c in ("/why", "/lot https://t.me/nft/X-1", "/lot"):
+    for c in ("/why", "/lot https://t.me/nft/X-1", "/lot", "/lookup"):
         if not await say(app, 8852171067, c): problems.append(f"NO REPLY to {c!r}")
     # 5) удаление аккаунта кнопками
     print("rmsess ->", await click(app, OWNER, "rmsess:session_001"))

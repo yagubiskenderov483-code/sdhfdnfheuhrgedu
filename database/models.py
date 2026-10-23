@@ -58,6 +58,7 @@ class Listing:
     seller_business: str | None = None   # бизнес-профиль (приветствие, адрес) — НЕ в БД, для фильтра языка
     seller_extra_text: str | None = None # истории и посты личного канала — НЕ в БД, для фильтра языка
     seller_gift_text: str | None = None  # тексты, приложенные к подаркам продавца — НЕ в БД, для фильтра языка
+    owner_not_found: bool = False        # скрытый владелец не найден, лот отправлен с пометкой — НЕ в БД
     owner_found_via: str | None = None   # скрытый владелец найден ботом поиска (@бот) — НЕ в БД, для поста
 
     stars_price: int | None = None

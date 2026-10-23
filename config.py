@@ -177,6 +177,8 @@ class Settings:
                                               # найденного владельца в пост
     lookup_sessions: list[str] = field(default_factory=list)  # аккаунты, которые пишут боту поиска
                                               # (пусто = первый рабочий аккаунт трекера)
+    lookup_check_onsale: bool = True          # после поиска проверить, что лот ещё продаётся
+    lookup_lang_filter: bool = False          # найденного ботом поиска владельца проверять и по языку профиля
     lookup_required: bool = True              # скрытый владелец не найден ботом поиска → лот не слать
     lookup_dedicated: bool = True             # аккаунты поиска НЕ опрашивают маркет — только пишут боту
     lookup_interval: float = 6.0              # пауза между запросами к боту поиска с одного аккаунта, сек
@@ -330,6 +332,8 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOOKUP_SESSIONS": ("lookup_sessions", lambda v: [] if v.strip() in ("", "-") else _str_list(v)),
     "LOOKUP_DEDICATED": ("lookup_dedicated", _bool_strict),
     "LOOKUP_REQUIRED": ("lookup_required", _bool_strict),
+    "LOOKUP_CHECK_ONSALE": ("lookup_check_onsale", _bool_strict),
+    "LOOKUP_LANG_FILTER": ("lookup_lang_filter", _bool_strict),
     "LOOKUP_TIMEOUT": ("lookup_timeout", _rng(5, 180)),
     "LOOKUP_INTERVAL": ("lookup_interval", _rng(0, 600)),
     "LOOKUP_CAPTCHA_WAIT": ("lookup_captcha_wait", _rng(30, 7200)),
@@ -403,6 +407,8 @@ def _from_env() -> Settings:
         lookup_sessions=_str_list(e("LOOKUP_SESSIONS") or e("LOOKUP_SESSION") or ""),
         lookup_dedicated=_bool(e("LOOKUP_DEDICATED"), True),
         lookup_required=_bool(e("LOOKUP_REQUIRED"), True),
+        lookup_check_onsale=_bool(e("LOOKUP_CHECK_ONSALE"), True),
+        lookup_lang_filter=_bool(e("LOOKUP_LANG_FILTER"), False),
         lookup_timeout=min(180.0, max(5.0, _float(e("LOOKUP_TIMEOUT"), 25.0))),
         lookup_interval=min(600.0, max(0.0, _float(e("LOOKUP_INTERVAL"), 6.0))),
         lookup_captcha_wait=min(7200.0, max(30.0, _float(e("LOOKUP_CAPTCHA_WAIT"), 600.0))),

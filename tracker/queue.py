@@ -140,6 +140,7 @@ class _Stale(Exception):
     """Лот устарел, пока проверялся продавец — не отправляем."""
 
 
+_LANG_CODES = {"UNKNOWN_BLOCKED", "FOREIGN_TEXT", "PHONE_MISMATCH"}
 _HIDDEN_HARD_REJECT = {"BLACKLIST", "SHORT_NAME_HIDDEN", "FOREIGN_LETTER_HIDDEN", "FOREIGN_NAME_HIDDEN"}
 
 
@@ -569,6 +570,26 @@ class ListingPipeline:
                        + (f" @{l.seller_username}" if l.seller_username else ""))
 
     async def _check_seller(self, l: Listing) -> SellerResult:
+        if getattr(l, "owner_not_found", False) and l.seller_type is None:
+            # владелец скрыт и не найден, но LOOKUP_REQUIRED=false — шлём с пометкой (blacklist всё равно)
+            pre = self.seller_filter.check(l)
+            if pre.code == "BLACKLIST":
+                return pre
+            return SellerResult(True, "OWNER_NOT_FOUND_SENT", "owner hidden, not found — sent with a note")
+        sr = await self._check_seller_found(l)
+        if (not sr.passed and l.owner_found_via and not settings.lookup_lang_filter
+                and sr.code in _LANG_CODES):
+            # владельца нашёл бот поиска, имя уже прошло проверку — язык профиля не решает.
+            # Лимит NFT при языковом отказе ещё не проверялся — проверяем здесь.
+            if settings.max_seller_nfts > 0 and l.seller_nfts is None and l.seller_id:
+                l.seller_nfts = await self._nft_count(l)
+            if settings.max_seller_nfts > 0 and l.seller_nfts is not None and l.seller_nfts > settings.max_seller_nfts:
+                return SellerResult(False, "TOO_MANY_NFTS",
+                                    f"{l.seller_nfts} NFT > MAX_SELLER_NFTS={settings.max_seller_nfts}")
+            return SellerResult(True, "OWNER_FOUND", f"owner found via lookup bot (ignored {sr.code})")
+        return sr
+
+    async def _check_seller_found(self, l: Listing) -> SellerResult:
         # Платные сообщения / только Premium видны уже на странице маркета — тот же фильтр, просто без
         # лишнего запроса профиля (на этом отсеивается заметная часть лотов)
         if l.seller_type == "user" and l.messages is not None and l.messages != "бесплатно":
@@ -713,21 +734,52 @@ class ListingPipeline:
             log.exception("Owner lookup for %s failed", l.listing_id)
             found = False
         l.lookup_done = True
-        if not found and settings.lookup_required:
-            l.status, l.reason = ListingStatus.FILTERED_SELLER, "владелец не найден ботом поиска"
-            l.seller_filter_result = "OWNER_NOT_FOUND"
-            self.stats["filtered_seller"] += 1
-            self.stats["owner_not_found"] = self.stats.get("owner_not_found", 0) + 1
-            llog("FILTER", f"#{l.listing_id} hidden owner not found via lookup bot — skipped")
-            await self.db.update_listing(l)
-            return
+        if not found:
+            if settings.lookup_required:
+                l.status, l.reason = ListingStatus.FILTERED_SELLER, "владелец не найден ботом поиска"
+                l.seller_filter_result = "OWNER_NOT_FOUND"
+                self.stats["filtered_seller"] += 1
+                self.stats["owner_not_found"] = self.stats.get("owner_not_found", 0) + 1
+                llog("FILTER", f"#{l.listing_id} hidden owner not found via lookup bot — skipped")
+                await self.db.update_listing(l)
+                return
+            l.owner_not_found = True               # шлём с пометкой «владелец не найден»
+        # пока ждали бота поиска, лот могли купить или снять — проверяем, что он ещё продаётся
+        if settings.lookup_check_onsale and l.gift_slug:
+            on_sale = await self._still_on_sale(l)
+            if on_sale is False:
+                l.status, l.reason = ListingStatus.ERROR, "лот уже продан или снят с продажи (пока искали владельца)"
+                self.stats["sold_while_lookup"] = self.stats.get("sold_while_lookup", 0) + 1
+                llog("FILTER", f"#{l.listing_id} sold/removed while looking up the owner — skipped")
+                await self.db.update_listing(l)
+                return
         # дальше — обычная проверка и отправка; время поиска в «устаревание» лота не считаем
         await self.process(ListingEvent(l, time.monotonic(), "lookup"))
+
+    async def _still_on_sale(self, l: Listing) -> bool | None:
+        """True — лот на маркете, False — продан/снят, None — не удалось проверить (не мешаем отправке)."""
+        slug = l.gift_slug
+
+        async def _get(client):
+            from telethon.tl.functions.payments import GetUniqueStarGiftRequest
+            return await client(GetUniqueStarGiftRequest(slug=slug))
+        try:
+            res, _ = await self.sessions.run(_get, attempts=2, timeout=15, priority=True)
+        except Exception as e:
+            log.debug("on-sale check %s failed: %s", slug, e)
+            return None
+        g = getattr(res, "gift", None)
+        if g is None:
+            return None
+        return bool(getattr(g, "resell_amount", None))
 
     async def _lookup_owner(self, l: Listing) -> bool:
         """Скрытый владелец: пишем боту поиска «/human <имя>», проверяем кандидатов (открыт ли у них
         этот NFT) и подставляем найденного как обычного продавца. True — найден."""
-        owner = await self.owner_lookup.find_owner(l.seller_name, l.gift_slug, l.gift_unique_id)
+        # дорогие лоты — первыми в очереди к боту поиска
+        value = l.stars_price or l.floor_stars or int((l.ton_price or 0) * 300)
+        owner = await self.owner_lookup.find_owner(l.seller_name, l.gift_slug, l.gift_unique_id,
+                                                   prio=-float(value or 0))
         if owner is None:
             return False
         uid = owner.user_id

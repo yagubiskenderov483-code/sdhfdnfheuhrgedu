@@ -197,6 +197,8 @@ class MessageFormatter:
             # Скрытый Telegram-ом владелец: имя идёт как <code> — один тап копирует его в буфер,
             # дальше можно вручную найти профиль через любой поиск (глобальный Telegram, бот поиска и т.п.)
             seller_line = f"<code>{html.escape(l.seller_name)}</code> (скрыт Telegram — скопируй имя)"
+            if l.owner_not_found:
+                seller_line = f"<code>{html.escape(l.seller_name)}</code> (⚠️ владелец не найден ботом поиска)"
         else:
             seller_line = DASH
 
