@@ -127,6 +127,17 @@ async def main():
     check("@ivan_third" in keys, "URL-кнопка t.me → кандидат")
     check("@funstat" not in keys, "сам бот поиска не кандидат")
 
+    # реальный формат ответа бота поиска: «01. 💬 Имя (@username)», имя — ссылка
+    real = ("Пользователи с указанным именем 'callmeluv'\n💬 - в базе есть сообщения/статистика\n\n"
+            "01. 💬 całlmełuv (@callmeluv69)\n02. 💬 Петя (id7105095)")
+    i = real.index("@callmeluv69")
+    ents = [types.MessageEntityTextUrl(offset=real.index("całlmełuv"), length=9,
+                                       url="https://t.me/infostat_robot?start=u123"),
+            types.MessageEntityMention(offset=i, length=len("@callmeluv69"))]
+    rk = [x.key() for x in L.parse_candidates([bot_msg(9, real, ents)], "infostat_robot")]
+    check(rk[:1] == ["@callmeluv69"] and "id7105095" in rk, "формат «01. Имя (@username)» → @callmeluv69")
+    check(not any("infostat" in k for k in rk), "ссылка на сам бот поиска не кандидат")
+
     # --- владелец: у @ivan_real NFT нет, у u222 (имя совпадает) NFT открыт
     users = {"ivan_real": user(111, "Иван", "ivan_real"), 222: user(222, "Иван", "ivan_222", "Иванов"),
              "ivan_third": user(333, "Иван", "ivan_third")}
@@ -195,6 +206,14 @@ async def main():
     btns = [b.text for row in markup.inline_keyboard for b in row]
     check("🔍 Клик" not in btns, "кнопка ручного поиска убрана после находки")
     check(p.db.l.seller_username == "ivan_222", "найденный владелец сохранён в БД")
+
+    # «Написать» после находки владельца ведёт в торговый бот с оффером, а не в ЛС продавцу
+    from bot.formatter import listing_keyboard
+    settings.trade_bot_username = "iostherobot"
+    kb = listing_keyboard(l)
+    w = [b for row in kb.inline_keyboard for b in row if b.text == "Написать"]
+    check(w and w[0].url.startswith("https://t.me/iostherobot?text="), "«Написать» → торговый бот")
+    settings.trade_bot_username = ""
 
     l2 = Listing(listing_id="1:u1", gift_unique_id=1, gift_id=1, gift_name="x", seller_type="user",
                  seller_id=1, seller_name="A")

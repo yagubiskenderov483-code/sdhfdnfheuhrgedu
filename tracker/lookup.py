@@ -236,6 +236,8 @@ class OwnerLookup:
             self.stats["not_found"] += 1
             llog("LOOKUP", f"@{bot} /human {seller_name!r}: кандидатов нет")
             return None
+        # сначала кандидаты с @username (их бот показывает как «01. Имя (@username)»), потом голые ID
+        cands = sorted(cands, key=lambda c: c.username is None)
         found = await self._verify(session, cands[:max(1, settings.lookup_max_candidates)],
                                    seller_name, slug, unique_id)
         if found:
