@@ -127,6 +127,7 @@ class App:
         self.coordinator = MarketplaceCoordinator(self.db, self.sessions, self.pipeline)
         self.lookup = OwnerLookup(self.sessions)       # автопоиск скрытого владельца через бота поиска
         self.pipeline.owner_lookup = self.lookup
+        self.lookup.on_captcha = self._send_lookup_captcha  # капчу бота поиска решает админ
         self.pipeline.paused_getter = lambda: self.coordinator.paused
         self.pipeline.floor_getter = lambda gid: getattr(self.coordinator.states.get(gid), "floor_stars", None)
         # коллекции, выключенные админом через /mute (хранятся в резервной копии)
@@ -300,6 +301,28 @@ class App:
             self._spawn(asyncio.create_task(self._backup_loop(), name="backup-loop"))
         self.pipeline.start()
         await step("tracker", self.coordinator.start())
+
+    async def _send_lookup_captcha(self, token: str, session: str, photo: bytes | None,
+                                   buttons: list[str]) -> None:
+        """Бот поиска показал капчу — шлём её админам с теми же кнопками. Нажатие → кнопка жмётся
+        на аккаунте поиска, поиск владельцев продолжается."""
+        from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
+        bot_u = settings.lookup_bot_username
+        row = [InlineKeyboardButton(text=t[:30] or "?", callback_data=f"cap:{token}:{i}"[:64])
+               for i, t in enumerate(buttons)]
+        kb = InlineKeyboardMarkup(inline_keyboard=[row[i:i + 4] for i in range(0, len(row), 4)])
+        text = (f"🧩 <b>Капча в @{html.escape(bot_u)}</b> (аккаунт {html.escape(session)})\n"
+                "Нажмите кнопку со значком, похожим на картинку — поиск владельцев продолжится.\n"
+                f"Пока капча не пройдена, этот аккаунт не ищет (ждёт до {settings.lookup_captcha_wait:.0f} с).")
+        for uid in sorted(settings.admin_ids or all_admins()):
+            try:
+                if photo:
+                    await self.bot.send_photo(uid, BufferedInputFile(photo, "captcha.jpg"), caption=text,
+                                              reply_markup=kb)
+                else:
+                    await self.bot.send_message(uid, text, reply_markup=kb)
+            except Exception as e:
+                log.warning("Captcha notify %s failed: %s", uid, e)
 
     async def _notify_auth_error(self, w) -> None:
         """Telegram снёс сессию (выкинули из «Устройств», две копии бота, бан) — она уже не оживёт.

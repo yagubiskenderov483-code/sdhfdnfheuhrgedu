@@ -117,6 +117,7 @@ async def main():
     settings.auto_lookup = True
     settings.lookup_sessions = []
     settings.lookup_timeout = 8
+    settings.lookup_interval = 0
 
     # --- парсер кандидатов
     c = FakeClient(REPLY)
@@ -163,6 +164,47 @@ async def main():
     lk = L.OwnerLookup(FakeSessions(c))
     settings.lookup_timeout = 5
     check(await lk.find_owner("Иван Иванов", "PlushPepe-77", 5555) is None, "бот не ответил → None")
+
+    # капча: бот поиска сначала просит капчу → админ нажимает → запрос повторяется → владелец найден
+    class CaptchaClient(FakeClient):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, **kw)
+            self.solved = False
+            self.clicked = None
+
+        async def get_messages(self, ent, limit=10, min_id=0):
+            if min_id and not self.solved:
+                kb = types.ReplyInlineMarkup(rows=[types.KeyboardInlineButtonRow(buttons=[
+                    types.KeyboardInlineButton(text=e, type=types.InlineButtonTypeCallback(data=d))
+                    for e, d in (("🦊", b"a"), ("🐰", b"b"), ("🐶", b"c"))])])
+                return [bot_msg(min_id + 1, "⚠️ Captcha.\nClick the button with the icon that looks like the picture.",
+                                None, kb)]
+            return await super().get_messages(ent, limit, min_id)
+
+        async def download_media(self, msg, file=None):
+            return b"img"
+
+        async def __call__(self, req):
+            from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
+            if isinstance(req, GetBotCallbackAnswerRequest):
+                self.clicked = req.data
+                self.solved = True
+                return None
+            return await super().__call__(req)
+
+    cc = CaptchaClient(REPLY, gifts, users)
+    lk = L.OwnerLookup(FakeSessions(cc))
+    got = {}
+
+    async def on_cap(token, session, photo, buttons):
+        got.update(photo=photo, buttons=buttons)
+        asyncio.get_running_loop().call_later(0.1, lambda: asyncio.ensure_future(lk.solve_captcha(token, 0)))
+    lk.on_captcha = on_cap
+    f = await lk.find_owner("Иван Иванов", "PlushPepe-77", 5555)
+    check(got.get("buttons") == ["🦊", "🐰", "🐶"] and got.get("photo") == b"img", "капча пришла админу с кнопками")
+    check(cc.clicked == b"a", "нажатие админа передано боту поиска")
+    check(f is not None and f.user_id == 222, "после капчи поиск продолжился и нашёл владельца")
+    check(cc.sent.count("/human Иван Иванов") == 2, "команда повторена после капчи")
 
     # несколько выделенных аккаунтов: первый не смог написать боту → пишет второй
     class TwoSessions(FakeSessions):
@@ -227,6 +269,7 @@ async def main():
         import tempfile, pathlib
         p.seller_filter = SellerFilter(pathlib.Path(tempfile.mkdtemp()))
         p.sent_l = None
+        p._lookup_tasks = set()
 
         async def resolve(l):
             return None
@@ -259,6 +302,8 @@ async def main():
     l = hidden()
     check(p._needs_lookup(l), "лот со скрытым владельцем требует поиска")
     await p.process(ListingEvent(l, _t.monotonic(), "live"))
+    check(p.sent_l is None and len(p._lookup_tasks) == 1, "поиск ушёл в фон — обработчик свободен сразу")
+    await asyncio.gather(*list(p._lookup_tasks))
     check(p.sent_l is l, "лот отправлен после поиска")
     check(l.seller_username == "ivan_222" and l.seller_id == 222 and l.seller_key == "u222",
           "владелец подставлен как обычный продавец")
@@ -286,6 +331,7 @@ async def main():
     p = pipeline(FakeClient(REPLY, {111: [], 222: [], 333: []}, users))
     l = hidden()
     await p.process(ListingEvent(l, _t.monotonic(), "live"))
+    await asyncio.gather(*list(p._lookup_tasks))
     check(p.sent_l is None and l.status == ListingStatus.FILTERED_SELLER, "владелец не найден → лот не отправлен")
 
     l2 = Listing(listing_id="1:u1", gift_unique_id=1, gift_id=1, gift_name="x", seller_type="user",

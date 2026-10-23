@@ -25,6 +25,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from telethon import types
+from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
 from telethon.tl.functions.payments import GetSavedStarGiftsRequest
 
 from config import settings
@@ -40,6 +41,7 @@ _SERVICE_NAMES = {"joinchat", "addstickers", "addemoji", "share", "proxy", "sock
 _WAIT_WORDS = ("ищу", "поиск", "подожд", "загруж", "search", "wait", "loading", "⏳", "🔎")
 _MAX_PENDING = 300                # не больше N лотов в очереди на поиск (дальше — пропускаем)
 _CACHE_TTL = 3600.0               # кандидаты по одному имени — час
+_CAPTCHA_WORDS = ("captcha", "капч", "rasmga", "click the button")
 
 
 @dataclass
@@ -145,6 +147,25 @@ def parse_candidates(messages: list[Any], bot_username: str) -> list[Candidate]:
     return out
 
 
+def _buttons(msg: Any) -> list[tuple[str, bytes | None]]:
+    """Кнопки сообщения по порядку: (текст, callback data | None)."""
+    out = []
+    for row in getattr(getattr(msg, "reply_markup", None), "rows", None) or []:
+        for b in getattr(row, "buttons", None) or []:
+            bt = getattr(b, "type", None)
+            data = getattr(bt, "data", None) if bt is not None and not isinstance(bt, str) else None
+            if data is None:
+                data = getattr(b, "data", None)
+            out.append((getattr(b, "text", "") or "?", data if isinstance(data, bytes) else None))
+    return out
+
+
+def is_captcha(msg: Any) -> bool:
+    """Бот поиска просит пройти капчу (картинка + «нажми кнопку с похожим значком»)."""
+    text = (getattr(msg, "message", None) or "").lower()
+    return any(w in text for w in _CAPTCHA_WORDS) and any(d for _, d in _buttons(msg))
+
+
 def _gift_matches(saved: Any, slug: str | None, unique_id: int | None) -> bool:
     g = getattr(saved, "gift", None)
     if not isinstance(g, types.StarGiftUnique):
@@ -180,7 +201,13 @@ class OwnerLookup:
         self._pending = 0
         self._cache: dict[str, tuple[float, list[Candidate]]] = {}
         self._started: set[tuple[str, str]] = set()      # (session, bot) — /start уже отправляли
-        self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0}
+        self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0, "captcha": 0}
+        # капча: решает человек. on_captcha(token, session, photo_bytes, button_texts) — задаёт App
+        # (шлёт админам картинку и кнопки); нажатие админа → solve_captcha(token, index).
+        self.on_captcha = None
+        self._captcha: dict[str, dict] = {}              # token → {session, bot, msg_id, buttons, event}
+        self._captcha_by_session: dict[str, str] = {}    # session → token активной капчи
+        self._last_ask: dict[str, float] = {}            # session → когда последний раз писали боту
 
     # ------------------------------------------------------------------ public
     def enabled(self) -> bool:
@@ -199,6 +226,33 @@ class OwnerLookup:
         finally:
             self._pending -= 1
 
+    def pending_captchas(self) -> int:
+        return len(self._captcha)
+
+    async def solve_captcha(self, token: str, index: int) -> str:
+        """Админ нажал кнопку капчи → жмём ту же кнопку на аккаунте поиска."""
+        c = self._captcha.get(token)
+        if c is None:
+            return "Эта капча уже неактуальна"
+        if not (0 <= index < len(c["buttons"])) or c["buttons"][index][1] is None:
+            return "Неизвестная кнопка"
+        data = c["buttons"][index][1]
+        bot, msg_id = c["bot"], c["msg_id"]
+
+        async def _click(client):
+            ent = await client.get_input_entity(bot)
+            try:
+                await client(GetBotCallbackAnswerRequest(peer=ent, msg_id=msg_id, data=data))
+            except Exception as e:          # бот часто не отвечает на callback (timeout) — нажатие всё равно прошло
+                if "timeout" not in str(e).lower() and "BOT_RESPONSE_TIMEOUT" not in str(e):
+                    raise
+        try:
+            await self._run(c["session"], _click, timeout=20)
+        except Exception as e:
+            return f"Не удалось нажать: {type(e).__name__}"
+        c["event"].set()
+        return "Нажал, продолжаю поиск"
+
     # ------------------------------------------------------------------ internals
     def _pick_sessions(self) -> list[str]:
         """Аккаунты для бота поиска: выделенные (LOOKUP_SESSIONS) по кругу, иначе первый рабочий."""
@@ -209,7 +263,7 @@ class OwnerLookup:
                 self._rr = (getattr(self, "_rr", -1) + 1) % len(ok)
                 order = ok[self._rr:] + ok[:self._rr]
                 # свободные аккаунты (не ведут сейчас разговор с ботом) — первыми
-                return sorted(order, key=lambda n: self._slock(n).locked())
+                return sorted(order, key=lambda n: (n in self._captcha_by_session, self._slock(n).locked()))
             return []
         usable = sorted(w.name for w in self.sessions.usable(include_reserved=True))
         return usable[:1]
@@ -268,8 +322,13 @@ class OwnerLookup:
         async with self._slock(session):
             return await self._ask_bot_locked(session, bot, seller_name)
 
-    async def _ask_bot_locked(self, session: str, bot: str, seller_name: str) -> list[Candidate] | None:
+    async def _ask_bot_locked(self, session: str, bot: str, seller_name: str,
+                              _retry: bool = True) -> list[Candidate] | None:
         cmd = f"/human {seller_name}"
+        # пауза между запросами с одного аккаунта: частые запросы → бот поиска выдаёт капчу
+        gap = settings.lookup_interval - (time.monotonic() - self._last_ask.get(session, 0.0))
+        if gap > 0:
+            await asyncio.sleep(gap)
 
         async def _send(client):
             ent = await client.get_input_entity(bot)
@@ -286,6 +345,7 @@ class OwnerLookup:
         except Exception as e:
             log.warning("Lookup: не удалось написать @%s с %s: %s", bot, session, e)
             return None
+        self._last_ask[session] = time.monotonic()
         sent_id = sent.id
 
         async def _poll(client):
@@ -305,6 +365,15 @@ class OwnerLookup:
                 continue
             if not msgs:
                 continue
+            cap = next((m for m in msgs if is_captcha(m)), None)
+            if cap is not None:
+                if not _retry:
+                    return None
+                solved = await self._wait_captcha(session, bot, cap)
+                if not solved:
+                    return None
+                # капчу прошли — повторяем запрос (бот обычно не выполняет команду, на которой спросил капчу)
+                return await self._ask_bot_locked(session, bot, seller_name, _retry=False)
             got_answer = True
             last_cands = parse_candidates(msgs, bot)
             text = "\n".join((m.message or "") for m in msgs)
@@ -322,6 +391,47 @@ class OwnerLookup:
             log.warning("Lookup: @%s не ответил на %r за %.0f с", bot, cmd, settings.lookup_timeout)
             return None
         return last_cands
+
+    async def _wait_captcha(self, session: str, bot: str, msg: Any) -> bool:
+        """Бот поиска показал капчу: отправляем её админам и ждём, пока кто-то нажмёт нужную кнопку."""
+        self.stats["captcha"] += 1
+        if self.on_captcha is None:
+            log.warning("Lookup: @%s просит капчу на %s — пройдите её вручную в этом аккаунте", bot, session)
+            return False
+        token = f"{session}-{msg.id}"[-40:]
+        if token not in self._captcha:
+            buttons = _buttons(msg)
+            ev = asyncio.Event()
+            self._captcha[token] = {"session": session, "bot": bot, "msg_id": msg.id,
+                                    "buttons": buttons, "event": ev}
+            self._captcha_by_session[session] = token
+
+            async def _photo(client):
+                try:
+                    return await client.download_media(msg, file=bytes)
+                except Exception:
+                    return None
+            try:
+                photo = await self._run(session, _photo, timeout=30)
+            except Exception:
+                photo = None
+            try:
+                await self.on_captcha(token, session, photo, [t for t, _ in buttons])
+            except Exception as e:
+                log.warning("Lookup: не удалось отправить капчу админам: %s", e)
+            llog("LOOKUP", f"@{bot} на {session} просит капчу — отправил админам")
+        c = self._captcha[token]
+        try:
+            await asyncio.wait_for(c["event"].wait(), timeout=max(30.0, settings.lookup_captcha_wait))
+            await asyncio.sleep(2.0)              # даём боту принять ответ
+            return True
+        except asyncio.TimeoutError:
+            log.warning("Lookup: капчу на %s никто не прошёл за %.0f с", session, settings.lookup_captcha_wait)
+            return False
+        finally:
+            self._captcha.pop(token, None)
+            if self._captcha_by_session.get(session) == token:
+                self._captcha_by_session.pop(session, None)
 
     async def _verify(self, session: str, cands: list[Candidate], seller_name: str,
                       slug: str | None, unique_id: int | None) -> FoundOwner | None:

@@ -182,6 +182,7 @@ class ListingPipeline:
         self._seen_ids: dict[str, None] = {}       # недавние listing_id (RAM-кэш дедупа, по порядку)
         self.last_sent_at: float | None = None
         self.owner_lookup = None                   # задаёт App: OwnerLookup (автопоиск скрытого владельца)
+        self._lookup_tasks: set[asyncio.Task] = set()   # лоты, ждущие ответа бота поиска
 
     # ------------------------------------------------------------------ admission (global dedup)
     async def admit(self, items: list[ResaleItem], session: str | None, mode: str,
@@ -259,7 +260,7 @@ class ListingPipeline:
                 supervise(f"processor-{i}", (lambda i=i: self._worker_loop(i)), delay=1.0), name=f"processor-{i}"))
 
     async def stop(self) -> None:
-        for t in list(self._workers) + list(self._retries):
+        for t in list(self._workers) + list(self._retries) + list(self._lookup_tasks):
             t.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
@@ -445,7 +446,7 @@ class ListingPipeline:
                 age = max(age, (datetime.now(timezone.utc) - datetime.fromisoformat(l.first_seen)).total_seconds())
             except (TypeError, ValueError):
                 pass
-        if settings.max_lot_age > 0 and age > settings.max_lot_age:
+        if ev.mode != "lookup" and settings.max_lot_age > 0 and age > settings.max_lot_age:
             l.status, l.reason = ListingStatus.ERROR, f"stale: found {age:.0f}s ago"
             self.stats["stale"] = self.stats.get("stale", 0) + 1
             llog("FILTER", f"#{l.listing_id} skipped: {l.reason}")
@@ -474,20 +475,17 @@ class ListingPipeline:
         llog("FILTER", f"#{l.listing_id} price passed")
 
         await self._resolve_hidden_owner(l)          # скрытый в выдаче продавец → ищем его аккаунт
-        if self._needs_lookup(l):
+        if self._needs_lookup(l) and not getattr(l, "lookup_done", False):
             # владелец скрыт и через страницу подарка не нашёлся → ищем через бота поиска.
             # Имена, которые фильтр и так отсеет (короткие, чужой алфавит, blacklist), боту не шлём.
+            # Поиск идёт ОТДЕЛЬНО от обработчиков: он медленный (ответ бота, капча), а остальные
+            # лоты в это время должны идти дальше как обычно.
             pre = self.seller_filter.check(l)
             if pre.code not in _HIDDEN_HARD_REJECT:
-                found = await self._lookup_owner(l)
-                if not found and settings.lookup_required:
-                    l.status, l.reason = ListingStatus.FILTERED_SELLER, "владелец не найден ботом поиска"
-                    l.seller_filter_result = "OWNER_NOT_FOUND"
-                    self.stats["filtered_seller"] += 1
-                    self.stats["owner_not_found"] = self.stats.get("owner_not_found", 0) + 1
-                    llog("FILTER", f"#{l.listing_id} hidden owner not found via lookup bot — skipped")
-                    await self.db.update_listing(l)
-                    return
+                t = asyncio.get_running_loop().create_task(self._lookup_then_process(l))
+                self._lookup_tasks.add(t)
+                t.add_done_callback(self._lookup_tasks.discard)
+                return
         # повтор NFT/продавца, который уже отправлялся, видно по БД — без лишних запросов в Telegram
         early = await self._sent_before(l)
         if early:
@@ -641,7 +639,8 @@ class ListingPipeline:
             # render ВНУТРИ try: если он бросит исключение, finally всё равно снимет резерв.
             # Иначе краш рендера навсегда блокировал бы этот NFT/продавца/коллекцию (резерв не снят).
             t_checked = time.monotonic()
-            if ev.mode != "resume" and settings.max_lot_age > 0 and t_checked - base > settings.max_lot_age:
+            if (ev.mode not in ("resume", "lookup") and settings.max_lot_age > 0
+                    and t_checked - base > settings.max_lot_age):
                 raise _Stale(f"stale: {t_checked - base:.0f}s after detection (slow seller check)")
             if l.t_detect is not None:
                 # «Обнаружен за» — от появления лота до того, как трекер его увидел (без проверки продавца)
@@ -704,6 +703,26 @@ class ListingPipeline:
         lk = self.owner_lookup
         return (lk is not None and lk.enabled() and l.seller_type is None and bool(l.seller_name)
                 and bool(l.gift_slug or l.gift_unique_id))
+
+    async def _lookup_then_process(self, l: Listing) -> None:
+        try:
+            found = await self._lookup_owner(l)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Owner lookup for %s failed", l.listing_id)
+            found = False
+        l.lookup_done = True
+        if not found and settings.lookup_required:
+            l.status, l.reason = ListingStatus.FILTERED_SELLER, "владелец не найден ботом поиска"
+            l.seller_filter_result = "OWNER_NOT_FOUND"
+            self.stats["filtered_seller"] += 1
+            self.stats["owner_not_found"] = self.stats.get("owner_not_found", 0) + 1
+            llog("FILTER", f"#{l.listing_id} hidden owner not found via lookup bot — skipped")
+            await self.db.update_listing(l)
+            return
+        # дальше — обычная проверка и отправка; время поиска в «устаревание» лота не считаем
+        await self.process(ListingEvent(l, time.monotonic(), "lookup"))
 
     async def _lookup_owner(self, l: Listing) -> bool:
         """Скрытый владелец: пишем боту поиска «/human <имя>», проверяем кандидатов (открыт ли у них

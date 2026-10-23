@@ -262,6 +262,8 @@ SETTING_DESC: dict[str, str] = {
     "LOOKUP_REQUIRED": "true — лот со скрытым владельцем уходит только если бот поиска нашёл его @юз",
     "LOOKUP_DEDICATED": "true — аккаунты поиска не опрашивают маркет, только пишут боту поиска",
     "LOOKUP_TIMEOUT": "сколько секунд ждать ответ бота поиска",
+    "LOOKUP_INTERVAL": "пауза между запросами к боту поиска с одного аккаунта, сек (меньше капч)",
+    "LOOKUP_CAPTCHA_WAIT": "сколько ждать, пока вы пройдёте капчу бота поиска, сек",
     "LOOKUP_MAX_CANDIDATES": "сколько кандидатов из ответа бота поиска проверять (1–30)",
     "TRADE_BOT_USERNAME": "@username торгового бота (напр. iostherobot); кнопка «Написать» → оффер со скидкой",
     "SELLER_NAME_SIGNAL": "true — имя кириллицей («Дмитрий») считается русскоязычным продавцом (больше лотов)",
@@ -298,7 +300,7 @@ SETTING_GROUPS: list[tuple[str, list[str]]] = [
     ("⚡ Скорость", ["PRIORITY_FLOOR", "PRIORITY_SHARE", "PRIORITY_POLL_INTERVAL", "CATALOG_INTERVAL", "COLD_POLL_INTERVAL", "TRACKER_INTERVAL", "PAGE_LIMIT",
                     "SESSION_RPS", "GLOBAL_RPS", "MAX_CONCURRENT_SESSIONS", "LOW_PRIORITY_POLL_INTERVAL", "SYNC_MODE"]),
     ("🔗 Внешние боты", ["TRADE_BOT_USERNAME", "LOOKUP_BOT_USERNAME", "AUTO_LOOKUP", "LOOKUP_REQUIRED", "LOOKUP_SESSIONS",
-                          "LOOKUP_DEDICATED", "LOOKUP_TIMEOUT", "LOOKUP_MAX_CANDIDATES"]),
+                          "LOOKUP_DEDICATED", "LOOKUP_TIMEOUT", "LOOKUP_INTERVAL", "LOOKUP_CAPTCHA_WAIT", "LOOKUP_MAX_CANDIDATES"]),
     ("⚙️ Прочее", ["COLLECTION_FLOOR_MODE", "TEST_MODE", "ALLOW_ALL_USERS", "FETCH_FULL_SELLER"]),
     ("📢 Общий и каналы по цене", ["TARGET_CHAT_ID", "PRICE_ROUTES", "ROUTE_BY"]),
     ("🎨 Каналы по фону", ["BACKDROP_ROUTES"]),
@@ -1310,6 +1312,9 @@ def build_routers(app: "App") -> list[Router]:
             callback_data="lka:~DED")])
         rows.append([InlineKeyboardButton(text=f"⏱ Ждать ответ бота: {settings.lookup_timeout:g} с",
                                           callback_data="lka:~TO")])
+        rows.append([InlineKeyboardButton(text=f"🐢 Пауза между запросами: {settings.lookup_interval:g} с",
+                                          callback_data="lka:~IV")])
+        lk = app.lookup.stats
         rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="lka:~BACK")])
         lb = settings.lookup_bot_username
         text = ("👤 <b>Аккаунты для бота поиска</b>\n"
@@ -1318,8 +1323,32 @@ def build_routers(app: "App") -> list[Router]:
                 "Отмеченные аккаунты пишут боту <code>/human имя</code> по очереди (если один упёрся в лимит — "
                 "пишет следующий). Ничего не отмечено — пишет первый рабочий аккаунт трекера.\n"
                 "«Только поиск» — отмеченные аккаунты не опрашивают маркет, работают только на поиск.\n"
-                "⚠️ — аккаунт сейчас не работает. Добавить аккаунт: /add_session")
+                "⚠️ — аккаунт сейчас не работает. Добавить аккаунт: /add_session\n"
+                "Если бот поиска спросит капчу — она придёт вам сюда с кнопками.\n\n"
+                f"Поисков: {lk.get('lookups', 0)} · найдено: {lk.get('found', 0)} · "
+                f"не найдено: {lk.get('not_found', 0)} · без ответа: {lk.get('no_answer', 0)} · "
+                f"капч: {lk.get('captcha', 0)} · в очереди: {len(app.pipeline._lookup_tasks)}")
         return text, InlineKeyboardMarkup(inline_keyboard=rows)
+
+    @public.callback_query(F.data.startswith("cap:"))
+    async def cb_lookup_captcha(q: CallbackQuery) -> None:
+        """Админ проходит капчу бота поиска за аккаунт трекера."""
+        if not is_manager(q.from_user.id):
+            await q.answer("Только для админов", show_alert=True)
+            return
+        try:
+            _, token, idx = q.data.rsplit(":", 2) if q.data.count(":") >= 2 else (None, None, None)
+            res = await app.lookup.solve_captcha(token, int(idx))
+        except (TypeError, ValueError):
+            res = "Неизвестная кнопка"
+        await q.answer(res)
+        try:
+            cap = q.message.caption if q.message.caption is not None else q.message.text
+            await (q.message.edit_caption if q.message.caption is not None else q.message.edit_text)(
+                **({"caption": f"{cap}\n\n✅ {res}"} if q.message.caption is not None
+                   else {"text": f"{cap}\n\n✅ {res}"}), reply_markup=None)
+        except Exception:
+            pass
 
     @public.callback_query(F.data.startswith("lka:"))
     async def cb_lookup_accounts(q: CallbackQuery) -> None:
@@ -1338,6 +1367,11 @@ def build_routers(app: "App") -> list[Router]:
         try:
             if key == "~DED":
                 set_runtime_value("LOOKUP_DEDICATED", "false" if settings.lookup_dedicated else "true")
+            elif key == "~IV":
+                steps = (3, 6, 10, 20)
+                cur = settings.lookup_interval
+                nxt = next((x for x in steps if x > cur), steps[0])
+                set_runtime_value("LOOKUP_INTERVAL", str(nxt))
             elif key == "~TO":
                 steps = _LOOKUP_TIMEOUTS
                 cur = int(settings.lookup_timeout)
