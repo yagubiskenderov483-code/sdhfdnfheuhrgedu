@@ -689,10 +689,18 @@ def test_seller_filter_states():
         l = Listing(**base); l.seller_type = None; l.seller_id = None; l.seller_name = "Levingston Dell"
         r = sf.check(l); assert r.passed and r.code == "OWNER_HIDDEN", r
 
-        # 4) скрытый владелец, кириллическое имя → NAME_RU_HIDDEN (даже без ALLOW_HIDDEN_OWNER)
+        # 4) скрытый владелец, кириллическое имя из 5+ букв → NAME_RU_HIDDEN
         settings.allow_hidden_owner = False
-        l = Listing(**base); l.seller_type = None; l.seller_id = None; l.seller_name = "Стас"
+        l = Listing(**base); l.seller_type = None; l.seller_id = None; l.seller_name = "манхтай"
         r = sf.check(l); assert r.passed and r.code == "NAME_RU_HIDDEN", r
+
+        # 4a) короткое имя (<5 букв) — SHORT_NAME_HIDDEN даже если кириллица
+        l = Listing(**base); l.seller_type = None; l.seller_id = None; l.seller_name = "ар"
+        r = sf.check(l); assert not r.passed and r.code == "SHORT_NAME_HIDDEN", r
+
+        # 4b) турецкие/азербайджанские буквы в имени — FOREIGN_LETTER_HIDDEN
+        l = Listing(**base); l.seller_type = None; l.seller_id = None; l.seller_name = "Serhat Özcan"
+        r = sf.check(l); assert not r.passed and r.code == "FOREIGN_LETTER_HIDDEN", r
 
         # 5) скрытый владелец, арабский скрипт в имени → FOREIGN_NAME_HIDDEN (блок независимо от флага)
         settings.allow_hidden_owner = True

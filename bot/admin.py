@@ -141,7 +141,9 @@ _REJ = {"PAID_MESSAGES": "платные сообщения / только Premi
         "LEVEL_TOO_HIGH": "Level выше лимита", "UNKNOWN_BLOCKED": "нет признаков русского",
         "PHONE_MISMATCH": "номер не +7/+375/+380", "FOREIGN_TEXT": "профиль на чужом языке",
         "LOOKUP_FAILED": "профиль не прочитался (аккаунты заняты)", "BLACKLIST": "blacklist",
-        "FOREIGN_NAME_HIDDEN": "имя продавца на чужом языке (профиль скрыт Telegram)"}
+        "FOREIGN_NAME_HIDDEN": "имя продавца на чужом языке (профиль скрыт Telegram)",
+        "SHORT_NAME_HIDDEN": "имя продавца короче 5 букв (профиль скрыт)",
+        "FOREIGN_LETTER_HIDDEN": "иностранные буквы (ö ü ğ ə ç ş ı) в имени (профиль скрыт)"}
 
 
 def _human_reason(status: str, reason: str, code: str | None) -> str:

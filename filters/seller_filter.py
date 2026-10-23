@@ -41,6 +41,16 @@ _NON_SLAVIC = re.compile(r"[әғқңөұүһҳҷҙҗӣӯҫӑӕҝҕӧҭҡӳӗђћ
 _FOREIGN_SCRIPT = re.compile(r"[\u0590-\u06FF\u0750-\u077F\u0900-\u0DFF\u0E00-\u0E7F"
                              r"\u10A0-\u10FF\u0530-\u058F\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF]")
 
+# \u0422\u0443\u0440\u0435\u0446\u043A\u0438\u0435 / \u0430\u0437\u0435\u0440\u0431\u0430\u0439\u0434\u0436\u0430\u043D\u0441\u043A\u0438\u0435 / \u043D\u0435\u043C\u0435\u0446\u043A\u0438\u0435 \u0431\u0443\u043A\u0432\u044B \u0441 \u0434\u0438\u0430\u043A\u0440\u0438\u0442\u0438\u043A\u043E\u0439: \u00F6 \u00FC \u011F \u0259 \u00E7 \u015F \u0131.
+# \u0412 \u0438\u043C\u0435\u043D\u0430\u0445 \u043D\u0430\u0441\u0442\u043E\u044F\u0449\u0438\u0445 RU/UA/BY-\u043F\u0440\u043E\u0434\u0430\u0432\u0446\u043E\u0432 \u043F\u0440\u0430\u043A\u0442\u0438\u0447\u0435\u0441\u043A\u0438 \u043D\u0435 \u0432\u0441\u0442\u0440\u0435\u0447\u0430\u044E\u0442\u0441\u044F \u2014 \u0434\u043B\u044F \u0441\u043A\u0440\u044B\u0442\u044B\u0445 \u0432\u043B\u0430\u0434\u0435\u043B\u044C\u0446\u0435\u0432
+# \u044D\u0442\u043E \u0441\u0438\u043B\u044C\u043D\u044B\u0439 \u0441\u0438\u0433\u043D\u0430\u043B \u00AB\u043D\u0435 \u043D\u0430\u0448\u00BB. \u041F\u0440\u043E\u0432\u0435\u0440\u044F\u0435\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u0432 hidden-owner \u0432\u0435\u0442\u043A\u0435.
+_HIDDEN_FOREIGN_LETTERS = re.compile(r"[\u00F6\u00FC\u011F\u0259\u00E7\u015F\u0131\u0130\u00D6\u00DC\u011E\u018F\u00C7\u015E]")
+
+
+def _letter_count(s: str) -> int:
+    """\u0421\u043A\u043E\u043B\u044C\u043A\u043E \u0432 \u0441\u0442\u0440\u043E\u043A\u0435 \u0438\u043C\u0435\u043D\u043D\u043E \u0431\u0443\u043A\u0432 (\u0431\u0435\u0437 \u0446\u0438\u0444\u0440, \u043F\u0440\u043E\u0431\u0435\u043B\u043E\u0432, \u043F\u0443\u043D\u043A\u0442\u0443\u0430\u0446\u0438\u0438 \u0438 unicode-\u043C\u0443\u0441\u043E\u0440\u0430)."""
+    return sum(1 for ch in s if ch.isalpha())
+
 
 def is_foreign_text(text: str | None) -> bool:
     """Текст явно не на нашем языке: чужая письменность или неславянская кириллица."""
@@ -138,7 +148,13 @@ class SellerFilter:
         # видно только owner_name. Профиля нет → обычный RUSSIAN_ONLY неприменим.
         # Логика: имя (owner_name) — единственный доступный сигнал. На нём и фильтруем.
         if l.seller_type is None and l.seller_id is None:
-            name = l.seller_name
+            name = (l.seller_name or "").strip()
+            # 0a) слишком короткое имя — минимум 5 букв (ар, k, G., ры — мусор)
+            if _letter_count(name) < 5:
+                return SellerResult(False, "SHORT_NAME_HIDDEN", "name has fewer than 5 letters (profile hidden)")
+            # 0b) турецкие / азербайджанские / немецкие буквы (ö ü ğ ə ç ş ı) — не наш
+            if _HIDDEN_FOREIGN_LETTERS.search(name):
+                return SellerResult(False, "FOREIGN_LETTER_HIDDEN", "foreign-script letters in name (profile hidden)")
             # 1) явно русское имя (кириллица 2+ букв подряд) или флаг RU/UA/BY — пропускаем
             if settings.russian_only and (is_russian_name(name) or has_flag(name)):
                 return SellerResult(True, "NAME_RU_HIDDEN", "Cyrillic name / RU flag (profile hidden by Telegram)")
