@@ -661,13 +661,23 @@ def test_seller_filter_states():
         l = Listing(**base); l.seller_type = "user"; l.seller_id = 11
         r = sf.check(l); assert not r.passed and r.code == "UNKNOWN_BLOCKED", r
 
-        # 3) владелец полностью скрыт (owner_name только) — OWNER_HIDDEN (пропускаем, т.к. ALLOW_HIDDEN_OWNER=true)
+        # 3) скрытый владелец, имя на латинице → OWNER_HIDDEN (неопределённо → решает ALLOW_HIDDEN_OWNER)
         l = Listing(**base); l.seller_type = None; l.seller_id = None; l.seller_name = "Levingston Dell"
         r = sf.check(l); assert r.passed and r.code == "OWNER_HIDDEN", r
 
-        # 4) тот же сценарий со скрытым владельцем, но флаг выключен — обратно в UNKNOWN_BLOCKED
+        # 4) скрытый владелец, кириллическое имя → NAME_RU_HIDDEN (даже без ALLOW_HIDDEN_OWNER)
         settings.allow_hidden_owner = False
-        l = Listing(**base); l.seller_type = None; l.seller_id = None; l.seller_name = "Levingston Dell"
+        l = Listing(**base); l.seller_type = None; l.seller_id = None; l.seller_name = "Стас"
+        r = sf.check(l); assert r.passed and r.code == "NAME_RU_HIDDEN", r
+
+        # 5) скрытый владелец, арабский скрипт в имени → FOREIGN_NAME_HIDDEN (блок независимо от флага)
+        settings.allow_hidden_owner = True
+        l = Listing(**base); l.seller_type = None; l.seller_id = None; l.seller_name = "الذيبــــــــة"
+        r = sf.check(l); assert not r.passed and r.code == "FOREIGN_NAME_HIDDEN", r
+
+        # 6) ALLOW_HIDDEN_OWNER=false и имя латиницей без признаков → UNKNOWN_BLOCKED
+        settings.allow_hidden_owner = False
+        l = Listing(**base); l.seller_type = None; l.seller_id = None; l.seller_name = "Mr Gold"
         r = sf.check(l); assert not r.passed and r.code == "UNKNOWN_BLOCKED", r
         settings.allow_hidden_owner = True
     print("SELLER FILTER STATES OK")

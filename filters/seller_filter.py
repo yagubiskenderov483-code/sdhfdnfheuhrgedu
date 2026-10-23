@@ -134,11 +134,21 @@ class SellerFilter:
         if self._match(l, self.black_ids, self.black_names):
             return SellerResult(False, "BLACKLIST", "seller in blacklist")
 
-        # Telegram в октябре 26 начал скрывать владельцев NFT: owner_id отсутствует, видно только имя.
-        # Профиль недоступен — RUSSIAN_ONLY к такому лоту неприменим. С ALLOW_HIDDEN_OWNER=true
-        # такие лоты идут в канал без языкового фильтра (иначе падали бы в UNKNOWN_BLOCKED).
-        if settings.allow_hidden_owner and l.seller_type is None and l.seller_id is None:
-            return SellerResult(True, "OWNER_HIDDEN", "owner hidden by Telegram — no profile to filter on")
+        # Telegram в октябре 26 начал скрывать владельцев NFT: owner_id и host_id отсутствуют,
+        # видно только owner_name. Профиля нет → обычный RUSSIAN_ONLY неприменим.
+        # Логика: имя (owner_name) — единственный доступный сигнал. На нём и фильтруем.
+        if l.seller_type is None and l.seller_id is None:
+            name = l.seller_name
+            # 1) явно русское имя (кириллица 2+ букв подряд) или флаг RU/UA/BY — пропускаем
+            if settings.russian_only and (is_russian_name(name) or has_flag(name)):
+                return SellerResult(True, "NAME_RU_HIDDEN", "Cyrillic name / RU flag (profile hidden by Telegram)")
+            # 2) явно иностранный скрипт в имени (арабица, иероглифы, иврит, казахские буквы) — блок
+            if settings.russian_only and is_foreign_text(name):
+                return SellerResult(False, "FOREIGN_NAME_HIDDEN", "foreign script in name (profile hidden)")
+            # 3) всё остальное (латиница без явных признаков, пустое) — решает ALLOW_HIDDEN_OWNER
+            if settings.allow_hidden_owner:
+                return SellerResult(True, "OWNER_HIDDEN", "owner hidden by Telegram — no profile to filter on")
+            # ALLOW_HIDDEN_OWNER=false и имя без явных признаков → фильтр ниже вернёт UNKNOWN_BLOCKED
 
         # продавцу должно быть можно написать бесплатно
         if settings.require_free_messages and l.seller_type == "user" and l.messages != "бесплатно":

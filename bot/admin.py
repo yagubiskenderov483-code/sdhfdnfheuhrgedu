@@ -136,7 +136,8 @@ class AddSession(StatesGroup):
 _REJ = {"PAID_MESSAGES": "платные сообщения / только Premium", "TOO_MANY_NFTS": "много NFT",
         "LEVEL_TOO_HIGH": "Level выше лимита", "UNKNOWN_BLOCKED": "нет признаков русского",
         "PHONE_MISMATCH": "номер не +7/+375/+380", "FOREIGN_TEXT": "профиль на чужом языке",
-        "LOOKUP_FAILED": "профиль не прочитался (аккаунты заняты)", "BLACKLIST": "blacklist"}
+        "LOOKUP_FAILED": "профиль не прочитался (аккаунты заняты)", "BLACKLIST": "blacklist",
+        "FOREIGN_NAME_HIDDEN": "имя продавца на чужом языке (профиль скрыт Telegram)"}
 
 
 def _human_reason(status: str, reason: str, code: str | None) -> str:
