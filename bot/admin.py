@@ -245,6 +245,7 @@ SETTING_DESC: dict[str, str] = {
     "RUSSIAN_ONLY": "только русские продавцы (true/false)",
     "UNKNOWN_SELLER_POLICY": "продавец без явных данных: block (отсеять) | allow (пропускать)",
     "ALLOW_HIDDEN_OWNER": "true — пропускать лоты со скрытым Telegram-ом владельцем (без языкового фильтра)",
+    "LOOKUP_BOT_USERNAME": "@username бота поиска по имени (напр. funstat); пусто = кнопки нет",
     "SELLER_NAME_SIGNAL": "true — имя кириллицей («Дмитрий») считается русскоязычным продавцом (больше лотов)",
     "PHONE_MISMATCH_BLOCKS": "false — чужой телефон не отсеивает сразу, решает язык профиля (больше лотов)",
     "REQUIRE_FREE_MESSAGES": "продавцу можно написать бесплатно (true/false)",

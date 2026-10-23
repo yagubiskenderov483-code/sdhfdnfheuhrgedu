@@ -56,7 +56,8 @@ def seller_url(l: Listing) -> str | None:
 
 
 def listing_keyboard(l: Listing, with_seller: bool = True) -> InlineKeyboardMarkup:
-    """Кнопки: [Занять] / [Лот] [Написать]"""
+    """Кнопки: [Занять] / [Лот] [Написать] / [🔍 Найти по имени] — последняя только для скрытых
+    владельцев, когда задан LOOKUP_BOT_USERNAME (бот поиска, напр. funstat)."""
     rows = [[InlineKeyboardButton(text="Занять", callback_data=f"take:{l.gift_unique_id}"[:64])]]
     second = []
     if l.gift_link:
@@ -64,6 +65,13 @@ def listing_keyboard(l: Listing, with_seller: bool = True) -> InlineKeyboardMark
     url = seller_url(l) if with_seller else None
     if url:
         second.append(InlineKeyboardButton(text="Написать", url=url))
+    # Для лотов со скрытым Telegram-ом владельцем — кнопка в бота поиска с именем в start-параметре.
+    # Telegram передаст start-payload боту, но в Telegram НЕЛЬЗЯ открыть бота сразу с текстом команды,
+    # поэтому используем deep-link вида t.me/<bot>?start=<base64url(name)> или просто ссылку
+    # на /resolve без параметра — пусть пользователь сам введёт /human и вставит имя.
+    if with_seller and not url and l.seller_name and getattr(settings, "lookup_bot_username", ""):
+        bot = settings.lookup_bot_username.lstrip("@")
+        second.append(InlineKeyboardButton(text=f"🔍 Найти в @{bot}", url=f"https://t.me/{bot}"))
     if second:
         rows.append(second)
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -138,8 +146,12 @@ class MessageFormatter:
             seller_line = "TON-кошелёк"
         elif l.seller_type in ("channel", "chat") and l.seller_name:
             seller_line = html.escape(l.seller_name) + " (канал без ссылки)"
+        elif l.seller_name:
+            # Скрытый Telegram-ом владелец: имя идёт как <code> — один тап копирует его в буфер,
+            # дальше можно вручную найти профиль через любой поиск (глобальный Telegram, бот поиска и т.п.)
+            seller_line = f"<code>{html.escape(l.seller_name)}</code> (скрыт Telegram — скопируй имя)"
         else:
-            seller_line = html.escape(l.seller_name or DASH) + (" (скрыт)" if l.seller_name else "")
+            seller_line = DASH
 
         if l.seller_profile_link:
             seller_profile = html.escape(l.seller_profile_link)
