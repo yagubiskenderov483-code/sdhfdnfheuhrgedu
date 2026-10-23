@@ -14,6 +14,7 @@ from __future__ import annotations
 import html
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -65,13 +66,17 @@ def listing_keyboard(l: Listing, with_seller: bool = True) -> InlineKeyboardMark
     url = seller_url(l) if with_seller else None
     if url:
         second.append(InlineKeyboardButton(text="Написать", url=url))
-    # Для лотов со скрытым Telegram-ом владельцем — кнопка в бота поиска с именем в start-параметре.
-    # Telegram передаст start-payload боту, но в Telegram НЕЛЬЗЯ открыть бота сразу с текстом команды,
-    # поэтому используем deep-link вида t.me/<bot>?start=<base64url(name)> или просто ссылку
-    # на /resolve без параметра — пусть пользователь сам введёт /human и вставит имя.
+    # Для лотов со скрытым Telegram-ом владельцем — кнопка открывает бота поиска
+    # (например, funstat) с ПРЕДЗАПОЛНЕННЫМ текстом «/human <имя>».
+    # URL-формат  t.me/<bot>?text=<cmd>  поддерживается большинством клиентов (Desktop, Android,
+    # большинство версий iOS) — текст автоматически попадает в input, админу остаётся нажать «Отправить».
+    # На клиенте, где не предзаполнит, бот всё равно откроется — имя всегда можно скопировать
+    # из <code>…</code> в самом сообщении.
     if with_seller and not url and l.seller_name and getattr(settings, "lookup_bot_username", ""):
         bot = settings.lookup_bot_username.lstrip("@")
-        second.append(InlineKeyboardButton(text=f"🔍 Найти в @{bot}", url=f"https://t.me/{bot}"))
+        cmd = f"/human {l.seller_name}"
+        second.append(InlineKeyboardButton(text="🔍 Клик",
+                                           url=f"https://t.me/{bot}?text={quote(cmd, safe='/')}"))
     if second:
         rows.append(second)
     return InlineKeyboardMarkup(inline_keyboard=rows)
