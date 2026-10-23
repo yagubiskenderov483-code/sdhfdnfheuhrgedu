@@ -139,14 +139,31 @@ def _rarities(attrs: list | None) -> tuple[str | None, str | None, str | None]:
     return m, b, p
 
 
-def _owner(g: types.StarGiftUnique) -> tuple[str, str | None, int | None]:
-    p = g.owner_id
+def _peer_to_owner(p: Any) -> tuple[str, str, int] | None:
     if isinstance(p, types.PeerUser):
         return f"u{p.user_id}", "user", p.user_id
     if isinstance(p, types.PeerChannel):
         return f"c{p.channel_id}", "channel", p.channel_id
     if isinstance(p, types.PeerChat):
         return f"g{p.chat_id}", "chat", p.chat_id
+    return None
+
+
+def _owner(g: types.StarGiftUnique) -> tuple[str, str | None, int | None]:
+    """Определяет продавца по starGiftUnique.
+    Приоритет (по схеме Layer 229, core.telegram.org/constructor/starGiftUnique):
+      1) owner_id — если задан (у не-TON подарков)
+      2) host_id — для NFT на TON-блокчейне (владение у TON-кошелька в owner_address,
+         а host_id — профиль, НА КОТОРОМ подарок отображается, т.е. продавец, выставивший лот)
+      3) owner_address — TON-кошелёк (ID Telegram-аккаунта неизвестен)
+      4) owner_name — fallback строка, когда ничего другого нет
+    """
+    o = _peer_to_owner(g.owner_id)
+    if o is not None:
+        return o
+    o = _peer_to_owner(getattr(g, "host_id", None))
+    if o is not None:
+        return o
     if g.owner_address:
         return f"a{g.owner_address}", "address", None
     if g.owner_name:
@@ -185,12 +202,17 @@ def parse_unique_gift(g: Any, users: dict[int, Any], chats: dict[int, Any]) -> R
 
 
 async def fetch_gift_owner(client: TelegramClient, slug: str) -> Any:
-    """Владелец конкретного NFT по ссылке t.me/nft/<slug>. В выдаче маркета владелец бывает скрыт
-    (только имя), а страница самого подарка часто отдаёт его аккаунт. → telethon User или None."""
+    """Владелец/хост конкретного NFT по ссылке t.me/nft/<slug>. Для не-TON подарков это owner_id;
+    для NFT на TON-блокчейне owner_id пуст, но есть host_id — профиль, на котором подарок
+    отображается (= продавец, выставивший лот). → telethon User или None.
+    Namespace: только PeerUser; каналы/чаты через этот путь не раскрываем."""
     res = await client(GetUniqueStarGiftRequest(slug=slug))
-    p = getattr(getattr(res, "gift", None), "owner_id", None)
-    if isinstance(p, types.PeerUser):
-        return next((u for u in (res.users or []) if getattr(u, "id", None) == p.user_id), None)
+    g = getattr(res, "gift", None)
+    for peer in (getattr(g, "owner_id", None), getattr(g, "host_id", None)):
+        if isinstance(peer, types.PeerUser):
+            u = next((u for u in (res.users or []) if getattr(u, "id", None) == peer.user_id), None)
+            if u is not None:
+                return u
     return None
 
 

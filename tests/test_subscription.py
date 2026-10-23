@@ -568,6 +568,113 @@ def test_hidden_owner_resolved():
 test_hidden_owner_resolved()
 
 
+def test_owner_resolution_all_cases():
+    """StarGiftUnique._owner(): все комбинации owner_id / host_id / owner_address / owner_name.
+    Главное: когда owner_id пуст (NFT на TON), seller берётся из host_id — т.е. из профиля,
+    на котором подарок отображается (= продавец, выставивший лот)."""
+    import types as _t
+    from telethon.tl import types as tgt
+    from tracker.marketplace import _owner
+
+    def mk(**kw):
+        g = _t.SimpleNamespace(owner_id=None, owner_name=None, owner_address=None, host_id=None)
+        for k, v in kw.items():
+            setattr(g, k, v)
+        return g
+
+    # 1) owner_id = PeerUser  → user, id из owner_id
+    assert _owner(mk(owner_id=tgt.PeerUser(user_id=111))) == ("u111", "user", 111)
+    # 2) owner_id пуст, host_id = PeerUser  → user, id из host_id  (NFT на TON)
+    assert _owner(mk(host_id=tgt.PeerUser(user_id=222), owner_address="EQ...xyz")) == ("u222", "user", 222)
+    # 3) owner_id пуст, host_id пуст, owner_address есть  → address (TON-кошелёк, без Telegram-ID)
+    assert _owner(mk(owner_address="EQ...abc")) == ("aEQ...abc", "address", None)
+    # 4) только owner_name (ни peer, ни адреса)  → None-ый тип, продавец скрыт полностью
+    assert _owner(mk(owner_name="Levingston Dell")) == ("n:Levingston Dell", None, None)
+    # 5) ничего  → placeholder "n"
+    assert _owner(mk()) == ("n", None, None)
+    # 6) owner_id = PeerChannel  → channel
+    assert _owner(mk(owner_id=tgt.PeerChannel(channel_id=333))) == ("c333", "channel", 333)
+    # 7) owner_id пуст, host_id = PeerChannel  → channel (витрина — канал)
+    assert _owner(mk(host_id=tgt.PeerChannel(channel_id=444))) == ("c444", "channel", 444)
+    # 8) owner_id = PeerUser перебивает host_id (на всякий случай порядок приоритета)
+    assert _owner(mk(owner_id=tgt.PeerUser(user_id=1), host_id=tgt.PeerUser(user_id=2))) == ("u1", "user", 1)
+    print("OWNER RESOLUTION OK")
+
+test_owner_resolution_all_cases()
+
+
+def test_fetch_gift_owner_prefers_host():
+    """fetch_gift_owner: owner_id пуст → берёт host_id из того же ответа; users[] должен содержать юзера."""
+    import asyncio, types as _t
+    from telethon.tl import types as tgt
+    from tracker.marketplace import fetch_gift_owner
+
+    users = [_t.SimpleNamespace(id=777, username="hostguy", first_name="H")]
+    gift_with_host = _t.SimpleNamespace(owner_id=None, host_id=tgt.PeerUser(user_id=777), owner_address="EQ...")
+
+    class FakeClient:
+        def __init__(self, gift):
+            self.gift = gift
+        async def __call__(self, req):
+            return _t.SimpleNamespace(gift=self.gift, users=users, chats=[])
+
+    u = asyncio.run(fetch_gift_owner(FakeClient(gift_with_host), "slug-1"))
+    assert u is not None and u.id == 777 and u.username == "hostguy", u
+
+    # обратный случай: host_id пуст, owner_id = PeerUser — тоже находит
+    gift_with_owner = _t.SimpleNamespace(owner_id=tgt.PeerUser(user_id=777), host_id=None, owner_address=None)
+    u2 = asyncio.run(fetch_gift_owner(FakeClient(gift_with_owner), "slug-2"))
+    assert u2 is not None and u2.id == 777
+
+    # ни того, ни другого — None
+    gift_hidden = _t.SimpleNamespace(owner_id=None, host_id=None, owner_address="EQ...", owner_name="X")
+    u3 = asyncio.run(fetch_gift_owner(FakeClient(gift_hidden), "slug-3"))
+    assert u3 is None
+    print("FETCH GIFT OWNER OK")
+
+test_fetch_gift_owner_prefers_host()
+
+
+def test_seller_filter_states():
+    """Четыре состояния продавца в фильтре: явный русский / чужой / скрыт (host_id сработал) / полностью скрытый."""
+    import dataclasses
+    from database.models import Listing
+    from filters.seller_filter import SellerFilter
+    from config import settings
+    import tempfile, pathlib
+
+    base = {x.name: None for x in dataclasses.fields(Listing)
+            if x.default is dataclasses.MISSING and x.default_factory is dataclasses.MISSING}
+
+    with tempfile.TemporaryDirectory() as d:
+        sf = SellerFilter(pathlib.Path(d))
+        # дефолты фильтра — RUSSIAN_ONLY=true, UNKNOWN_SELLER_POLICY=block
+        settings.russian_only = True
+        settings.unknown_seller_policy = "block"
+        settings.allow_hidden_owner = True
+
+        # 1) владелец раскрыт через host_id, bio на русском — passed
+        l = Listing(**base); l.seller_type = "user"; l.seller_id = 10; l.seller_about = "Продаю НФТ по акции"
+        assert sf.check(l).passed, "русский bio должен проходить"
+
+        # 2) владелец раскрыт, профиль пустой — UNKNOWN_BLOCKED
+        l = Listing(**base); l.seller_type = "user"; l.seller_id = 11
+        r = sf.check(l); assert not r.passed and r.code == "UNKNOWN_BLOCKED", r
+
+        # 3) владелец полностью скрыт (owner_name только) — OWNER_HIDDEN (пропускаем, т.к. ALLOW_HIDDEN_OWNER=true)
+        l = Listing(**base); l.seller_type = None; l.seller_id = None; l.seller_name = "Levingston Dell"
+        r = sf.check(l); assert r.passed and r.code == "OWNER_HIDDEN", r
+
+        # 4) тот же сценарий со скрытым владельцем, но флаг выключен — обратно в UNKNOWN_BLOCKED
+        settings.allow_hidden_owner = False
+        l = Listing(**base); l.seller_type = None; l.seller_id = None; l.seller_name = "Levingston Dell"
+        r = sf.check(l); assert not r.passed and r.code == "UNKNOWN_BLOCKED", r
+        settings.allow_hidden_owner = True
+    print("SELLER FILTER STATES OK")
+
+test_seller_filter_states()
+
+
 def test_backup_migrates_from_old_bot_once():
     import asyncio, json, tempfile
     from pathlib import Path
