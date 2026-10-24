@@ -185,7 +185,9 @@ class Settings:
     lookup_captcha_wait: float = 600.0        # сколько ждать, пока админ пройдёт капчу бота поиска, сек
     lookup_timeout: float = 25.0              # сколько секунд ждать ответа бота поиска
     lookup_skip_over: int = 20                # в ответе бота поиска N+ человек — лот сразу пропустить (0 = выкл)
-    lookup_max_candidates: int = 8            # сколько кандидатов из ответа проверять
+    lookup_resolve_per_hour: int = 6          # не больше N новых @юзов в час на аккаунт (иначе FloodWait ~20 ч)
+    lookup_nomatch_check: int = 1             # имя в ответе бота не совпало ни у кого — проверить первых N
+    lookup_max_candidates: int = 3            # сколько кандидатов из ответа проверять
     trade_bot_username: str = ""              # @username торгового бота (напр. "iostherobot") —
                                               # кнопка «Написать» открывает его с готовым
                                               # оффером: «@<бот> <ссылка на NFT> <сниженная_цена>».
@@ -338,6 +340,8 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOOKUP_INTERVAL": ("lookup_interval", _rng(0, 600)),
     "LOOKUP_CAPTCHA_WAIT": ("lookup_captcha_wait", _rng(30, 7200)),
     "LOOKUP_SKIP_OVER": ("lookup_skip_over", lambda v: max(0, min(1000, int(v)))),
+    "LOOKUP_RESOLVE_PER_HOUR": ("lookup_resolve_per_hour", lambda v: max(1, min(200, int(v)))),
+    "LOOKUP_NOMATCH_CHECK": ("lookup_nomatch_check", lambda v: max(0, min(10, int(v)))),
     "LOOKUP_MAX_CANDIDATES": ("lookup_max_candidates", lambda v: max(1, min(30, int(v)))),
     "TRADE_BOT_USERNAME": ("trade_bot_username", lambda v: v.strip().lstrip("@")),
     "SELLER_PHONE_PREFIXES": ("seller_phone_prefixes", _str_list),
@@ -413,7 +417,9 @@ def _from_env() -> Settings:
         lookup_interval=min(600.0, max(0.0, _float(e("LOOKUP_INTERVAL"), 6.0))),
         lookup_captcha_wait=min(7200.0, max(30.0, _float(e("LOOKUP_CAPTCHA_WAIT"), 600.0))),
         lookup_skip_over=max(0, min(1000, _int(e("LOOKUP_SKIP_OVER"), 20))),
-        lookup_max_candidates=max(1, min(30, _int(e("LOOKUP_MAX_CANDIDATES"), 8))),
+        lookup_resolve_per_hour=max(1, min(200, _int(e("LOOKUP_RESOLVE_PER_HOUR"), 6))),
+        lookup_nomatch_check=max(0, min(10, _int(e("LOOKUP_NOMATCH_CHECK"), 1))),
+        lookup_max_candidates=max(1, min(30, _int(e("LOOKUP_MAX_CANDIDATES"), 3))),
         trade_bot_username=(e("TRADE_BOT_USERNAME") or "").strip().lstrip("@"),
         unique_gifts=_bool(e("UNIQUE_GIFTS"), True),
         require_free_messages=_bool(e("REQUIRE_FREE_MESSAGES"), True),

@@ -43,6 +43,8 @@ _SERVICE_NAMES = {"joinchat", "addstickers", "addemoji", "share", "proxy", "sock
 _WAIT_WORDS = ("ищу", "поиск", "подожд", "загруж", "search", "wait", "loading", "⏳", "🔎")
 _MAX_PENDING = 300                # не больше N лотов в очереди на поиск (дальше — пропускаем)
 _CACHE_TTL = 3600.0               # кандидаты по одному имени — час
+_LINE_RE = re.compile(r"\((?:@([A-Za-z][A-Za-z0-9_]{3,31})|id\s*(\d{3,12}))\)", re.I)
+_LINE_PREFIX_RE = re.compile(r"^[\s\d.)\-#№]*(?:[^\w\s]+\s*)*")
 _CAPTCHA_WORDS = ("captcha", "kapch", "капч", "rasmga", "click the button", "looks like the picture")
 
 
@@ -50,6 +52,7 @@ _CAPTCHA_WORDS = ("captcha", "kapch", "капч", "rasmga", "click the button", 
 class Candidate:
     username: str | None = None
     user_id: int | None = None
+    name: str | None = None              # имя, которое бот поиска показал рядом с юзом
 
     def key(self) -> str:
         return f"@{self.username.lower()}" if self.username else f"id{self.user_id}"
@@ -146,7 +149,29 @@ def parse_candidates(messages: list[Any], bot_username: str) -> list[Candidate]:
                 uid = getattr(src, "user_id", None)
                 if isinstance(uid, int):
                     add(Candidate(user_id=uid))
+    # имена из строк вида «01. 💬 Имя (@username)» / «02. Имя (id123456)»
+    names: dict[str, str] = {}
+    for msg in messages:
+        for line in (getattr(msg, "message", None) or "").splitlines():
+            m = _LINE_RE.search(line)
+            if not m:
+                continue
+            nm = _LINE_PREFIX_RE.sub("", line[:m.start()]).strip(" -—:|")
+            if nm:
+                k = f"@{m.group(1).lower()}" if m.group(1) else f"id{m.group(2)}"
+                names.setdefault(k, nm)
+    for c in out:
+        c.name = names.get(c.key())
     return out
+
+
+def same_name(a: str | None, b: str | None) -> bool:
+    """Имя продавца из маркета и имя из ответа бота поиска — одно и то же? Бот пишет «похожими»
+    буквами (ł вместо l и т.п.) и с украшениями, поэтому сравниваем только буквы/цифры."""
+    def keep(t: str) -> str:              # буквы любых алфавитов + обычные цифры (୨ ୧ и т.п. — украшения)
+        return "".join(ch for ch in _plain(t or "") if ch.isalpha() or ch in "0123456789")
+    ca, cb = keep(a), keep(b)
+    return bool(ca) and ca == cb
 
 
 def _buttons(msg: Any) -> list[tuple[str, bytes | None]]:
@@ -207,7 +232,7 @@ def _gift_matches(saved: Any, slug: str | None, unique_id: int | None) -> bool:
 
 
 async def profile_has_gift(client, entity, slug: str | None, unique_id: int | None,
-                           max_pages: int = 5) -> bool:
+                           max_pages: int = 3) -> bool:
     """Виден ли этот NFT в профиле пользователя (скрытые подарки Telegram не отдаёт)."""
     offset = ""
     for _ in range(max_pages):
@@ -270,6 +295,9 @@ class OwnerLookup:
         self.sessions = sessions
         self.db = db                                     # kv: имя → уже найденные владельцы (переживает деплой)
         self._slocks: dict[str, _PrioLock] = {}
+        self._peers: dict[tuple[str, str], Any] = {}     # (session, @юз/id) → InputPeerUser
+        self._resolves: dict[str, list[float]] = {}      # session → когда открывали юзы (лимит в час)
+        self._anchor: str | None = None                  # аккаунт поиска, когда LOOKUP_SESSIONS пуст
         self._pending = 0
         self._cache: dict[str, tuple[float, list[Candidate]]] = {}
         self._started: set[tuple[str, str]] = set()      # (session, bot) — /start уже отправляли
@@ -339,7 +367,13 @@ class OwnerLookup:
                 # свободные аккаунты (не ведут сейчас разговор с ботом) — первыми
                 return sorted(order, key=lambda n: (n in self._captcha_by_session, self._slock(n).locked()))
             return []
-        usable = sorted(w.name for w in self.sessions.usable(include_reserved=True))
+        # Отдельные аккаунты не выбраны → ищем с ОДНОГО аккаунта трекера. Если он во FloodWait —
+        # ждём его, а не перескакиваем на следующий (иначе FloodWait по очереди ловят все аккаунты).
+        w = self.sessions.get(self._anchor) if self._anchor else None
+        if w is not None and getattr(getattr(w, "status", None), "value", "") == "FLOOD_WAIT":
+            return [self._anchor] if w.is_usable() else []
+        usable = sorted(x.name for x in self.sessions.usable(include_reserved=True))
+        self._anchor = usable[0] if usable else None
         return usable[:1]
 
     def _slock(self, session: str) -> _PrioLock:
@@ -357,7 +391,8 @@ class OwnerLookup:
             items = json.loads(raw) if raw else []
         except Exception:
             return []
-        return [Candidate(username=i.get("u"), user_id=i.get("id")) for i in items if i.get("u") or i.get("id")]
+        return [Candidate(username=i.get("u"), user_id=i.get("id"), name=name)
+                for i in items if i.get("u") or i.get("id")]
 
     async def _remember(self, name: str, owner: FoundOwner) -> None:
         if self.db is None:
@@ -437,7 +472,7 @@ class OwnerLookup:
             return None
         # сначала кандидаты с @username (их бот показывает как «01. Имя (@username)»), потом голые ID
         cands = sorted(cands, key=lambda c: c.username is None)
-        found = await self._verify(session, cands[:max(1, settings.lookup_max_candidates)],
+        found = await self._verify(session, cands,
                                    seller_name, slug, unique_id)
         if found:
             self.stats["found"] += 1
@@ -573,43 +608,85 @@ class OwnerLookup:
     async def _verify(self, session: str, cands: list[Candidate], seller_name: str,
                       slug: str | None, unique_id: int | None) -> FoundOwner | None:
         """Проверка кандидатов: тот, у кого этот NFT открыт в профиле, и есть владелец.
-        Сначала проверяются кандидаты с тем же именем, что у продавца."""
-        want = _norm_name(seller_name)
-        resolved: list[tuple[bool, Any]] = []
-        for c in cands:
-            async def _resolve(client, c=c):
-                if c.username:
-                    try:
-                        return await client.get_entity(c.username)
-                    except (ValueError, TypeError):
-                        if not c.user_id:              # юз сменили — пробуем по ID, если он известен
-                            raise
-                return await client.get_entity(types.PeerUser(c.user_id))
-            try:
-                user = await self._run(session, _resolve, timeout=20)
-            except Exception as e:
-                log.debug("Lookup: кандидат %s не открылся: %s", c.key(), e)
+
+        ВАЖНО: открыть аккаунт по @username (contacts.resolveUsername) — «дорогой» запрос:
+        при частых вызовах Telegram даёт FloodWait на ~20 часов. Поэтому:
+          • проверяем только кандидатов, у которых имя в ответе бота совпало с именем продавца
+            (ни одно не совпало — не больше LOOKUP_NOMATCH_CHECK первых);
+          • не больше LOOKUP_RESOLVE_PER_HOUR новых юзов в час на аккаунт;
+          • уже открытые юзы запоминаем и повторно не открываем."""
+        matched = [c for c in cands if c.name and same_name(c.name, seller_name)]
+        todo = matched if matched else cands[:max(0, settings.lookup_nomatch_check)]
+        todo = todo[:max(1, settings.lookup_max_candidates)]
+        for c in todo:
+            peer = await self._input_user(session, c)
+            if peer is None:
                 continue
-            if not isinstance(user, types.User) or getattr(user, "bot", False):
-                continue
-            name = _norm_name(" ".join(x for x in (user.first_name, user.last_name) if x))
-            resolved.append((name == want, user))
-        resolved.sort(key=lambda t: not t[0])           # совпавшие по имени — первыми
-        for _, user in resolved:
-            async def _check(client, user=user):
-                return await profile_has_gift(client, user, slug, unique_id)
+
+            async def _check(client, peer=peer):
+                return await profile_has_gift(client, peer, slug, unique_id)
             try:
                 ok = await self._run(session, _check, timeout=30)
             except Exception as e:
-                log.debug("Lookup: подарки u%s не прочитались: %s", user.id, e)
+                log.debug("Lookup: подарки %s не прочитались: %s", c.key(), e)
                 continue
             if ok:
-                uname = getattr(user, "username", None)
+                uname, premium = c.username, None
                 if not uname:
-                    for u in getattr(user, "usernames", None) or []:
-                        if getattr(u, "active", False):
-                            uname = u.username
-                            break
-                full = " ".join(x for x in (user.first_name, user.last_name) if x) or None
-                return FoundOwner(user.id, uname, full, getattr(user, "premium", None), session)
+                    # юз не был в ответе бота: users.getUsers по уже известному peer — обычный дешёвый запрос
+                    async def _full(client, peer=peer):
+                        return await client.get_entity(peer)
+                    try:
+                        u = await self._run(session, _full, timeout=15)
+                        uname = getattr(u, "username", None) or next(
+                            (x.username for x in getattr(u, "usernames", None) or [] if getattr(x, "active", False)),
+                            None)
+                        premium = getattr(u, "premium", None)
+                    except Exception:
+                        pass
+                return FoundOwner(peer.user_id, uname, c.name or seller_name, premium, session)
         return None
+
+    async def _input_user(self, session: str, c: Candidate):
+        """InputPeerUser кандидата: из своего кэша, из кэша сессии Telethon (без запросов), и только
+        потом — запросом к Telegram, с лимитом в час (чтобы не словить FloodWait на сутки)."""
+        key = (session, c.key())
+        if key in self._peers:
+            return self._peers[key]
+        peer = None
+        w = self.sessions.get(session)
+        sess = getattr(getattr(w, "client", None), "session", None)
+        if sess is not None:
+            for k in ((c.username,) if c.username else ()) + ((c.user_id,) if c.user_id else ()):
+                try:
+                    peer = sess.get_input_entity(k)
+                    break
+                except Exception:
+                    continue
+        if peer is None:
+            now = time.monotonic()
+            hist = [t for t in self._resolves.get(session, []) if now - t < 3600]
+            if len(hist) >= settings.lookup_resolve_per_hour:
+                self.stats["resolve_limit"] = self.stats.get("resolve_limit", 0) + 1
+                log.info("Lookup: лимит %s новых юзов в час на %s — %s пропущен",
+                         settings.lookup_resolve_per_hour, session, c.key())
+                self._resolves[session] = hist
+                return None
+            hist.append(now)
+            self._resolves[session] = hist
+
+            async def _resolve(client):
+                if c.username:
+                    return await client.get_input_entity(c.username)
+                return await client.get_input_entity(types.PeerUser(c.user_id))
+            try:
+                peer = await self._run(session, _resolve, timeout=20)
+            except Exception as e:
+                log.info("Lookup: %s не открылся на %s: %s", c.key(), session, e)
+                return None
+        if not isinstance(peer, types.InputPeerUser):
+            return None
+        self._peers[key] = peer
+        if len(self._peers) > 20000:
+            self._peers.clear()
+        return peer

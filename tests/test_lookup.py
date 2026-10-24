@@ -54,8 +54,20 @@ class FakeClient:
         self.gifts = gifts or {}
         self.users = users or {}
 
+    resolves = 0
+
     async def get_input_entity(self, x):
-        return x
+        if isinstance(x, types.InputPeerUser):
+            return x
+        key = x.user_id if isinstance(x, types.PeerUser) else str(x).lower()
+        u = self.users.get(key) or next((v for v in self.users.values()
+                                         if (v.username or "").lower() == key), None)
+        if u is not None:
+            FakeClient.resolves += 1
+            return types.InputPeerUser(user_id=u.id, access_hash=1)
+        if isinstance(x, types.PeerUser):
+            raise ValueError("no user")
+        return x                                         # сам бот поиска
 
     async def get_messages(self, ent, limit=10, min_id=0):
         if min_id == 0:
@@ -75,6 +87,8 @@ class FakeClient:
         return bot_msg(100 + len(self.sent), text, out=True)
 
     async def get_entity(self, x):
+        if isinstance(x, types.InputPeerUser):
+            return next(u for u in self.users.values() if u.id == x.user_id)
         key = x.user_id if isinstance(x, types.PeerUser) else str(x).lower()
         if key not in self.users:
             raise ValueError("no user")
@@ -82,8 +96,9 @@ class FakeClient:
 
     async def __call__(self, req):
         assert isinstance(req, GetSavedStarGiftsRequest)
-        return types.payments.SavedStarGifts(count=len(self.gifts.get(req.peer.id, [])),
-                                             gifts=self.gifts.get(req.peer.id, []), chats=[], users=[])
+        uid = getattr(req.peer, "user_id", None) or getattr(req.peer, "id", None)
+        return types.payments.SavedStarGifts(count=len(self.gifts.get(uid, [])),
+                                             gifts=self.gifts.get(uid, []), chats=[], users=[])
 
 
 class FakeWorker:
@@ -109,7 +124,8 @@ class FakeSessions:
         return await fn(self.client), only
 
 
-REPLY = "Найдено 3:\n1. @ivan_real — Иван\n2. Иван Иванов ID: 222\n3. ещё один\nКанал: t.me/funstat_news"
+REPLY = ("Пользователи с указанным именем\n💬 - в базе есть сообщения\n\n"
+         "01. 💬 Иван (@ivan_real)\n02. 💬 Иван Иванов (id222)\n03. ещё один\nКанал: t.me/funstat_news")
 
 
 async def main():
@@ -224,9 +240,10 @@ async def main():
             if not min_id:
                 return []
             return [bot_msg(min_id + 1, many)]
-        async def get_entity(self, x):
-            ManyClient.resolved += 1
-            return await super().get_entity(x)
+        async def get_input_entity(self, x):
+            if not isinstance(x, str) or x != "funstat":
+                ManyClient.resolved += 1
+            return await super().get_input_entity(x)
     settings.lookup_skip_over = 20
     mc = ManyClient(many, gifts, users)
     check(await L.OwnerLookup(FakeSessions(mc)).find_owner("Иван", "PlushPepe-77", 5555) is None
@@ -267,6 +284,48 @@ async def main():
     # /lookup: разбор ответа без проверки профилей
     sess, cands, err = await L.OwnerLookup(FakeSessions(FakeClient(REPLY, gifts, users))).debug("Иван Иванов")
     check(not err and any(c.key() == "@ivan_real" for c in cands), "/lookup показывает юзы из ответа")
+
+    # имя в ответе бота сравнивается без «подменённых» букв
+    check(L.same_name("całlmełuv", "callmeluv") and L.same_name("︵‿୨ callmeluv ୧‿︵", "całlmełuv"),
+          "имя из ответа бота совпадает несмотря на ł и украшения")
+    msg = bot_msg(9, "01. 💬 ︵ całlmełuv ︵ (@callmeluv69)\n02. 💬 Петя (@petya_x)")
+    cs = {c.key(): c.name for c in L.parse_candidates([msg], "infostat")}
+    check(L.same_name(cs.get("@callmeluv69"), "callmeluv") and not L.same_name(cs.get("@petya_x"), "callmeluv"),
+          "имя рядом с юзом достаётся из строки ответа")
+
+    # открываем только совпавших по имени, остальные юзы не трогаем (защита от FloodWait на сутки)
+    FakeClient.resolves = 0
+    big = ("01. 💬 Иван Иванов (@ivan_real)\n" + "".join(f"{i:02d}. 💬 Другой{i} (@other_{i}x)\n"
+                                                        for i in range(2, 12)))
+    cb = FakeClient(big, {111: [unique("PlushPepe-77", 5555)]},
+                    {"ivan_real": user(111, "Иван", "ivan_real", "Иванов")})
+    f = await L.OwnerLookup(FakeSessions(cb)).find_owner("Иван Иванов", "PlushPepe-77", 5555)
+    check(f is not None and f.username == "ivan_real" and FakeClient.resolves == 1,
+          "из 11 человек открыт только 1 (совпал по имени)")
+
+    # лимит новых юзов в час на аккаунт
+    settings.lookup_resolve_per_hour = 1
+    lk = L.OwnerLookup(FakeSessions(FakeClient(REPLY, gifts, users)))
+    lk._resolves["session_001"] = [__import__("time").monotonic()]
+    check(await lk.find_owner("Иван Иванов", "PlushPepe-77", 5555) is None and lk.stats.get("resolve_limit"),
+          "лимит юзов в час исчерпан → не открываем, а пропускаем")
+    settings.lookup_resolve_per_hour = 6
+
+    # нет выделенных аккаунтов: аккаунт поиска во FloodWait → НЕ перескакиваем на другие
+    class FW:
+        def __init__(self, name, flood=False):
+            self.name = name
+            self.flood = flood
+            self.status = type("S", (), {"value": "FLOOD_WAIT" if flood else "ACTIVE"})()
+        def is_usable(self):
+            return not self.flood
+    fs = FakeSessions(FakeClient(REPLY, gifts, users))
+    fs.workers = {"session_001": FW("session_001"), "session_002": FW("session_002")}
+    fs.usable = lambda include_reserved=False: [w for w in fs.workers.values() if w.is_usable()]
+    lk = L.OwnerLookup(fs)
+    check(lk._pick_sessions() == ["session_001"], "без выделенных — один аккаунт")
+    fs.workers["session_001"] = FW("session_001", flood=True)
+    check(lk._pick_sessions() == [], "он во FloodWait → поиск ждёт, а не берёт session_002")
 
     # несколько выделенных аккаунтов: первый не смог написать боту → пишет второй
     class TwoSessions(FakeSessions):
