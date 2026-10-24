@@ -585,6 +585,14 @@ class MarketplaceCoordinator:
         if count is not None:
             st.last_count = count
 
+        # START_FRESH: лоты, выставленные пока трекер был выключен, НЕ отправляем — только запоминаем.
+        # После запуска в канал идут только лоты, появившиеся уже при работающем трекере.
+        if cls.new and mode == "recover" and settings.start_fresh:
+            for it in cls.new:
+                self.stats["silent"] += 1
+                llog("SILENT_OLD", f'listing={it.listing_id} reason="listed_while_offline" (START_FRESH)')
+            cls.silent += [(it, "listed_while_offline") for it in cls.new]
+            cls.new = []
         # 3) NEW — глобальная дедупликация (INSERT в listings) ДО записи в market_items:
         #    при падении процесса листинг останется в listings со статусом NEW и будет дообработан.
         admitted = 0

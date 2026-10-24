@@ -242,9 +242,22 @@ async def fetch_gift_owner(client: TelegramClient, slug: str) -> Any:
         if isinstance(peer, types.PeerUser):
             exclude.add(peer.user_id)
     candidates = [u for u in users if getattr(u, "id", None) and u.id not in exclude]
-    if len(candidates) == 1:
-        log.info("Owner of %s resolved from users[] fallback (no peer-field pointed to them)", slug)
-        return candidates[0]
+    # users[] может содержать НЕ владельца (прошлый владелец, даривший и т.п.) — без проверки имени
+    # это давало чужой @юз в посте. Берём юзера только если его имя совпадает с owner_name подарка.
+    from tracker.lookup import same_name
+    owner_name = getattr(g, "owner_name", None)
+    if owner_name:
+        named = [u for u in candidates
+                 if same_name(" ".join(x for x in (getattr(u, "first_name", None),
+                                                   getattr(u, "last_name", None)) if x), owner_name)
+                 or same_name(getattr(u, "username", None), owner_name)]
+        if len(named) == 1:
+            log.info("Owner of %s resolved from users[] by name %r", slug, owner_name)
+            return named[0]
+        if candidates:
+            log.info("Owner of %s: users[]=%s, none matches owner_name %r — not guessing",
+                     slug, [getattr(u, "id", None) for u in candidates], owner_name)
+        return None
     if candidates:
         log.info("Owner of %s ambiguous: users[]=%s — not guessing",
                  slug, [getattr(u, "id", None) for u in candidates])

@@ -244,6 +244,14 @@ class ListingPipeline:
         if last:
             self._last_sent_gift_id, self._streak = last["gift_id"], 1
         rows = await self.db.unfinished_listings()
+        if settings.start_fresh and rows:
+            # START_FRESH: недообработанные лоты прошлого запуска не дообрабатываем — они уже старые
+            for r in rows:
+                lr = listing_from_row(r)
+                lr.status, lr.reason = ListingStatus.ERROR, "пропущен при перезапуске (START_FRESH)"
+                await self.db.update_listing(lr)
+            log.info("START_FRESH: %s unfinished listing(s) from previous run skipped", len(rows))
+            return 0
         for r in rows:
             lr = listing_from_row(r)
             if self.floor_getter and lr.floor_stars is None:
@@ -734,6 +742,18 @@ class ListingPipeline:
             log.exception("Owner lookup for %s failed", l.listing_id)
             found = False
         l.lookup_done = True
+        # пока ждали бота поиска (очередь, капча), лот мог сильно устареть — такой не шлём
+        if settings.lookup_max_age > 0:
+            try:
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(l.first_seen)).total_seconds()
+            except (TypeError, ValueError):
+                age = 0.0
+            if age > settings.lookup_max_age:
+                l.status, l.reason = ListingStatus.ERROR, f"stale: owner lookup took {age:.0f}s"
+                self.stats["stale"] = self.stats.get("stale", 0) + 1
+                llog("FILTER", f"#{l.listing_id} skipped: lookup finished {age:.0f}s after detection")
+                await self.db.update_listing(l)
+                return
         if not found:
             if settings.lookup_required:
                 l.status, l.reason = ListingStatus.FILTERED_SELLER, "владелец не найден ботом поиска"

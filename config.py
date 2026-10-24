@@ -177,6 +177,7 @@ class Settings:
                                               # найденного владельца в пост
     lookup_sessions: list[str] = field(default_factory=list)  # аккаунты, которые пишут боту поиска
                                               # (пусто = первый рабочий аккаунт трекера)
+    lookup_max_age: int = 300                 # лот найден больше N сек назад, пока искали владельца — не слать
     lookup_check_onsale: bool = True          # после поиска проверить, что лот ещё продаётся
     lookup_lang_filter: bool = False          # найденного ботом поиска владельца проверять и по языку профиля
     lookup_required: bool = True              # скрытый владелец не найден ботом поиска → лот не слать
@@ -186,6 +187,7 @@ class Settings:
     lookup_timeout: float = 25.0              # сколько секунд ждать ответа бота поиска
     lookup_skip_over: int = 20                # в ответе бота поиска N+ человек — лот сразу пропустить (0 = выкл)
     lookup_resolve_per_hour: int = 6          # не больше N новых @юзов в час на аккаунт (иначе FloodWait ~20 ч)
+    lookup_name_check: bool = True            # найденный аккаунт должен называться так же, как владелец NFT
     lookup_nomatch_check: int = 1             # имя в ответе бота не совпало ни у кого — проверить первых N
     lookup_max_candidates: int = 3            # сколько кандидатов из ответа проверять
     trade_bot_username: str = ""              # @username торгового бота (напр. "iostherobot") —
@@ -201,6 +203,7 @@ class Settings:
     seller_phone_prefixes: list[str] = field(default_factory=lambda: ["7", "380"])
 
     # --- трекер ---
+    start_fresh: bool = True                 # после запуска/деплоя слать только НОВЫЕ лоты (без лотов «пока был выключен»)
     initial_sync: bool = True
     initial_sync_pages: int = 0              # 0 = все страницы (полная синхронизация, рекомендуется)
     sync_mode: str = "fast"                  # fast: база = верхняя страница (FAST_SYNC_PAGES), коллекция сразу LIVE | full: читать всё
@@ -334,6 +337,8 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOOKUP_SESSIONS": ("lookup_sessions", lambda v: [] if v.strip() in ("", "-") else _str_list(v)),
     "LOOKUP_DEDICATED": ("lookup_dedicated", _bool_strict),
     "LOOKUP_REQUIRED": ("lookup_required", _bool_strict),
+    "LOOKUP_MAX_AGE": ("lookup_max_age", lambda v: max(0, min(86400, int(v)))),
+    "START_FRESH": ("start_fresh", _bool_strict),
     "LOOKUP_CHECK_ONSALE": ("lookup_check_onsale", _bool_strict),
     "LOOKUP_LANG_FILTER": ("lookup_lang_filter", _bool_strict),
     "LOOKUP_TIMEOUT": ("lookup_timeout", _rng(5, 180)),
@@ -341,6 +346,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOOKUP_CAPTCHA_WAIT": ("lookup_captcha_wait", _rng(30, 7200)),
     "LOOKUP_SKIP_OVER": ("lookup_skip_over", lambda v: max(0, min(1000, int(v)))),
     "LOOKUP_RESOLVE_PER_HOUR": ("lookup_resolve_per_hour", lambda v: max(1, min(200, int(v)))),
+    "LOOKUP_NAME_CHECK": ("lookup_name_check", _bool_strict),
     "LOOKUP_NOMATCH_CHECK": ("lookup_nomatch_check", lambda v: max(0, min(10, int(v)))),
     "LOOKUP_MAX_CANDIDATES": ("lookup_max_candidates", lambda v: max(1, min(30, int(v)))),
     "TRADE_BOT_USERNAME": ("trade_bot_username", lambda v: v.strip().lstrip("@")),
@@ -411,6 +417,8 @@ def _from_env() -> Settings:
         lookup_sessions=_str_list(e("LOOKUP_SESSIONS") or e("LOOKUP_SESSION") or ""),
         lookup_dedicated=_bool(e("LOOKUP_DEDICATED"), True),
         lookup_required=_bool(e("LOOKUP_REQUIRED"), True),
+        lookup_max_age=max(0, min(86400, _int(e("LOOKUP_MAX_AGE"), 300))),
+        start_fresh=_bool(e("START_FRESH"), True),
         lookup_check_onsale=_bool(e("LOOKUP_CHECK_ONSALE"), True),
         lookup_lang_filter=_bool(e("LOOKUP_LANG_FILTER"), False),
         lookup_timeout=min(180.0, max(5.0, _float(e("LOOKUP_TIMEOUT"), 25.0))),
@@ -418,6 +426,7 @@ def _from_env() -> Settings:
         lookup_captcha_wait=min(7200.0, max(30.0, _float(e("LOOKUP_CAPTCHA_WAIT"), 600.0))),
         lookup_skip_over=max(0, min(1000, _int(e("LOOKUP_SKIP_OVER"), 20))),
         lookup_resolve_per_hour=max(1, min(200, _int(e("LOOKUP_RESOLVE_PER_HOUR"), 6))),
+        lookup_name_check=_bool(e("LOOKUP_NAME_CHECK"), True),
         lookup_nomatch_check=max(0, min(10, _int(e("LOOKUP_NOMATCH_CHECK"), 1))),
         lookup_max_candidates=max(1, min(30, _int(e("LOOKUP_MAX_CANDIDATES"), 3))),
         trade_bot_username=(e("TRADE_BOT_USERNAME") or "").strip().lstrip("@"),

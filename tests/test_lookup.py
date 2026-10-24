@@ -327,6 +327,32 @@ async def main():
     fs.workers["session_001"] = FW("session_001", flood=True)
     check(lk._pick_sessions() == [], "он во FloodWait → поиск ждёт, а не берёт session_002")
 
+    # NFT в профиле есть, но аккаунт называется иначе (юз из старой базы бота перешёл к другому) → не он
+    wrong = {"ivan_real": user(111, "Иван", "ivan_real", "Иванов")}
+    wr = FakeClient("01. 💬 Иван Иванов (@ivan_real)", {111: [unique("PlushPepe-77", 5555)]},
+                    {"ivan_real": user(111, "Pavel", "ivan_real")})
+    check(await L.OwnerLookup(FakeSessions(wr)).find_owner("Иван Иванов", "PlushPepe-77", 5555) is None,
+          "чужое имя у аккаунта → владелец не засчитан")
+    ok_c = FakeClient("01. 💬 Иван Иванов (@old_nick)", {111: [unique("PlushPepe-77", 5555)]},
+                      {"old_nick": user(111, "Иван", "new_nick", "Иванов")})
+    f = await L.OwnerLookup(FakeSessions(ok_c)).find_owner("Иван Иванов", "PlushPepe-77", 5555)
+    check(f is not None and f.username == "new_nick", "в пост идёт ТЕКУЩИЙ юз владельца, а не из базы бота")
+
+    # страница подарка: в users[] не владелец → не угадываем
+    from tracker.marketplace import fetch_gift_owner
+    class GiftClient:
+        def __init__(self, users_, owner_name):
+            self.users_, self.owner_name = users_, owner_name
+        async def __call__(self, req):
+            g = types.StarGiftUnique(id=1, gift_id=1, title="x", slug="X-1", num=1, attributes=[],
+                                     availability_issued=1, availability_total=1, owner_name=self.owner_name)
+            return types.payments.UniqueStarGift(gift=g, chats=[], users=self.users_)
+    check(await fetch_gift_owner(GiftClient([user(5, "Pavel", "pavel")], "Иван Иванов"), "X-1") is None,
+          "страница подарка: чужой юзер в users[] не считается владельцем")
+    got = await fetch_gift_owner(GiftClient([user(5, "Pavel", "pavel"), user(6, "Иван", "iv", "Иванов")],
+                                            "Иван Иванов"), "X-1")
+    check(got is not None and got.id == 6, "страница подарка: владелец по совпадению имени")
+
     # несколько выделенных аккаунтов: первый не смог написать боту → пишет второй
     class TwoSessions(FakeSessions):
         def __init__(self, client):

@@ -630,21 +630,25 @@ class OwnerLookup:
             except Exception as e:
                 log.debug("Lookup: подарки %s не прочитались: %s", c.key(), e)
                 continue
-            if ok:
-                uname, premium = c.username, None
-                if not uname:
-                    # юз не был в ответе бота: users.getUsers по уже известному peer — обычный дешёвый запрос
-                    async def _full(client, peer=peer):
-                        return await client.get_entity(peer)
-                    try:
-                        u = await self._run(session, _full, timeout=15)
-                        uname = getattr(u, "username", None) or next(
-                            (x.username for x in getattr(u, "usernames", None) or [] if getattr(x, "active", False)),
-                            None)
-                        premium = getattr(u, "premium", None)
-                    except Exception:
-                        pass
-                return FoundOwner(peer.user_id, uname, c.name or seller_name, premium, session)
+            if not ok:
+                continue
+            # NFT у него в профиле — дополнительно сверяем НАСТОЯЩЕЕ имя аккаунта с именем владельца
+            # и берём его ТЕКУЩИЙ @юз (база бота поиска бывает старой: юз мог перейти к другому человеку)
+            async def _full(client, peer=peer):
+                return await client.get_entity(peer)
+            try:
+                u = await self._run(session, _full, timeout=15)
+            except Exception as e:
+                log.info("Lookup: профиль %s не прочитался: %s", c.key(), e)
+                continue
+            real = " ".join(x for x in (getattr(u, "first_name", None), getattr(u, "last_name", None)) if x)
+            if settings.lookup_name_check and not same_name(real, seller_name):
+                self.stats["name_mismatch"] = self.stats.get("name_mismatch", 0) + 1
+                llog("LOOKUP", f"{c.key()}: NFT есть, но имя {real!r} ≠ {seller_name!r} — не он")
+                continue
+            uname = getattr(u, "username", None) or next(
+                (x.username for x in getattr(u, "usernames", None) or [] if getattr(x, "active", False)), None)
+            return FoundOwner(peer.user_id, uname, real or seller_name, getattr(u, "premium", None), session)
         return None
 
     async def _input_user(self, session: str, c: Candidate):

@@ -258,11 +258,25 @@ async def test_6_recovery():
     for it in (x, y, z):
         e.market.list_new(it)                         # Z Y X A B C
     e.market.change_price(e.market.lots[GID][4].unique_id, 7777)   # и старый поменял цену
+    settings.start_fresh = False                      # режим «догнать пропущенное»
     e2 = await Env(tmp, e.market).boot()
+    settings.start_fresh = True
     assert e2.pipe.stats["new"] == 3 and len(e2.sender.sent) == 3, e2.pipe.stats
     assert all(f"{it.num}" in "".join(e2.sender.sent) for it in (x, y, z))
     await e2.shutdown(); shutil.rmtree(tmp)
     print("✔ TEST 6  recovery: A B C → выкл → X Y Z → только X Y Z (смена цены старого не отправлена)")
+    # START_FRESH (по умолчанию): выставленное, пока трекер был выключен, НЕ шлём; новое после запуска — шлём
+    e, tmp = await fresh(3)
+    await e.shutdown()
+    for it in (e.market.item(8000), e.market.item(9000)):
+        e.market.list_new(it)
+    e2 = await Env(tmp, e.market).boot()
+    assert e2.pipe.stats["new"] == 0 and len(e2.sender.sent) == 0, e2.pipe.stats
+    e2.market.list_new(e2.market.item(11000))
+    await e2.poll()
+    assert e2.pipe.stats["new"] == 1, e2.pipe.stats
+    await e2.shutdown(); shutil.rmtree(tmp)
+    print("✔ TEST 6b START_FRESH: лоты «пока был выключен» не шлются, новые после запуска — шлются")
 
 
 async def test_7_two_sessions_same_listing():
@@ -547,7 +561,9 @@ async def test_16_market_snapshot_redeploy():
                               SellerFilter(tmp2))
     e2.coord = MarketplaceCoordinator(e2.db, FakeSessions(), e2.pipe)
     e2.pipe.start()
+    settings.start_fresh = False                      # проверяем режим «догнать пропущенное»
     await e2.coord.start()
+    settings.start_fresh = True
     for t in e2.coord._tasks:
         t.cancel()
     await e2.pipe.queue.join()
