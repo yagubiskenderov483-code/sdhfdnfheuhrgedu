@@ -41,7 +41,7 @@ _ID_NEAR_RE = re.compile(r"\b(?:id|ид)\s*[:#№]?\s*(\d{5,12})\b", re.I)
 _SERVICE_NAMES = {"joinchat", "addstickers", "addemoji", "share", "proxy", "socks", "nft", "boost",
                   "c", "s", "iv", "m", "contact", "addlist", "invoice", "giftcode"}
 _WAIT_WORDS = ("ищу", "поиск", "подожд", "загруж", "search", "wait", "loading", "⏳", "🔎")
-_MAX_PENDING = 300                # не больше N лотов в очереди на поиск (дальше — пропускаем)
+_MAX_PENDING = 2000               # не больше N лотов в очереди на поиск (дальше — пропускаем)
 _CACHE_TTL = 3600.0               # кандидаты по одному имени — час
 _LINE_RE = re.compile(r"\((?:@([A-Za-z][A-Za-z0-9_]{3,31})|id\s*(\d{3,12}))\)", re.I)
 _LINE_PREFIX_RE = re.compile(r"^[\s\d.)\-#№]*(?:[^\w\s]+\s*)*")
@@ -118,9 +118,14 @@ def parse_candidates(messages: list[Any], bot_username: str) -> list[Candidate]:
             pairs = []
         for ent, etext in pairs:
             if isinstance(ent, types.MessageEntityMentionName):
-                add(Candidate(user_id=ent.user_id))
+                # имя-ссылка на профиль: Telegram присылает этого юзера вместе с сообщением (с access_hash),
+                # поэтому его можно открыть БЕЗ resolveUsername — бесплатно и без риска FloodWait
+                add(Candidate(user_id=ent.user_id, name=etext.strip() or None))
             elif isinstance(ent, types.MessageEntityTextUrl):
-                add(_from_url(ent.url))
+                c = _from_url(ent.url)
+                if c is not None and c.user_id and not c.username:
+                    c.name = etext.strip() or None
+                add(c)
             elif isinstance(ent, types.MessageEntityUrl):
                 add(_from_url(etext))
             elif isinstance(ent, types.MessageEntityMention):
@@ -161,7 +166,7 @@ def parse_candidates(messages: list[Any], bot_username: str) -> list[Candidate]:
                 k = f"@{m.group(1).lower()}" if m.group(1) else f"id{m.group(2)}"
                 names.setdefault(k, nm)
     for c in out:
-        c.name = names.get(c.key())
+        c.name = c.name or names.get(c.key())
     return out
 
 
@@ -247,6 +252,10 @@ async def profile_has_gift(client, entity, slug: str | None, unique_id: int | No
     return False
 
 
+class _Expired(Exception):
+    """Лот устарел, пока ждал очереди к боту поиска."""
+
+
 class _PrioLock:
     """Как asyncio.Lock, но следующим получает доступ ждущий с меньшим prio (дорогие лоты — первыми)."""
 
@@ -297,6 +306,7 @@ class OwnerLookup:
         self._slocks: dict[str, _PrioLock] = {}
         self._peers: dict[tuple[str, str], Any] = {}     # (session, @юз/id) → InputPeerUser
         self._resolves: dict[str, list[float]] = {}      # session → когда открывали юзы (лимит в час)
+        self._inflight: dict[str, asyncio.Future] = {}   # имя → ответ бота, который уже ждём
         self._anchor: str | None = None                  # аккаунт поиска, когда LOOKUP_SESSIONS пуст
         self._pending = 0
         self._cache: dict[str, tuple[float, list[Candidate]]] = {}
@@ -314,7 +324,7 @@ class OwnerLookup:
         return bool(settings.auto_lookup and settings.lookup_bot_username)
 
     async def find_owner(self, seller_name: str, slug: str | None, unique_id: int | None,
-                         prio: float = 0.0) -> FoundOwner | None:
+                         prio: float = 0.0, deadline: float | None = None) -> FoundOwner | None:
         """prio — чем меньше, тем раньше в очереди к боту поиска (передаём −цена: дорогие первыми)."""
         if not self.enabled() or not seller_name or not (slug or unique_id):
             return None
@@ -324,7 +334,10 @@ class OwnerLookup:
             return None
         self._pending += 1
         try:
-            return await self._find(seller_name, slug, unique_id, prio)
+            return await self._find(seller_name, slug, unique_id, prio, deadline)
+        except _Expired:
+            self.stats["expired"] = self.stats.get("expired", 0) + 1
+            return None
         finally:
             self._pending -= 1
 
@@ -425,7 +438,7 @@ class OwnerLookup:
         return res
 
     async def _find(self, seller_name: str, slug: str | None, unique_id: int | None,
-                    prio: float = 0.0) -> FoundOwner | None:
+                    prio: float = 0.0, deadline: float | None = None) -> FoundOwner | None:
         bot = settings.lookup_bot_username.lstrip("@")
         order = self._pick_sessions()
         if not order:
@@ -447,12 +460,28 @@ class OwnerLookup:
         cached = self._cache.get(key)
         if cached and time.monotonic() - cached[0] < _CACHE_TTL:
             cands = cached[1]
+        elif key in self._inflight:
+            # то же имя уже спрашивают у бота (у продавца несколько лотов) — ждём тот ответ, а не спрашиваем снова
+            try:
+                cands = await asyncio.shield(self._inflight[key])
+            except Exception:
+                cands = None
+            if cands is None:
+                self.stats["no_answer"] += 1
+                return None
         else:
+            fut = asyncio.get_running_loop().create_future()
+            self._inflight[key] = fut
             cands = None
-            for session in order:          # аккаунт не смог (лимит бота, FloodWait) — пробуем следующий
-                cands = await self._ask_bot(session, bot, seller_name, prio=prio)
-                if cands is not None:
-                    break
+            try:
+                for session in order:      # аккаунт не смог (лимит бота, FloodWait) — пробуем следующий
+                    cands = await self._ask_bot(session, bot, seller_name, prio=prio, deadline=deadline)
+                    if cands is not None:
+                        break
+            finally:
+                self._inflight.pop(key, None)
+                if not fut.done():
+                    fut.set_result(cands)
             if cands is None:
                 self.stats["no_answer"] += 1
                 return None
@@ -485,10 +514,20 @@ class OwnerLookup:
         return found
 
     async def _ask_bot(self, session: str, bot: str, seller_name: str,
-                       prio: float = 0.0) -> list[Candidate] | None:
-        """Отправить «/human <имя>» и дождаться ответа. None — бот не ответил / ошибка."""
+                       prio: float = 0.0, deadline: float | None = None) -> list[Candidate] | None:
+        """Отправить «/human <имя>» и дождаться ответа. None — бот не ответил / ошибка.
+        deadline (time.time()) — после него лот уже не нужен: из очереди к боту уходим, не спрашивая."""
         lock = self._slock(session)
-        await lock.acquire(prio)
+        if deadline is not None:
+            left = deadline - time.time()
+            if left <= 0:
+                raise _Expired()
+            try:
+                await asyncio.wait_for(lock.acquire(prio), timeout=left)
+            except asyncio.TimeoutError:
+                raise _Expired() from None
+        else:
+            await lock.acquire(prio)
         try:
             return await self._ask_bot_locked(session, bot, seller_name)
         finally:
@@ -529,7 +568,7 @@ class OwnerLookup:
         prev_sig, stable, last_cands = None, 0, []
         got_answer = False
         while time.monotonic() < deadline:
-            await asyncio.sleep(2.0)
+            await asyncio.sleep(1.0)
             try:
                 msgs = await self._run(session, _poll, timeout=15)
             except Exception as e:
@@ -552,6 +591,8 @@ class OwnerLookup:
             sig = (text, tuple(c.key() for c in last_cands),
                    tuple(getattr(m, "edit_date", None) for m in msgs))
             waiting = not last_cands and any(w in text.lower() for w in _WAIT_WORDS)
+            if last_cands and not any(w in text.lower() for w in _WAIT_WORDS):
+                break                      # список людей уже пришёл — дальше не ждём
             if sig == prev_sig and not waiting:
                 stable += 1
                 if stable >= 1:            # ответ не менялся между двумя опросами — готов
@@ -617,6 +658,8 @@ class OwnerLookup:
           • уже открытые юзы запоминаем и повторно не открываем."""
         matched = [c for c in cands if c.name and same_name(c.name, seller_name)]
         todo = matched if matched else cands[:max(0, settings.lookup_nomatch_check)]
+        # сначала те, кого можно открыть без resolveUsername (по ID из ответа бота)
+        todo = sorted(todo, key=lambda c: c.user_id is None)
         todo = todo[:max(1, settings.lookup_max_candidates)]
         for c in todo:
             peer = await self._input_user(session, c)

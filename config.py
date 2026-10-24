@@ -182,7 +182,7 @@ class Settings:
     lookup_lang_filter: bool = False          # найденного ботом поиска владельца проверять и по языку профиля
     lookup_required: bool = True              # скрытый владелец не найден ботом поиска → лот не слать
     lookup_dedicated: bool = True             # аккаунты поиска НЕ опрашивают маркет — только пишут боту
-    lookup_interval: float = 6.0              # пауза между запросами к боту поиска с одного аккаунта, сек
+    lookup_interval: float = 3.0              # пауза между запросами к боту поиска с одного аккаунта, сек
     lookup_captcha_wait: float = 600.0        # сколько ждать, пока админ пройдёт капчу бота поиска, сек
     lookup_timeout: float = 25.0              # сколько секунд ждать ответа бота поиска
     lookup_skip_over: int = 20                # в ответе бота поиска N+ человек — лот сразу пропустить (0 = выкл)
@@ -422,7 +422,7 @@ def _from_env() -> Settings:
         lookup_check_onsale=_bool(e("LOOKUP_CHECK_ONSALE"), True),
         lookup_lang_filter=_bool(e("LOOKUP_LANG_FILTER"), False),
         lookup_timeout=min(180.0, max(5.0, _float(e("LOOKUP_TIMEOUT"), 25.0))),
-        lookup_interval=min(600.0, max(0.0, _float(e("LOOKUP_INTERVAL"), 6.0))),
+        lookup_interval=min(600.0, max(0.0, _float(e("LOOKUP_INTERVAL"), 3.0))),
         lookup_captcha_wait=min(7200.0, max(30.0, _float(e("LOOKUP_CAPTCHA_WAIT"), 600.0))),
         lookup_skip_over=max(0, min(1000, _int(e("LOOKUP_SKIP_OVER"), 20))),
         lookup_resolve_per_hour=max(1, min(200, _int(e("LOOKUP_RESOLVE_PER_HOUR"), 6))),

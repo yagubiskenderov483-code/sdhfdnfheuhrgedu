@@ -76,7 +76,7 @@ class FakeClient:
             return []
         text = self.reply_text
         # «@ivan_real» как упоминание, второй — ссылкой на профиль по ID, третий — кнопкой t.me
-        i1 = text.index("Иван Иванов")
+        i1 = len(text[:text.index("Иван Иванов")].encode("utf-16-le")) // 2   # смещения в Telegram — UTF-16
         ents = [types.MessageEntityMentionName(offset=i1, length=len("Иван Иванов"), user_id=222)]
         markup = types.ReplyInlineMarkup(rows=[types.KeyboardInlineButtonRow(buttons=[
             types.KeyboardInlineButton(text="3", type=types.InlineButtonTypeUrl(url="https://t.me/ivan_third"))])])
@@ -352,6 +352,29 @@ async def main():
     got = await fetch_gift_owner(GiftClient([user(5, "Pavel", "pavel"), user(6, "Иван", "iv", "Иванов")],
                                             "Иван Иванов"), "X-1")
     check(got is not None and got.id == 6, "страница подарка: владелец по совпадению имени")
+
+    # имя-ссылка (по ID) открывается из кэша сессии, без resolveUsername
+    class CacheSess:
+        def get_input_entity(self, k):
+            if k == 222:
+                return types.InputPeerUser(user_id=222, access_hash=7)
+            raise ValueError
+    class CW:
+        name = "session_001"
+        client = type("C", (), {"session": CacheSess()})()
+        def is_usable(self):
+            return True
+    FakeClient.resolves = 0
+    cs = FakeSessions(FakeClient(REPLY, gifts, users))
+    cs.workers = {"session_001": CW()}
+    f = await L.OwnerLookup(cs).find_owner("Иван Иванов", "PlushPepe-77", 5555)
+    check(f is not None and f.user_id == 222 and FakeClient.resolves == 0, "владелец по имени-ссылке — без resolveUsername")
+
+    # лот устарел, пока ждал очереди к боту → боту не пишем
+    c = FakeClient(REPLY, gifts, users)
+    lk = L.OwnerLookup(FakeSessions(c))
+    check(await lk.find_owner("Иван Иванов", "PlushPepe-77", 5555, deadline=__import__("time").time() - 1) is None
+          and not c.sent and lk.stats.get("expired") == 1, "устаревший лот уходит из очереди, боту не пишем")
 
     # несколько выделенных аккаунтов: первый не смог написать боту → пишет второй
     class TwoSessions(FakeSessions):

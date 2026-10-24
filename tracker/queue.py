@@ -798,8 +798,14 @@ class ListingPipeline:
         этот NFT) и подставляем найденного как обычного продавца. True — найден."""
         # дорогие лоты — первыми в очереди к боту поиска
         value = l.stars_price or l.floor_stars or int((l.ton_price or 0) * 300)
+        deadline = None
+        if settings.lookup_max_age > 0:
+            try:
+                deadline = datetime.fromisoformat(l.first_seen).timestamp() + settings.lookup_max_age
+            except (TypeError, ValueError):
+                deadline = time.time() + settings.lookup_max_age
         owner = await self.owner_lookup.find_owner(l.seller_name, l.gift_slug, l.gift_unique_id,
-                                                   prio=-float(value or 0))
+                                                   prio=-float(value or 0), deadline=deadline)
         if owner is None:
             return False
         uid = owner.user_id
