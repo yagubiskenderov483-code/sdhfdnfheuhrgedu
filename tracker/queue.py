@@ -633,6 +633,14 @@ class ListingPipeline:
                 return pre
             return SellerResult(True, "OWNER_TRUSTED", "owner trusted via lookup bot (name match)")
         sr = await self._check_seller_found(l)
+        # Владелец найден через funstat: максимально мягкая фильтрация.
+        # Профиль мы прочитали, но funstat уже подтвердил что это нужный человек.
+        # Пропускаем всё кроме blacklist. Это требование юзера:
+        # 'чтоб ебаные лоты шли а не скипало фильтры эти все'.
+        if not sr.passed and l.owner_found_via and sr.code != "BLACKLIST":
+            llog("FILTER", f"#{l.listing_id} seller rejected by {sr.code} but owner found via lookup bot — overriding")
+            return SellerResult(True, "OWNER_FOUND_OVERRIDE",
+                                f"owner found via lookup bot (ignored {sr.code})")
         if (not sr.passed and l.owner_found_via and not settings.lookup_lang_filter
                 and sr.code in _LANG_CODES):
             # владельца нашёл бот поиска, имя уже прошло проверку — язык профиля не решает.
