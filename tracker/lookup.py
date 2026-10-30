@@ -311,7 +311,9 @@ class OwnerLookup:
         self._pending = 0
         self._cache: dict[str, tuple[float, list[Candidate]]] = {}
         self._started: set[tuple[str, str]] = set()      # (session, bot) — /start уже отправляли
-        self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0, "captcha": 0, "captcha_auto": 0, "too_many": 0, "from_memory": 0}
+        self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0,
+                      "captcha": 0, "captcha_auto": 0, "too_many": 0, "from_memory": 0,
+                      "no_candidates": 0, "nft_hidden": 0, "name_mismatch": 0, "trusted_match": 0}
         # капча: сначала пробуем решить сами (vision-API), если не вышло — отдаём админу.
         # on_captcha(token, session, photo_bytes, button_texts) — задаёт App
         # (шлёт админам картинку и кнопки); нажатие админа → solve_captcha(token, index).
@@ -498,6 +500,7 @@ class OwnerLookup:
                 self._cache.clear()
         if not cands:
             self.stats["not_found"] += 1
+            self.stats["no_candidates"] += 1
             llog("LOOKUP", f"@{bot} /human {seller_name!r}: кандидатов нет")
             return None
         if settings.lookup_skip_over and len(cands) >= settings.lookup_skip_over:
@@ -517,7 +520,9 @@ class OwnerLookup:
                            + (f" @{found.username}" if found.username else "") + " (NFT в профиле)")
         else:
             self.stats["not_found"] += 1
-            llog("LOOKUP", f"/human {seller_name!r}: {len(cands)} кандидат(ов), NFT ни у кого не виден")
+            self.stats["nft_hidden"] += 1
+            llog("LOOKUP", f"/human {seller_name!r}: {len(cands)} кандидат(ов), NFT ни у кого не виден "
+                           f"(возможно, скрыты в профиле)")
         return found
 
     async def _ask_bot(self, session: str, bot: str, seller_name: str,
@@ -692,20 +697,29 @@ class OwnerLookup:
         # сначала те, кого можно открыть без resolveUsername (по ID из ответа бота)
         todo = sorted(todo, key=lambda c: c.user_id is None)
         todo = todo[:max(1, settings.lookup_max_candidates)]
+        # «один кандидат с совпавшим именем» — доверяем funstat без проверки видимости NFT
+        # (многие прячут подарки → profile_has_gift даёт false даже у настоящего владельца)
+        trust_without_nft = (settings.lookup_trust_name_match
+                             and len(matched) == 1 and todo and todo[0] is matched[0])
         for c in todo:
             peer = await self._input_user(session, c)
             if peer is None:
                 continue
 
-            async def _check(client, peer=peer):
-                return await profile_has_gift(client, peer, slug, unique_id)
-            try:
-                ok = await self._run(session, _check, timeout=30)
-            except Exception as e:
-                log.debug("Lookup: подарки %s не прочитались: %s", c.key(), e)
-                continue
-            if not ok:
-                continue
+            if not trust_without_nft:
+                async def _check(client, peer=peer):
+                    return await profile_has_gift(client, peer, slug, unique_id)
+                try:
+                    ok = await self._run(session, _check, timeout=30)
+                except Exception as e:
+                    log.debug("Lookup: подарки %s не прочитались: %s", c.key(), e)
+                    continue
+                if not ok:
+                    continue
+            else:
+                self.stats["trusted_match"] += 1
+                llog("LOOKUP", f"{c.key()}: funstat вернул одного с совпадающим именем — "
+                               f"верим без проверки NFT (LOOKUP_TRUST_NAME_MATCH)")
             # NFT у него в профиле — дополнительно сверяем НАСТОЯЩЕЕ имя аккаунта с именем владельца
             # и берём его ТЕКУЩИЙ @юз (база бота поиска бывает старой: юз мог перейти к другому человеку)
             async def _full(client, peer=peer):

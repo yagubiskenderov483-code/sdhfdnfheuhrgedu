@@ -1282,7 +1282,8 @@ def build_routers(app: "App") -> list[Router]:
                 ("AUTO_LOOKUP", "auto_lookup", "Автопоиск владельца (бот поиска)"),
                 ("LOOKUP_REQUIRED", "lookup_required", "Скрытый владелец — только с найденным юзом"),
                 ("LOOKUP_CHECK_ONSALE", "lookup_check_onsale", "После поиска проверить, что лот ещё продаётся"),
-                ("LOOKUP_LANG_FILTER", "lookup_lang_filter", "Найденного владельца проверять по языку"))
+                ("LOOKUP_LANG_FILTER", "lookup_lang_filter", "Найденного владельца проверять по языку"),
+                ("LOOKUP_TRUST_NAME_MATCH", "lookup_trust_name_match", "Верить funstat по имени (без проверки NFT)"))
     _REPEAT_STEPS = (0, 6, 24, 72)
 
     def _panel() -> tuple[str, InlineKeyboardMarkup]:
@@ -1376,11 +1377,19 @@ def build_routers(app: "App") -> list[Router]:
                 "<b>Капча:</b> если включён OCR (по умолчанию) — трекер сам распознаёт слово "
                 "на картинке и жмёт нужную кнопку (⭐/🦊/🐶). Если не распознал — капча "
                 "придёт сюда с кнопками.\n\n"
-                f"Поисков: {lk.get('lookups', 0)} · найдено: {lk.get('found', 0)} · "
-                f"не найдено: {lk.get('not_found', 0)} · без ответа: {lk.get('no_answer', 0)} · "
-                f"из памяти: {lk.get('from_memory', 0)} · "
-                f"капч: {lk.get('captcha', 0)} (авто: {lk.get('captcha_auto', 0)}) · "
-                f"скип (много людей): {lk.get('too_many', 0)} · в очереди: {len(app.pipeline._lookup_tasks)}")
+                f"<b>Статистика поиска:</b>\n"
+                f"Поисков: {lk.get('lookups', 0)} · найдено: <b>{lk.get('found', 0)}</b> "
+                f"(из них на доверии имени: {lk.get('trusted_match', 0)}) · "
+                f"из памяти: {lk.get('from_memory', 0)}\n"
+                f"Не найдено: {lk.get('not_found', 0)} — из них:\n"
+                f"  • funstat не вернул кандидатов: <b>{lk.get('no_candidates', 0)}</b>\n"
+                f"  • funstat вернул, но NFT не виден в профиле: <b>{lk.get('nft_hidden', 0)}</b> "
+                f"← включи <code>LOOKUP_TRUST_NAME_MATCH=true</code> если это проблема\n"
+                f"  • имя не совпало: {lk.get('name_mismatch', 0)}\n"
+                f"Без ответа: {lk.get('no_answer', 0)} · "
+                f"скип (много людей): {lk.get('too_many', 0)} · "
+                f"в очереди: {len(app.pipeline._lookup_tasks)}\n"
+                f"Капч: {lk.get('captcha', 0)} (авто-решено: <b>{lk.get('captcha_auto', 0)}</b>)")
         return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
     @public.callback_query(F.data.startswith("cap:"))
