@@ -649,11 +649,9 @@ class OwnerLookup:
         return last_cands
 
     async def _wait_captcha(self, session: str, bot: str, msg: Any) -> bool:
-        """Бот поиска показал капчу: пробуем решить сами (vision), иначе — админам."""
+        """Бот поиска показал капчу: ВСЕГДА пробуем решить сами, админу — только
+        если OCR вернул None (мусор, не читается)."""
         self.stats["captcha"] += 1
-        # счётчик капч подряд на этой сессии — если >=2, значит мы ошиблись и зацикливаемся
-        streak = self._captcha_streak.get(session, 0) + 1
-        self._captcha_streak[session] = streak
         token = f"{session}-{msg.id}"[-40:]
         if token not in self._captcha:
             buttons = _buttons(msg)
@@ -672,12 +670,8 @@ class OwnerLookup:
             except Exception:
                 photo = None
 
-            # 1) пробуем решить сами — только если ещё не ошибались в этой сессии
-            if streak >= 2:
-                llog("LOOKUP", f"@{bot} на {session}: {streak}-я капча подряд — "
-                               f"авто-солвер промахнулся, передаю админам")
-                self.stats["captcha_auto_fail"] = self.stats.get("captcha_auto_fail", 0) + 1
-            elif self._auto is not None and getattr(self._auto, "enabled", False) and photo and buttons:
+            # ВСЕГДА пробуем сами. User явно просил не напрягать его капчами.
+            if self._auto is not None and getattr(self._auto, "enabled", False) and photo and buttons:
                 try:
                     idx = await self._auto.solve(photo, [t for t, _ in buttons])
                 except Exception as e:                               # noqa: BLE001

@@ -553,42 +553,104 @@ def ocr_word(photo: bytes) -> Optional[tuple[str, float]]:
 
 def _best_button_from_hypotheses(hyps: list[tuple[str, float]],
                                  buttons: list[str]) -> Optional[int]:
-    """Выбираем кнопку по ВСЕМ гипотезам OCR: та, к которой есть лучший
-    (= минимальное расстояние Левенштейна) матч от какой-либо из гипотез.
-    Это надёжнее чем брать одну «лучшую» гипотезу и матчить её — если
-    tesseract в 20 попыток хоть один раз угадает слово близкое к кнопке,
-    мы это заметим."""
+    """Многослойный матчер по 20 гипотезам OCR → индекс кнопки.
+
+    Пробуем по убыванию строгости:
+      1. Levenshtein: нашлась гипотеза с распределением ≤ порога к слову кнопки.
+      2. Первые 2 буквы: гипотеза и слово кнопки совпадают по 2-символьному префиксу.
+      3. Первая буква + голосование: кнопка побеждает, если больше всех гипотез
+         начинается с её первой буквы (только когда её первая буква уникальна).
+      4. Хоть одна гипотеза дословно содержится в слове кнопки или наоборот.
+
+    Так ловим даже сильно размытые капчи: 'sf','she','sta' среди 7 кнопок
+    [star,fox,dog,robot,bear,rabbit,ghost] голосуют за 'star' (единственное на 's')."""
     if not hyps or not buttons:
         return None
     vocab = _button_vocabulary(buttons)
-    # для каждой кнопки — минимальное расстояние от любой гипотезы до её слов
+    hyp_words = [w for w, _ in hyps]
+    # отдельно для первых букв работаем только с латиницей
+    hyp_words_ascii = [w for w in hyp_words if w and w[0].isascii() and w[0].isalpha()]
+
+    # ── 1) Полный fuzzy Levenshtein ──
     best_i, best_dist, best_pair = None, 999, ("", "")
     for i, words in enumerate(vocab):
-        for word, _ in hyps:
+        for word in hyp_words:
             for w in words:
                 d = _lev(word, w)
                 if d < best_dist:
                     best_dist, best_i, best_pair = d, i, (word, w)
-    if best_i is None:
-        return None
-    # допуск: до 1 ошибки на 3 буквы (чуть мягче чем в match_word_to_button,
-    # т.к. это пассивный ищущий «любой из 20» режим)
-    allowed = max(1, len(best_pair[1]) // 3)
-    # неоднозначность: разница со вторым лучшим ≥1
-    second = 999
+    if best_i is not None:
+        allowed = max(1, len(best_pair[1]) // 3)
+        second = 999
+        for i, words in enumerate(vocab):
+            if i == best_i:
+                continue
+            for word in hyp_words:
+                for w in words:
+                    second = min(second, _lev(word, w))
+        if best_dist <= allowed and (second - best_dist) >= 1:
+            log.info("Captcha vote[lev]: → кнопка %d (OCR %r → %r, dist %d/%d, second=%d)",
+                     best_i, best_pair[0], best_pair[1], best_dist, allowed, second)
+            return best_i
+
+    # ── 2) Префикс в 2 символа ──
+    prefix_votes: dict[int, int] = {}
     for i, words in enumerate(vocab):
-        if i == best_i:
-            continue
-        for word, _ in hyps:
+        prefixes = {w[:2] for w in words if len(w) >= 2}
+        for word in hyp_words_ascii:
+            if len(word) >= 2 and word[:2] in prefixes:
+                prefix_votes[i] = prefix_votes.get(i, 0) + 1
+    if prefix_votes:
+        best_i = max(prefix_votes, key=lambda k: prefix_votes[k])
+        best_votes = prefix_votes[best_i]
+        second_votes = max((v for k, v in prefix_votes.items() if k != best_i), default=0)
+        if best_votes >= 2 and best_votes > second_votes:
+            log.info("Captcha vote[prefix2]: → кнопка %d (голосов %d/%d)",
+                     best_i, best_votes, second_votes)
+            return best_i
+
+    # ── 3) Первая буква + голосование ──
+    first_letter_votes: dict[int, int] = {}
+    button_first_letters: dict[int, set[str]] = {}
+    for i, words in enumerate(vocab):
+        button_first_letters[i] = {w[0] for w in words if w and w[0].isascii()}
+    # собираем какие буквы вообще претендуют — чтобы выявить уникальные
+    all_first_letters = [l for ls in button_first_letters.values() for l in ls]
+    for i, letters in button_first_letters.items():
+        for word in hyp_words_ascii:
+            if word[0] in letters:
+                first_letter_votes[i] = first_letter_votes.get(i, 0) + 1
+    if first_letter_votes:
+        best_i = max(first_letter_votes, key=lambda k: first_letter_votes[k])
+        best_votes = first_letter_votes[best_i]
+        second_votes = max((v for k, v in first_letter_votes.items() if k != best_i), default=0)
+        # уникальность: буквы этой кнопки встречаются ТОЛЬКО у неё
+        unique = all(all_first_letters.count(l) == 1 for l in button_first_letters[best_i])
+        if best_votes >= 3 and (unique or best_votes > second_votes * 2):
+            log.info("Captcha vote[first-letter]: → кнопка %d (голосов %d, уникально=%s)",
+                     best_i, best_votes, unique)
+            return best_i
+
+    # ── 4) Подстрока: гипотеза ⊂ слово кнопки или наоборот ──
+    sub_votes: dict[int, int] = {}
+    for i, words in enumerate(vocab):
+        for word in hyp_words_ascii:
+            if len(word) < 2:
+                continue
             for w in words:
-                second = min(second, _lev(word, w))
-    if best_dist <= allowed and (second - best_dist) >= 1:
-        log.info("Captcha vote: %d гипотез → кнопка %d (OCR %r → слово %r, "
-                 "расстояние %d, порог %d, второй=%d)",
-                 len(hyps), best_i, best_pair[0], best_pair[1], best_dist, allowed, second)
-        return best_i
-    log.info("Captcha vote: %d гипотез → лучший %r/%d (порог %d), второй=%d — "
-             "неоднозначно, пропуск", len(hyps), best_pair[1], best_dist, allowed, second)
+                if word in w or (len(word) >= 3 and w in word):
+                    sub_votes[i] = sub_votes.get(i, 0) + 1
+                    break
+    if sub_votes:
+        best_i = max(sub_votes, key=lambda k: sub_votes[k])
+        best_votes = sub_votes[best_i]
+        second_votes = max((v for k, v in sub_votes.items() if k != best_i), default=0)
+        if best_votes > second_votes:
+            log.info("Captcha vote[substring]: → кнопка %d (голосов %d/%d)",
+                     best_i, best_votes, second_votes)
+            return best_i
+
+    log.info("Captcha vote: %d гипотез — ни один из 4 слоёв не дал ответа, пропуск", len(hyps))
     return None
 
 
