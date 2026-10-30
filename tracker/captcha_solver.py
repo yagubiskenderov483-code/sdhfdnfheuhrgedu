@@ -588,7 +588,7 @@ class CaptchaSolver:
     """Пробуем OCR → матч к кнопке. Если не вышло — vision API (если ключ есть)."""
 
     def __init__(self) -> None:
-        self.enabled = _bool("CAPTCHA_AUTO_SOLVE", True)
+        self.enabled = _bool("CAPTCHA_AUTO_SOLVE", False)
         self._vision = _VisionAPI()
         # заранее сообщим, работает ли OCR
         self._ocr_available = _try_import_ocr() is not None
