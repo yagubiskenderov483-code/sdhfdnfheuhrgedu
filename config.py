@@ -177,6 +177,8 @@ class Settings:
                                               # найденного владельца в пост
     lookup_sessions: list[str] = field(default_factory=list)  # аккаунты, которые пишут боту поиска
                                               # (пусто = первый рабочий аккаунт трекера)
+    gift_page_owner: bool = False             # искать скрытого владельца через страницу подарка (+1 запрос
+                                              # на лот, раскрывает ~1%) — по умолчанию выкл., ищет бот поиска
     lookup_max_age: int = 300                 # лот найден больше N сек назад, пока искали владельца — не слать
     lookup_check_onsale: bool = True          # после поиска проверить, что лот ещё продаётся
     lookup_lang_filter: bool = False          # найденного ботом поиска владельца проверять и по языку профиля
@@ -230,7 +232,7 @@ class Settings:
     startup_delay: float = 25.0              # пауза перед подключением аккаунтов при запуске (защита при деплое)
 
     # --- обработка ---
-    processor_workers: int = 8
+    processor_workers: int = 24
     fetch_full_seller: bool = True
     seller_cache_ttl: int = 3600
     send_interval: float = 1.1
@@ -337,6 +339,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOOKUP_SESSIONS": ("lookup_sessions", lambda v: [] if v.strip() in ("", "-") else _str_list(v)),
     "LOOKUP_DEDICATED": ("lookup_dedicated", _bool_strict),
     "LOOKUP_REQUIRED": ("lookup_required", _bool_strict),
+    "GIFT_PAGE_OWNER": ("gift_page_owner", _bool_strict),
     "LOOKUP_MAX_AGE": ("lookup_max_age", lambda v: max(0, min(86400, int(v)))),
     "START_FRESH": ("start_fresh", _bool_strict),
     "LOOKUP_CHECK_ONSALE": ("lookup_check_onsale", _bool_strict),
@@ -417,6 +420,7 @@ def _from_env() -> Settings:
         lookup_sessions=_str_list(e("LOOKUP_SESSIONS") or e("LOOKUP_SESSION") or ""),
         lookup_dedicated=_bool(e("LOOKUP_DEDICATED"), True),
         lookup_required=_bool(e("LOOKUP_REQUIRED"), True),
+        gift_page_owner=_bool(e("GIFT_PAGE_OWNER"), False),
         lookup_max_age=max(0, min(86400, _int(e("LOOKUP_MAX_AGE"), 300))),
         start_fresh=_bool(e("START_FRESH"), True),
         lookup_check_onsale=_bool(e("LOOKUP_CHECK_ONSALE"), True),
@@ -459,7 +463,7 @@ def _from_env() -> Settings:
         connect_concurrency=max(1, _int(e("CONNECT_CONCURRENCY"), 5)),
         accounts_per_proxy=max(1, _int(e("ACCOUNTS_PER_PROXY"), 3)),
         startup_delay=max(0.0, _float(e("STARTUP_DELAY"), 25.0)),
-        processor_workers=max(1, _int(e("PROCESSOR_WORKERS"), 8)),
+        processor_workers=max(1, _int(e("PROCESSOR_WORKERS"), 24)),
         fetch_full_seller=_bool(e("FETCH_FULL_SELLER"), True),
         seller_cache_ttl=max(0, _int(e("SELLER_CACHE_TTL"), 3600)),
         send_interval=max(0.0, _float(e("SEND_INTERVAL"), 1.1)),

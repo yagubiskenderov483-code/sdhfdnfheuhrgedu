@@ -483,7 +483,27 @@ class ListingPipeline:
             return
         llog("FILTER", f"#{l.listing_id} price passed")
 
-        await self._resolve_hidden_owner(l)          # скрытый в выдаче продавец → ищем его аккаунт
+        if l.seller_type is None and not getattr(l, "lookup_done", False):
+            # Скрытый владелец. Сначала то, что не стоит ни одного запроса в Telegram:
+            #  • имя, которое фильтр и так отсеет (короткое, чужой алфавит, blacklist) — сразу мимо;
+            #  • этот NFT / продавец уже отправлялся — сразу мимо.
+            pre = self.seller_filter.check(l)
+            if pre.code in _HIDDEN_HARD_REJECT:
+                l.seller_filter_result = pre.code
+                l.status, l.reason = ListingStatus.FILTERED_SELLER, pre.reason
+                self.stats["filtered_seller"] += 1
+                llog("FILTER", f"#{l.listing_id} seller rejected: {pre.code}")
+                await self.db.update_listing(l)
+                return
+            early = await self._sent_before(l)
+            if early:
+                l.status, l.reason = ListingStatus.FILTERED_DUPLICATE, early
+                self.stats["filtered_repeat"] += 1
+                llog("FILTER", f"#{l.listing_id} repeat skipped: {early}")
+                await self.db.update_listing(l)
+                return
+            if settings.gift_page_owner:
+                await self._resolve_hidden_owner(l)  # страница подарка (почти никогда не раскрывает владельца)
         if self._needs_lookup(l) and not getattr(l, "lookup_done", False):
             # владелец скрыт и через страницу подарка не нашёлся → ищем через бота поиска.
             # Имена, которые фильтр и так отсеет (короткие, чужой алфавит, blacklist), боту не шлём.
