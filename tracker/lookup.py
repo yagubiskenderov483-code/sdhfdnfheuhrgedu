@@ -311,10 +311,17 @@ class OwnerLookup:
         self._pending = 0
         self._cache: dict[str, tuple[float, list[Candidate]]] = {}
         self._started: set[tuple[str, str]] = set()      # (session, bot) — /start уже отправляли
-        self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0, "captcha": 0, "too_many": 0, "from_memory": 0}
-        # капча: решает человек. on_captcha(token, session, photo_bytes, button_texts) — задаёт App
+        self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0, "captcha": 0, "captcha_auto": 0, "too_many": 0, "from_memory": 0}
+        # капча: сначала пробуем решить сами (vision-API), если не вышло — отдаём админу.
+        # on_captcha(token, session, photo_bytes, button_texts) — задаёт App
         # (шлёт админам картинку и кнопки); нажатие админа → solve_captcha(token, index).
         self.on_captcha = None
+        try:
+            from .captcha_solver import CaptchaSolver
+            self._auto = CaptchaSolver()
+        except Exception as e:                               # noqa: BLE001
+            log.warning("Lookup: авто-решатель капчи недоступен: %s", e)
+            self._auto = None
         self._captcha: dict[str, dict] = {}              # token → {session, bot, msg_id, buttons, event}
         self._captcha_by_session: dict[str, str] = {}    # session → token активной капчи
         self._last_ask: dict[str, float] = {}            # session → когда последний раз писали боту
@@ -606,11 +613,8 @@ class OwnerLookup:
         return last_cands
 
     async def _wait_captcha(self, session: str, bot: str, msg: Any) -> bool:
-        """Бот поиска показал капчу: отправляем её админам и ждём, пока кто-то нажмёт нужную кнопку."""
+        """Бот поиска показал капчу: пробуем решить сами (vision), иначе — админам."""
         self.stats["captcha"] += 1
-        if self.on_captcha is None:
-            log.warning("Lookup: @%s просит капчу на %s — пройдите её вручную в этом аккаунте", bot, session)
-            return False
         token = f"{session}-{msg.id}"[-40:]
         if token not in self._captcha:
             buttons = _buttons(msg)
@@ -628,6 +632,33 @@ class OwnerLookup:
                 photo = await self._run(session, _photo, timeout=30)
             except Exception:
                 photo = None
+
+            # 1) пробуем решить сами
+            if self._auto is not None and getattr(self._auto, "enabled", False) and photo and buttons:
+                try:
+                    idx = await self._auto.solve(photo, [t for t, _ in buttons])
+                except Exception as e:                               # noqa: BLE001
+                    idx = None
+                    log.warning("Lookup: авто-решатель капчи упал: %s", e)
+                if idx is not None:
+                    res = await self.solve_captcha(token, idx)
+                    if res == "Нажал, продолжаю поиск":
+                        self.stats["captcha_auto"] += 1
+                        llog("LOOKUP", f"@{bot} на {session}: капчу решил авто-солвер → кнопка {idx + 1}")
+                        self._captcha.pop(token, None)
+                        if self._captcha_by_session.get(session) == token:
+                            self._captcha_by_session.pop(session, None)
+                        await asyncio.sleep(2.0)
+                        return True
+                    log.warning("Lookup: авто-клик не прошёл (%s) — передаю админам", res)
+
+            # 2) fallback — админ
+            if self.on_captcha is None:
+                log.warning("Lookup: @%s просит капчу на %s — пройдите её вручную в этом аккаунте", bot, session)
+                self._captcha.pop(token, None)
+                if self._captcha_by_session.get(session) == token:
+                    self._captcha_by_session.pop(session, None)
+                return False
             try:
                 await self.on_captcha(token, session, photo, [t for t, _ in buttons])
             except Exception as e:
