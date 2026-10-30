@@ -167,34 +167,80 @@ def _emoji_name_words(emoji: str) -> set[str]:
     return words
 
 
+def _button_vocabulary(buttons: list[str]) -> list[set[str]]:
+    """Для каждой кнопки — набор слов, которыми её эмодзи может быть названо
+    (из обратного словаря + unicodedata.name)."""
+    # обратный словарь: эмодзи → все слова, которые на него маппятся
+    rev: dict[str, set[str]] = {}
+    for w, emojis in _WORD_TO_EMOJI.items():
+        for em in emojis:
+            rev.setdefault(em, set()).add(w)
+    out: list[set[str]] = []
+    for btn in buttons:
+        vocab: set[str] = set()
+        for em in _emojis_in(btn):
+            vocab.update(rev.get(em, set()))
+            vocab.update(_emoji_name_words(em))
+        out.append(vocab)
+    return out
+
+
+def _lev(a: str, b: str) -> int:
+    """Расстояние Левенштейна (O(len(a)*len(b)) — здесь строки короткие, норм)."""
+    if a == b:
+        return 0
+    if not a or not b:
+        return max(len(a), len(b))
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(cur[-1] + 1, prev[j] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
 def match_word_to_button(word: str, buttons: Iterable[str]) -> Optional[int]:
-    """Главная логика: слово (из OCR) → индекс кнопки с подходящим эмодзи."""
+    """Слово (из OCR) → индекс кнопки.
+
+    Логика: собираем словарь слов для каждой кнопки из её эмодзи. OCR часто
+    ошибается на букву-две ('star' → 'stan', 'fox' → 'tox'), поэтому берём
+    кнопку, у которой есть слово с минимальным расстоянием Левенштейна.
+    Если ближайший кандидат слишком далёк — None (отдаём админу).
+    """
     nw = _norm_word(word)
     if not nw:
         return None
     btns = list(buttons)
+    vocab = _button_vocabulary(btns)
 
-    # 1) словарь: слово → эмодзи, ищем кнопку с таким эмодзи
-    dict_hits = set(_WORD_TO_EMOJI.get(nw, ()))
-    # дополнительные формы: убрать окончания на -s, -es
-    if not dict_hits and nw.endswith("s"):
-        dict_hits = set(_WORD_TO_EMOJI.get(nw[:-1], ()))
+    best_i, best_dist, best_word = None, 999, ""
+    for i, words in enumerate(vocab):
+        for w in words:
+            d = _lev(nw, w)
+            # нормализуем на длину слова — для коротких (fox=3) допускаем меньше, для длинных больше
+            # близость: расстояние ≤ max(1, 25% длины)
+            if d < best_dist:
+                best_dist, best_i, best_word = d, i, w
+    if best_i is None:
+        return None
 
-    for i, btn in enumerate(btns):
-        for em in _emojis_in(btn):
-            if em in dict_hits:
-                return i
+    # допустимая погрешность: до 1 ошибки на 4 буквы, но минимум 1
+    allowed = max(1, len(best_word) // 4)
+    # дополнительно: разница с ВТОРЫМ лучшим должна быть ≥2 (иначе неоднозначно → None)
+    second = 999
+    for i, words in enumerate(vocab):
+        if i == best_i:
+            continue
+        for w in words:
+            second = min(second, _lev(nw, w))
 
-    # 2) unicode name кнопки содержит слово (star → "WHITE MEDIUM STAR")
-    for i, btn in enumerate(btns):
-        for em in _emojis_in(btn):
-            words = _emoji_name_words(em)
-            if nw in words:
-                return i
-            # усечённые формы: dog ⊂ dogface, star ⊂ starfish
-            for w in words:
-                if nw in w or w in nw:
-                    return i
+    if best_dist <= allowed and (second - best_dist) >= 1:
+        log.info("Captcha match: OCR %r → кнопка %d (слово %r, расстояние %d, порог %d, второй=%d)",
+                 nw, best_i, best_word, best_dist, allowed, second)
+        return best_i
+    log.info("Captcha match: OCR %r — лучший %r/%d (порог %d), второй=%d — неоднозначно, пропуск",
+             nw, best_word, best_dist, allowed, second)
     return None
 
 
