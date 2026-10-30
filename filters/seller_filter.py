@@ -167,7 +167,11 @@ class SellerFilter:
             # ALLOW_HIDDEN_OWNER=false и имя без явных признаков → фильтр ниже вернёт UNKNOWN_BLOCKED
 
         # продавцу должно быть можно написать бесплатно
-        if settings.require_free_messages and l.seller_type == "user" and l.messages != "бесплатно":
+        # НО: если владелец пришёл по доверию от бота поиска и профиль мы НЕ читали
+        # (owner_trusted_no_resolve), статус messages неизвестен — не считаем это PAID.
+        if (settings.require_free_messages and l.seller_type == "user"
+                and l.messages is not None and l.messages != "бесплатно"
+                and not getattr(l, "owner_trusted_no_resolve", False)):
             return SellerResult(False, "PAID_MESSAGES",
                                 f"messages: {l.messages or 'unknown'} (REQUIRE_FREE_MESSAGES=true)")
 

@@ -625,6 +625,13 @@ class ListingPipeline:
             if pre.code == "BLACKLIST":
                 return pre
             return SellerResult(True, "OWNER_NOT_FOUND_SENT", "owner hidden, not found — sent with a note")
+        # Владелец от funstat по доверию имени: профиль не читали, фильтры по профилю применить нечего.
+        # Проверяем только blacklist, остальное — пропускаем.
+        if getattr(l, "owner_trusted_no_resolve", False):
+            pre = self.seller_filter.check(l)
+            if pre.code == "BLACKLIST":
+                return pre
+            return SellerResult(True, "OWNER_TRUSTED", "owner trusted via lookup bot (name match)")
         sr = await self._check_seller_found(l)
         if (not sr.passed and l.owner_found_via and not settings.lookup_lang_filter
                 and sr.code in _LANG_CODES):
