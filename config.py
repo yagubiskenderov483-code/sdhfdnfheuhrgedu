@@ -177,6 +177,7 @@ class Settings:
                                               # найденного владельца в пост
     lookup_sessions: list[str] = field(default_factory=list)  # аккаунты, которые пишут боту поиска
                                               # (пусто = первый рабочий аккаунт трекера)
+    require_username: bool = True             # слать только продавцов с @username
     gift_page_owner: bool = False             # искать скрытого владельца через страницу подарка (+1 запрос
                                               # на лот, раскрывает ~1%) — по умолчанию выкл., ищет бот поиска
     lookup_max_age: int = 300                 # лот найден больше N сек назад, пока искали владельца — не слать
@@ -339,6 +340,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOOKUP_SESSIONS": ("lookup_sessions", lambda v: [] if v.strip() in ("", "-") else _str_list(v)),
     "LOOKUP_DEDICATED": ("lookup_dedicated", _bool_strict),
     "LOOKUP_REQUIRED": ("lookup_required", _bool_strict),
+    "REQUIRE_USERNAME": ("require_username", _bool_strict),
     "GIFT_PAGE_OWNER": ("gift_page_owner", _bool_strict),
     "LOOKUP_MAX_AGE": ("lookup_max_age", lambda v: max(0, min(86400, int(v)))),
     "START_FRESH": ("start_fresh", _bool_strict),
@@ -420,6 +422,7 @@ def _from_env() -> Settings:
         lookup_sessions=_str_list(e("LOOKUP_SESSIONS") or e("LOOKUP_SESSION") or ""),
         lookup_dedicated=_bool(e("LOOKUP_DEDICATED"), True),
         lookup_required=_bool(e("LOOKUP_REQUIRED"), True),
+        require_username=_bool(e("REQUIRE_USERNAME"), True),
         gift_page_owner=_bool(e("GIFT_PAGE_OWNER"), False),
         lookup_max_age=max(0, min(86400, _int(e("LOOKUP_MAX_AGE"), 300))),
         start_fresh=_bool(e("START_FRESH"), True),

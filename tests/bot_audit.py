@@ -10,6 +10,7 @@ import main
 from aiogram.types import Update, Message, Chat, User, CallbackQuery, InlineKeyboardMarkup
 from aiogram import methods, Bot
 import tests.test_tracker as t
+settings.require_username = False
 import bot.admin as admin_mod
 
 OK_TAGS = {"b","i","u","s","code","pre","a","blockquote","tg-spoiler"}
@@ -141,6 +142,7 @@ async def run():
         if app.coordinator.sync_progress()[0] == 1 and await app.db.count_market_items() > 0: break
         await asyncio.sleep(0.5)
     settings.russian_only = False; settings.require_free_messages = False; settings.max_seller_nfts = 0; settings.max_seller_level = 0
+    settings.require_username = False
     newit = market.item(9000); market.list_new(newit)
     await app.coordinator.refresh_catalog(); await asyncio.sleep(2)
     print("posts sent:", len(fsend.sent))

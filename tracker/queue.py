@@ -483,6 +483,10 @@ class ListingPipeline:
             return
         llog("FILTER", f"#{l.listing_id} price passed")
 
+        if settings.require_username and l.seller_type is not None and not l.seller_username:
+            # продавец виден, но @юза у него нет — такой лот не нужен, запросы на него не тратим
+            await self._reject_no_username(l)
+            return
         if l.seller_type is None and not getattr(l, "lookup_done", False):
             # Скрытый владелец. Сначала то, что не стоит ни одного запроса в Telegram:
             #  • имя, которое фильтр и так отсеет (короткое, чужой алфавит, blacklist) — сразу мимо;
@@ -552,7 +556,18 @@ class ListingPipeline:
             await self.db.update_listing(l)
             return
         llog("FILTER", f"#{l.listing_id} seller passed ({sr.code})")
+        if settings.require_username and not l.seller_username:
+            await self._reject_no_username(l)
+            return
         await self._send_stage(ev, l, base, t_start)
+
+    async def _reject_no_username(self, l: Listing) -> None:
+        l.seller_filter_result = "NO_USERNAME"
+        l.status, l.reason = ListingStatus.FILTERED_SELLER, "у продавца нет @username"
+        self.stats["filtered_seller"] += 1
+        self.stats["no_username"] = self.stats.get("no_username", 0) + 1
+        llog("FILTER", f"#{l.listing_id} seller rejected: NO_USERNAME")
+        await self.db.update_listing(l)
 
     async def _sent_before(self, l: Listing) -> str | None:
         if settings.unique_gifts and await self.db.gift_already_sent(l.gift_unique_id):

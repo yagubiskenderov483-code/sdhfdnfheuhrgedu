@@ -146,6 +146,7 @@ _REJ = {"PAID_MESSAGES": "платные сообщения / только Premi
         "PHONE_MISMATCH": "номер не +7/+375/+380", "FOREIGN_TEXT": "профиль на чужом языке",
         "LOOKUP_FAILED": "профиль не прочитался (аккаунты заняты)", "BLACKLIST": "blacklist",
         "OWNER_NOT_FOUND": "скрытый владелец не найден ботом поиска",
+        "NO_USERNAME": "у продавца нет @username",
         "FOREIGN_NAME_HIDDEN": "имя продавца на чужом языке (профиль скрыт Telegram)",
         "SHORT_NAME_HIDDEN": "имя продавца короче 5 букв (профиль скрыт)",
         "FOREIGN_LETTER_HIDDEN": "иностранные буквы (ö ü ğ ə ç ş ı) в имени (профиль скрыт)"}
@@ -260,6 +261,7 @@ SETTING_DESC: dict[str, str] = {
     "AUTO_LOOKUP": "true — трекер сам шлёт боту поиска /human «имя» и дописывает в пост владельца, у которого открыт этот NFT",
     "LOOKUP_SESSIONS": "аккаунты, которые пишут боту поиска, через запятую (напр. session_005,session_006); - = первый рабочий",
     "START_FRESH": "true — после запуска/деплоя слать только новые лоты (лоты, выставленные пока бот был выключен, не слать)",
+    "REQUIRE_USERNAME": "true — слать только продавцов с @username (без юза — не слать)",
     "GIFT_PAGE_OWNER": "true — искать скрытого владельца ещё и через страницу подарка (+1 запрос на лот, раскрывает ~1%)",
     "LOOKUP_MAX_AGE": "лот найден больше N сек назад, пока искали владельца — не слать (0 = без лимита)",
     "LOOKUP_CHECK_ONSALE": "true — после поиска владельца проверить, что лот ещё продаётся (проданные не слать)",
@@ -302,7 +304,7 @@ SETTING_DESC: dict[str, str] = {
 }
 SETTING_GROUPS: list[tuple[str, list[str]]] = [
     ("🎯 Фильтр цены", ["COLLECTION_MIN_FLOOR", "MAX_ABOVE_FLOOR", "MIN_STARS", "MIN_TON", "ALLOW_TON_ONLY"]),
-    ("👤 Фильтр продавца", ["RUSSIAN_ONLY", "UNKNOWN_SELLER_POLICY", "ALLOW_HIDDEN_OWNER",
+    ("👤 Фильтр продавца", ["REQUIRE_USERNAME", "RUSSIAN_ONLY", "UNKNOWN_SELLER_POLICY", "ALLOW_HIDDEN_OWNER",
                             "REQUIRE_FREE_MESSAGES", "MAX_SELLER_LEVEL", "MAX_SELLER_NFTS", "SELLER_PHONE_PREFIXES"]),
     ("🔁 Без повторов", ["UNIQUE_GIFTS", "UNIQUE_SELLERS", "MAX_SAME_COLLECTION_STREAK",
                          "SELLER_REPEAT_HOURS"]),
@@ -1275,6 +1277,7 @@ def build_routers(app: "App") -> list[Router]:
                 ("UNIQUE_GIFTS", "unique_gifts", "NFT не повторяется"),
                 ("ALLOW_TON_ONLY", "allow_ton_only", "Лоты только за TON"),
                 ("START_FRESH", "start_fresh", "После запуска — только новые лоты"),
+                ("REQUIRE_USERNAME", "require_username", "Только продавцы с @юзом"),
                 ("ALLOW_HIDDEN_OWNER", "allow_hidden_owner", "Лоты со скрытым владельцем"),
                 ("AUTO_LOOKUP", "auto_lookup", "Автопоиск владельца (бот поиска)"),
                 ("LOOKUP_REQUIRED", "lookup_required", "Скрытый владелец — только с найденным юзом"),

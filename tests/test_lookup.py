@@ -515,7 +515,8 @@ async def main():
     await asyncio.gather(*list(p._lookup_tasks))
     check(p.sent_l is None and "продан" in (l.reason or ""), "лот продан, пока искали → не отправлен")
 
-    # LOOKUP_REQUIRED=false: не нашли → шлём с пометкой
+    # LOOKUP_REQUIRED=false: не нашли → шлём с пометкой (если не требуется @юз)
+    settings.require_username = False
     settings.lookup_required = False
     p = pipeline(FakeClient(REPLY, {111: [], 222: [], 333: []}, users))
     async def on_sale(l):
@@ -531,6 +532,27 @@ async def main():
     text = MessageFormatter(settings.path(settings.template_path)).render(l)
     check(p.sent_l is l and "владелец не найден" in text, "не нашли и LOOKUP_REQUIRED=false → лот с пометкой")
     settings.lookup_required = True
+    settings.require_username = True
+
+    # REQUIRE_USERNAME: продавец виден, но без @юза → не шлём и запросов не тратим
+    p = pipeline(FakeClient(REPLY, gifts, users))
+    called = []
+    async def chk2(l):
+        called.append(1)
+        from filters.seller_filter import SellerResult
+        return SellerResult(True, "OK", "ok")
+    p._check_seller = chk2
+    l = Listing(listing_id="9:u9", gift_unique_id=9, gift_id=1, gift_name="x", seller_type="user",
+                seller_id=9, seller_name="Петя", seller_key="u9", stars_price=1000)
+    await p.process(ListingEvent(l, _t.monotonic(), "live"))
+    check(p.sent_l is None and l.seller_filter_result == "NO_USERNAME" and not called,
+          "продавец без @юза — не отправлен, профиль не запрашивался")
+    l = Listing(listing_id="8:u8", gift_unique_id=8, gift_id=1, gift_name="x", seller_type="user",
+                seller_id=8, seller_name="Петя", seller_username="petya", seller_key="u8", stars_price=1000)
+    await p.process(ListingEvent(l, _t.monotonic(), "live"))
+    check(p.sent_l is l, "продавец с @юзом — отправлен")
+    text = MessageFormatter(settings.path(settings.template_path)).render(l)
+    check("найден через" not in text, "в посте нет «найден через …»")
 
     # найденный владелец не режется языком профиля (но лимит NFT проверяется)
     from filters.seller_filter import SellerResult

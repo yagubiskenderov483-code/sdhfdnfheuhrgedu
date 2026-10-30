@@ -127,6 +127,7 @@ class Env:
 
 
 def reset_settings():
+    settings.require_username = False          # тестовые продавцы без @юза
     settings.min_stars = 5000
     settings.min_ton = 0
     settings.allow_ton_only = False
