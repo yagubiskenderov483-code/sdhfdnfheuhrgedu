@@ -9,3 +9,6 @@ cryptography>=42
 tzdata>=2024.1
 # ускоряет шифрование MTProto (опционально, но рекомендуется при большом числе sessions)
 cryptg>=0.4; platform_python_implementation == "CPython"
+# авто-решатель капчи funstat: OCR слова на картинке + матч к эмодзи-кнопке
+pytesseract>=0.3.10
+Pillow>=10.0
