@@ -295,6 +295,12 @@ class ListingPipeline:
     async def _enrich_seller(self, l: Listing) -> None:
         if not settings.fetch_full_seller or l.seller_type != "user" or not l.seller_id:
             return
+        # Владельца funstat выдал по доверию имени, резолва не было → access_hash нет
+        # ни у одной сессии. Любая попытка fetch_full_user даст
+        # 'Could not find input entity' → seller_lookup_failed → лот отбрасывается.
+        # Этот случай трактуем как успех без enrich: имя и @юз от funstat — достаточно.
+        if getattr(l, "owner_trusted_no_resolve", False):
+            return
         cached = self._seller_cache.get(l.seller_id)
         if cached and time.monotonic() - cached[0] < settings.seller_cache_ttl:
             full = cached[1]
@@ -644,7 +650,10 @@ class ListingPipeline:
 
     async def _check_seller_inner(self, l: Listing) -> SellerResult:
         await self._enrich_seller(l)
-        if getattr(l, "seller_lookup_failed", False) and settings.max_seller_level > 0:
+        # Владелец от funstat по доверию имени: профиль мы не читаем принципиально,
+        # отбрасывать лот по max_seller_level не надо — это ломает полезный fallback.
+        if (getattr(l, "seller_lookup_failed", False) and settings.max_seller_level > 0
+                and not getattr(l, "owner_trusted_no_resolve", False)):
             # профиль не прочитался ни с одного аккаунта → Level неизвестен; не шлём вслепую
             return SellerResult(False, "LOOKUP_FAILED", "seller profile unavailable (all accounts busy)")
 
@@ -851,6 +860,10 @@ class ListingPipeline:
             l.premium = owner.premium
         if owner.session:
             l.session_source = owner.session       # у этого аккаунта есть доступ к профилю владельца
+        else:
+            # funstat выдал владельца по доверию имени, никакой session не резолвила access_hash
+            # (fallback-trust_name_match). _enrich_seller его пропустит, лот пойдёт как есть.
+            l.owner_trusted_no_resolve = True
         l.owner_found_via = settings.lookup_bot_username.lstrip("@")
         self.stats["owner_found"] = self.stats.get("owner_found", 0) + 1
         llog("FILTER", f"#{l.listing_id} hidden owner found via @{l.owner_found_via} → u{uid}"

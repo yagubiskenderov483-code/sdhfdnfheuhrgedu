@@ -43,6 +43,7 @@ _SERVICE_NAMES = {"joinchat", "addstickers", "addemoji", "share", "proxy", "sock
 _WAIT_WORDS = ("ищу", "поиск", "подожд", "загруж", "search", "wait", "loading", "⏳", "🔎")
 _MAX_PENDING = 2000               # не больше N лотов в очереди на поиск (дальше — пропускаем)
 _CACHE_TTL = 3600.0               # кандидаты по одному имени — час
+_NEG_CACHE_TTL = 3600.0           # «не найдено» по имени — час (не долбим funstat повторно)
 _LINE_RE = re.compile(r"\((?:@([A-Za-z][A-Za-z0-9_]{3,31})|id\s*(\d{3,12}))\)", re.I)
 _LINE_PREFIX_RE = re.compile(r"^[\s\d.)\-#№]*(?:[^\w\s]+\s*)*")
 _CAPTCHA_WORDS = ("captcha", "kapch", "капч", "rasmga", "click the button", "looks like the picture")
@@ -310,6 +311,9 @@ class OwnerLookup:
         self._anchor: str | None = None                  # аккаунт поиска, когда LOOKUP_SESSIONS пуст
         self._pending = 0
         self._cache: dict[str, tuple[float, list[Candidate]]] = {}
+        # Негативный кеш: имя → когда funstat сказал «не найдено». TTL — час.
+        # Экономит квоту и капчи: 'Maria' на разных лотах не долбим в funstat.
+        self._neg_cache: dict[str, float] = {}
         self._started: set[tuple[str, str]] = set()      # (session, bot) — /start уже отправляли
         self._bot_unresolvable: set[tuple[str, str]] = set()  # (session, bot) — у которого Telegram не находит username
         self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0,
@@ -468,6 +472,14 @@ class OwnerLookup:
                 llog("LOOKUP", f"{seller_name!r} → u{found.user_id} из памяти (без бота поиска)")
                 return found
         key = _norm_name(seller_name)
+        # негативный кеш: funstat недавно сказал «нет такого» → не долбим снова
+        neg = self._neg_cache.get(key)
+        if neg and time.monotonic() - neg < _NEG_CACHE_TTL:
+            self.stats["not_found"] += 1
+            self.stats["neg_cached"] = self.stats.get("neg_cached", 0) + 1
+            llog("LOOKUP", f"{seller_name!r}: уже искали недавно — не найден, скип "
+                           f"({(time.monotonic() - neg) / 60:.0f} мин назад)")
+            return None
         cached = self._cache.get(key)
         if cached and time.monotonic() - cached[0] < _CACHE_TTL:
             cands = cached[1]
@@ -503,13 +515,18 @@ class OwnerLookup:
         if not cands:
             self.stats["not_found"] += 1
             self.stats["no_candidates"] += 1
-            llog("LOOKUP", f"@{bot} /human {seller_name!r}: кандидатов нет")
+            self._neg_cache[key] = time.monotonic()
+            if len(self._neg_cache) > 10000:
+                self._neg_cache.clear()
+            llog("LOOKUP", f"@{bot} /human {seller_name!r}: кандидатов нет (кешируем на час)")
             return None
         if settings.lookup_skip_over and len(cands) >= settings.lookup_skip_over:
             # слишком частое имя — проверять всех долго, такой лот сразу пропускаем
             self.stats["not_found"] += 1
             self.stats["too_many"] = self.stats.get("too_many", 0) + 1
-            llog("LOOKUP", f"/human {seller_name!r}: {len(cands)} кандидатов (≥{settings.lookup_skip_over}) — скип")
+            self._neg_cache[key] = time.monotonic()
+            llog("LOOKUP", f"/human {seller_name!r}: {len(cands)} кандидатов (≥{settings.lookup_skip_over}) — "
+                           f"скип (кешируем на час)")
             return None
         # сначала кандидаты с @username (их бот показывает как «01. Имя (@username)»), потом голые ID
         cands = sorted(cands, key=lambda c: c.username is None)
@@ -523,8 +540,9 @@ class OwnerLookup:
         else:
             self.stats["not_found"] += 1
             self.stats["nft_hidden"] += 1
+            self._neg_cache[key] = time.monotonic()
             llog("LOOKUP", f"/human {seller_name!r}: {len(cands)} кандидат(ов), NFT ни у кого не виден "
-                           f"(возможно, скрыты в профиле)")
+                           f"(кешируем 'не найден' на час)")
         return found
 
     async def _ask_bot(self, session: str, bot: str, seller_name: str,
