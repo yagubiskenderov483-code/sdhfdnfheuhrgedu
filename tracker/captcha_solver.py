@@ -210,36 +210,48 @@ def _try_import_ocr():
         return None
 
 
-def ocr_word(photo: bytes) -> Optional[str]:
-    """Распознаём слово на картинке капчи. Возвращаем нормализованное слово или None."""
+_OCR_MIN_CONFIDENCE = float(_env("CAPTCHA_OCR_MIN_CONF", "70"))   # 0..100, ниже — не доверяем
+
+
+def ocr_word(photo: bytes) -> Optional[tuple[str, float]]:
+    """Распознаём слово + уверенность (0..100). None если ничего разборчивого."""
     mods = _try_import_ocr()
     if mods is None or not photo:
         return None
     pytesseract, Image, ImageOps = mods
     try:
         img = Image.open(io.BytesIO(photo))
-        # нормализация: серый, автоконтраст, увеличение (OCR любит крупный шрифт)
         img = img.convert("L")
         img = ImageOps.autocontrast(img, cutoff=5)
-        if img.width < 300:
-            scale = 300 / img.width
+        # OCR любит крупный шрифт — всегда увеличиваем
+        if img.width < 600:
+            scale = 600 / img.width
             img = img.resize((int(img.width * scale), int(img.height * scale)))
-        # пробуем несколько режимов — у psm 7/8 лучше одиночные слова
-        best: Optional[str] = None
-        for psm in (7, 8, 6, 13):
+        best: Optional[tuple[str, float]] = None
+        # psm 7/8 — одиночные слова; 6 — абзац; 13 — raw line
+        for psm in (8, 7, 6, 13):
+            cfg = (f"--oem 3 --psm {psm} -c tessedit_char_whitelist="
+                   "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                   "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
             try:
-                raw = pytesseract.image_to_string(
-                    img,
-                    config=f"--oem 3 --psm {psm} -c tessedit_char_whitelist="
-                           "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                           "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ",
-                )
+                data = pytesseract.image_to_data(img, config=cfg, output_type=pytesseract.Output.DICT)
             except Exception:
                 continue
-            word = _norm_word(raw)
-            if word and (best is None or len(word) > len(best)):
-                best = word
-        if best and 2 <= len(best) <= 32:
+            # собираем все слова с confidence и берём лучшее
+            for i, raw in enumerate(data.get("text", [])):
+                word = _norm_word(raw or "")
+                if not word or not (2 <= len(word) <= 32):
+                    continue
+                try:
+                    conf = float(data["conf"][i])
+                except (ValueError, TypeError, IndexError):
+                    continue
+                if conf < 0:
+                    continue
+                if best is None or conf > best[1]:
+                    best = (word, conf)
+        if best:
+            log.info("OCR → %r (conf %.0f%%)", best[0], best[1])
             return best
     except Exception as e:                                             # noqa: BLE001
         log.warning("OCR failed: %s", e)
@@ -322,15 +334,22 @@ class CaptchaSolver:
         if not btns:
             return None
 
-        # 1) OCR локально
+        # 1) OCR локально — нужна уверенность не ниже порога, ИНАЧЕ нельзя гадать
+        #    (неверный клик → funstat даёт новую капчу и зацикливается)
         if self._ocr_available:
-            word = await asyncio.to_thread(ocr_word, photo)
-            if word:
+            res = await asyncio.to_thread(ocr_word, photo)
+            if res:
+                word, conf = res
                 idx = match_word_to_button(word, btns)
-                if idx is not None:
-                    log.info("Captcha solver: OCR → %r → кнопка %d (%s)", word, idx, btns[idx])
+                if idx is None:
+                    log.info("Captcha solver: OCR %r (conf %.0f%%) — ни одна кнопка не подошла", word, conf)
+                elif conf < _OCR_MIN_CONFIDENCE:
+                    log.info("Captcha solver: OCR %r (conf %.0f%% < %.0f%%) — не рискуем, передаю vision/админу",
+                             word, conf, _OCR_MIN_CONFIDENCE)
+                else:
+                    log.info("Captcha solver: OCR → %r (conf %.0f%%) → кнопка %d (%s)",
+                             word, conf, idx, btns[idx])
                     return idx
-                log.info("Captcha solver: OCR распознал %r, но ни одна кнопка не подошла", word)
 
         # 2) vision API
         if self._vision.enabled:

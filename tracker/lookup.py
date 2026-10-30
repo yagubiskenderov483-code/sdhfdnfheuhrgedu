@@ -327,6 +327,7 @@ class OwnerLookup:
             self._auto = None
         self._captcha: dict[str, dict] = {}              # token → {session, bot, msg_id, buttons, event}
         self._captcha_by_session: dict[str, str] = {}    # session → token активной капчи
+        self._captcha_streak: dict[str, int] = {}        # session → подряд капч (сбрасывается при успехе)
         self._last_ask: dict[str, float] = {}            # session → когда последний раз писали боту
 
     # ------------------------------------------------------------------ public
@@ -607,6 +608,8 @@ class OwnerLookup:
                     return None
                 # капчу прошли — повторяем запрос (бот обычно не выполняет команду, на которой спросил капчу)
                 return await self._ask_bot_locked(session, bot, seller_name, _retry=False)
+            # funstat ответил чем-то кроме капчи — значит прошлая капча (если была) прошла нормально
+            self._captcha_streak.pop(session, None)
             got_answer = True
             last_cands = parse_candidates(msgs, bot)
             text = "\n".join((m.message or "") for m in msgs)
@@ -630,6 +633,9 @@ class OwnerLookup:
     async def _wait_captcha(self, session: str, bot: str, msg: Any) -> bool:
         """Бот поиска показал капчу: пробуем решить сами (vision), иначе — админам."""
         self.stats["captcha"] += 1
+        # счётчик капч подряд на этой сессии — если >=2, значит мы ошиблись и зацикливаемся
+        streak = self._captcha_streak.get(session, 0) + 1
+        self._captcha_streak[session] = streak
         token = f"{session}-{msg.id}"[-40:]
         if token not in self._captcha:
             buttons = _buttons(msg)
@@ -648,8 +654,12 @@ class OwnerLookup:
             except Exception:
                 photo = None
 
-            # 1) пробуем решить сами
-            if self._auto is not None and getattr(self._auto, "enabled", False) and photo and buttons:
+            # 1) пробуем решить сами — только если ещё не ошибались в этой сессии
+            if streak >= 2:
+                llog("LOOKUP", f"@{bot} на {session}: {streak}-я капча подряд — "
+                               f"авто-солвер промахнулся, передаю админам")
+                self.stats["captcha_auto_fail"] = self.stats.get("captcha_auto_fail", 0) + 1
+            elif self._auto is not None and getattr(self._auto, "enabled", False) and photo and buttons:
                 try:
                     idx = await self._auto.solve(photo, [t for t, _ in buttons])
                 except Exception as e:                               # noqa: BLE001
