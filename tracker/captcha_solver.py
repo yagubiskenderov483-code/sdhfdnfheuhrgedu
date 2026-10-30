@@ -471,55 +471,74 @@ def match_word_to_button(word: str, buttons: Iterable[str]) -> Optional[int]:
 # ---------------------------------------------------------------------------
 # OCR через tesseract (локально)
 # ---------------------------------------------------------------------------
+_OCR_MIN_CONFIDENCE = float(_env("CAPTCHA_OCR_MIN_CONF", "20"))   # 0..100
+# fuzzy_match сам отсекает мусор (xyz → None), поэтому порог confidence можно держать низким
+
+
 def _try_import_ocr():
     try:
         import pytesseract
-        from PIL import Image, ImageOps
-        return pytesseract, Image, ImageOps
+        from PIL import Image, ImageOps, ImageFilter
+        return pytesseract, Image, ImageOps, ImageFilter
     except ImportError:
         return None
 
 
-_OCR_MIN_CONFIDENCE = float(_env("CAPTCHA_OCR_MIN_CONF", "70"))   # 0..100, ниже — не доверяем
+def _preprocess(photo: bytes, threshold: int, scale: int):
+    """Пред-обработка капчи funstat: порог → апскейл → медианный фильтр.
+    Капчи funstat: маленькие (~120×48) бежевые, с «карандашным» шрифтом и зернистым фоном.
+    Tesseract плохо с ними справляется напрямую — обязательна бинаризация и увеличение."""
+    mods = _try_import_ocr()
+    if mods is None:
+        return None
+    _, Image, ImageOps, ImageFilter = mods
+    img = Image.open(io.BytesIO(photo)).convert("L")
+    img = ImageOps.autocontrast(img, cutoff=1)
+    img = img.point(lambda p, t=threshold: 0 if p < t else 255, mode="1").convert("L")
+    w, h = img.size
+    img = img.resize((w * scale, h * scale), Image.LANCZOS)
+    img = img.filter(ImageFilter.MedianFilter(5))
+    return img
 
 
 def ocr_word(photo: bytes) -> Optional[tuple[str, float]]:
-    """Распознаём слово + уверенность (0..100). None если ничего разборчивого."""
+    """Распознаём слово + уверенность (0..100). None если ничего разборчивого.
+
+    Пробуем 3 threshold'а × 4 psm режима и берём ответ с максимальной
+    уверенностью. Это надёжнее одной попытки — засечённое перепроверяется."""
     mods = _try_import_ocr()
     if mods is None or not photo:
         return None
-    pytesseract, Image, ImageOps = mods
+    pytesseract = mods[0]
+
+    whitelist = ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                 "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
+    best: Optional[tuple[str, float]] = None
     try:
-        img = Image.open(io.BytesIO(photo))
-        img = img.convert("L")
-        img = ImageOps.autocontrast(img, cutoff=5)
-        # OCR любит крупный шрифт — всегда увеличиваем
-        if img.width < 600:
-            scale = 600 / img.width
-            img = img.resize((int(img.width * scale), int(img.height * scale)))
-        best: Optional[tuple[str, float]] = None
-        # psm 7/8 — одиночные слова; 6 — абзац; 13 — raw line
-        for psm in (8, 7, 6, 13):
-            cfg = (f"--oem 3 --psm {psm} -c tessedit_char_whitelist="
-                   "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                   "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
-            try:
-                data = pytesseract.image_to_data(img, config=cfg, output_type=pytesseract.Output.DICT)
-            except Exception:
-                continue
-            # собираем все слова с confidence и берём лучшее
-            for i, raw in enumerate(data.get("text", [])):
-                word = _norm_word(raw or "")
-                if not word or not (2 <= len(word) <= 32):
-                    continue
+        # пробуем 3 порога — на разных капчах лучше работают разные
+        for threshold in (115, 130, 145):
+            img = _preprocess(photo, threshold, scale=6)
+            if img is None:
+                return None
+            for psm in (7, 8, 6, 13):
+                cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist={whitelist}"
                 try:
-                    conf = float(data["conf"][i])
-                except (ValueError, TypeError, IndexError):
+                    data = pytesseract.image_to_data(img, config=cfg,
+                                                     output_type=pytesseract.Output.DICT)
+                except Exception:
                     continue
-                if conf < 0:
-                    continue
-                if best is None or conf > best[1]:
-                    best = (word, conf)
+                for i, raw in enumerate(data.get("text", [])):
+                    word = _norm_word(raw or "")
+                    if not word or not (2 <= len(word) <= 32):
+                        continue
+                    try:
+                        conf = float(data["conf"][i])
+                    except (ValueError, TypeError, IndexError):
+                        continue
+                    if conf < 0:
+                        continue
+                    if best is None or conf > best[1]:
+                        best = (word, conf)
         if best:
             log.info("OCR → %r (conf %.0f%%)", best[0], best[1])
             return best
@@ -588,7 +607,7 @@ class CaptchaSolver:
     """Пробуем OCR → матч к кнопке. Если не вышло — vision API (если ключ есть)."""
 
     def __init__(self) -> None:
-        self.enabled = _bool("CAPTCHA_AUTO_SOLVE", False)
+        self.enabled = _bool("CAPTCHA_AUTO_SOLVE", True)
         self._vision = _VisionAPI()
         # заранее сообщим, работает ли OCR
         self._ocr_available = _try_import_ocr() is not None
