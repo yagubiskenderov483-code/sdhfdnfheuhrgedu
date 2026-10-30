@@ -501,25 +501,23 @@ def _preprocess(photo: bytes, threshold: int, scale: int):
     return img
 
 
-def ocr_word(photo: bytes) -> Optional[tuple[str, float]]:
-    """Распознаём слово + уверенность (0..100). None если ничего разборчивого.
-
-    Пробуем 3 threshold'а × 4 psm режима и берём ответ с максимальной
-    уверенностью. Это надёжнее одной попытки — засечённое перепроверяется."""
+def ocr_words(photo: bytes) -> list[tuple[str, float]]:
+    """Собираем ВСЕ гипотезы OCR (разные пороги × режимы) — не одну «лучшую»,
+    а список кандидатов. Потом вызывающий выбирает ту, что лучше всего матчит
+    к текущим кнопкам."""
     mods = _try_import_ocr()
     if mods is None or not photo:
-        return None
+        return []
     pytesseract = mods[0]
-
     whitelist = ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
                  "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
-    best: Optional[tuple[str, float]] = None
+    hyps: list[tuple[str, float]] = []
     try:
-        # пробуем 3 порога — на разных капчах лучше работают разные
-        for threshold in (115, 130, 145):
+        # 5 порогов × 4 режима = 20 попыток. ~0.5-1 сек всего.
+        for threshold in (100, 115, 130, 145, 160):
             img = _preprocess(photo, threshold, scale=6)
             if img is None:
-                return None
+                return hyps
             for psm in (7, 8, 6, 13):
                 cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist={whitelist}"
                 try:
@@ -537,13 +535,60 @@ def ocr_word(photo: bytes) -> Optional[tuple[str, float]]:
                         continue
                     if conf < 0:
                         continue
-                    if best is None or conf > best[1]:
-                        best = (word, conf)
-        if best:
-            log.info("OCR → %r (conf %.0f%%)", best[0], best[1])
-            return best
+                    hyps.append((word, conf))
     except Exception as e:                                             # noqa: BLE001
         log.warning("OCR failed: %s", e)
+    return hyps
+
+
+def ocr_word(photo: bytes) -> Optional[tuple[str, float]]:
+    """Обратная совместимость: ТОП-гипотеза (слово с макс. confidence)."""
+    hyps = ocr_words(photo)
+    if not hyps:
+        return None
+    best = max(hyps, key=lambda x: x[1])
+    log.info("OCR → %r (conf %.0f%%, hypotheses=%d)", best[0], best[1], len(hyps))
+    return best
+
+
+def _best_button_from_hypotheses(hyps: list[tuple[str, float]],
+                                 buttons: list[str]) -> Optional[int]:
+    """Выбираем кнопку по ВСЕМ гипотезам OCR: та, к которой есть лучший
+    (= минимальное расстояние Левенштейна) матч от какой-либо из гипотез.
+    Это надёжнее чем брать одну «лучшую» гипотезу и матчить её — если
+    tesseract в 20 попыток хоть один раз угадает слово близкое к кнопке,
+    мы это заметим."""
+    if not hyps or not buttons:
+        return None
+    vocab = _button_vocabulary(buttons)
+    # для каждой кнопки — минимальное расстояние от любой гипотезы до её слов
+    best_i, best_dist, best_pair = None, 999, ("", "")
+    for i, words in enumerate(vocab):
+        for word, _ in hyps:
+            for w in words:
+                d = _lev(word, w)
+                if d < best_dist:
+                    best_dist, best_i, best_pair = d, i, (word, w)
+    if best_i is None:
+        return None
+    # допуск: до 1 ошибки на 3 буквы (чуть мягче чем в match_word_to_button,
+    # т.к. это пассивный ищущий «любой из 20» режим)
+    allowed = max(1, len(best_pair[1]) // 3)
+    # неоднозначность: разница со вторым лучшим ≥1
+    second = 999
+    for i, words in enumerate(vocab):
+        if i == best_i:
+            continue
+        for word, _ in hyps:
+            for w in words:
+                second = min(second, _lev(word, w))
+    if best_dist <= allowed and (second - best_dist) >= 1:
+        log.info("Captcha vote: %d гипотез → кнопка %d (OCR %r → слово %r, "
+                 "расстояние %d, порог %d, второй=%d)",
+                 len(hyps), best_i, best_pair[0], best_pair[1], best_dist, allowed, second)
+        return best_i
+    log.info("Captcha vote: %d гипотез → лучший %r/%d (порог %d), второй=%d — "
+             "неоднозначно, пропуск", len(hyps), best_pair[1], best_dist, allowed, second)
     return None
 
 
@@ -623,22 +668,16 @@ class CaptchaSolver:
         if not btns:
             return None
 
-        # 1) OCR локально — нужна уверенность не ниже порога, ИНАЧЕ нельзя гадать
-        #    (неверный клик → funstat даёт новую капчу и зацикливается)
+        # 1) OCR локально: собираем 20 гипотез (5 порогов × 4 psm) и голосуем —
+        #    кнопка выигрывает, если ХОТЬ ОДНА гипотеза хорошо на неё матчит.
         if self._ocr_available:
-            res = await asyncio.to_thread(ocr_word, photo)
-            if res:
-                word, conf = res
-                idx = match_word_to_button(word, btns)
-                if idx is None:
-                    log.info("Captcha solver: OCR %r (conf %.0f%%) — ни одна кнопка не подошла", word, conf)
-                elif conf < _OCR_MIN_CONFIDENCE:
-                    log.info("Captcha solver: OCR %r (conf %.0f%% < %.0f%%) — не рискуем, передаю vision/админу",
-                             word, conf, _OCR_MIN_CONFIDENCE)
-                else:
-                    log.info("Captcha solver: OCR → %r (conf %.0f%%) → кнопка %d (%s)",
-                             word, conf, idx, btns[idx])
+            hyps = await asyncio.to_thread(ocr_words, photo)
+            if hyps:
+                idx = _best_button_from_hypotheses(hyps, btns)
+                if idx is not None:
                     return idx
+                log.info("Captcha solver: %d гипотез, но ни одна не подошла — передаю vision/админу",
+                         len(hyps))
 
         # 2) vision API
         if self._vision.enabled:
