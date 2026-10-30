@@ -1306,9 +1306,17 @@ def build_routers(app: "App") -> list[Router]:
         rows.append([InlineKeyboardButton(
             text=f"💰 Торговый бот: @{tb}" if tb else "💰 Добавить торгового бота (оффер)",
             callback_data="flt:TRADEBOT")])
+        rows.append([InlineKeyboardButton(text="⚡ Скорость трекера", callback_data="flt:SPEED")])
+        # короткая строка о текущих настройках скорости — чтоб сразу видеть
+        speed_line = (f"⚡ Скорость: маркет {settings.catalog_interval:g}s · "
+                      f"трекер {settings.tracker_interval:g}s · "
+                      f"funstat {settings.lookup_interval:g}s · "
+                      f"капча-ждать {settings.lookup_captcha_wait:g}s")
         text = ("🎛 <b>Фильтры лотов</b>\nНажмите, чтобы переключить — применяется сразу и переживает деплой.\n"
                 f"Мин. цена: {settings.min_stars}⭐ · флор коллекции от {settings.collection_min_floor}⭐ "
-                "(менять: /set MIN_STARS …)\nПочему лоты отсеиваются: /why")
+                "(менять: /set MIN_STARS …)\n"
+                f"{speed_line}\n"
+                "Почему лоты отсеиваются: /why")
         return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
     _LOOKUP_TIMEOUTS = (15, 25, 40, 60)
@@ -1334,17 +1342,45 @@ def build_routers(app: "App") -> list[Router]:
         lk = app.lookup.stats
         rows.append([InlineKeyboardButton(text="⬅️ Назад", callback_data="lka:~BACK")])
         lb = settings.lookup_bot_username
+        # авто-солвер капчи: OCR слова на картинке → эмодзи на кнопке
+        try:
+            auto = getattr(app.lookup, "_auto", None)
+            ocr_ok = bool(auto and getattr(auto, "_ocr_available", False))
+            api_ok = bool(auto and getattr(auto, "_vision", None) and auto._vision.enabled)
+            if ocr_ok and api_ok:
+                auto_line = "🤖 Авто-решатель капчи: <b>OCR + Vision API</b> (жмёт сам)"
+            elif ocr_ok:
+                auto_line = "🤖 Авто-решатель капчи: <b>OCR</b> (жмёт сам)"
+            elif api_ok:
+                auto_line = "🤖 Авто-решатель капчи: <b>Vision API</b> (жмёт сам)"
+            else:
+                auto_line = "🤖 Авто-решатель капчи: <b>выключен</b> — капча придёт вам"
+        except Exception:
+            auto_line = ""
+
         text = ("👤 <b>Аккаунты для бота поиска</b>\n"
                 f"Бот поиска: {('@' + html.escape(lb)) if lb else '<i>не задан — /panel → 🔍</i>'}\n"
-                f"Автопоиск: {'включён' if settings.auto_lookup else 'выключен'}\n\n"
-                "Отмеченные аккаунты пишут боту <code>/human имя</code> по очереди (если один упёрся в лимит — "
-                "пишет следующий). Ничего не отмечено — пишет первый рабочий аккаунт трекера.\n"
-                "«Только поиск» — отмеченные аккаунты не опрашивают маркет, работают только на поиск.\n"
-                "⚠️ — аккаунт сейчас не работает. Добавить аккаунт: /add_session\n"
-                "Если бот поиска спросит капчу — она придёт вам сюда с кнопками.\n\n"
+                f"Автопоиск: {'включён' if settings.auto_lookup else 'выключен'}\n"
+                f"{auto_line}\n\n"
+                "<b>Как работает:</b>\n"
+                "• Трекер видит скрытого продавца → спрашивает у бота поиска, кто это.\n"
+                "• <b>Отмеченные ✅ аккаунты</b> пишут боту поиска по очереди "
+                "(если один упёрся в лимит/капчу — пишет следующий).\n"
+                "• <b>Ничего не отмечено</b> — пишет первый рабочий аккаунт трекера "
+                "(быстро, но тот же аккаунт тогда реже успевает парсить маркет).\n"
+                "• <b>«Только поиск»</b> — отмеченные аккаунты НЕ парсят маркет, "
+                "работают исключительно на поиск. Остальные — только парсят маркет. "
+                "Это самый быстрый режим, если sessions ≥ 2.\n"
+                "• ⚠️ — аккаунт сейчас не работает.\n"
+                "• Добавить аккаунт: /add_session\n\n"
+                "<b>Капча:</b> если включён OCR (по умолчанию) — трекер сам распознаёт слово "
+                "на картинке и жмёт нужную кнопку (⭐/🦊/🐶). Если не распознал — капча "
+                "придёт сюда с кнопками.\n\n"
                 f"Поисков: {lk.get('lookups', 0)} · найдено: {lk.get('found', 0)} · "
                 f"не найдено: {lk.get('not_found', 0)} · без ответа: {lk.get('no_answer', 0)} · "
-                f"из памяти: {lk.get('from_memory', 0)} · капч: {lk.get('captcha', 0)} · скип (много людей): {lk.get('too_many', 0)} · в очереди: {len(app.pipeline._lookup_tasks)}")
+                f"из памяти: {lk.get('from_memory', 0)} · "
+                f"капч: {lk.get('captcha', 0)} (авто: {lk.get('captcha_auto', 0)}) · "
+                f"скип (много людей): {lk.get('too_many', 0)} · в очереди: {len(app.pipeline._lookup_tasks)}")
         return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
     @public.callback_query(F.data.startswith("cap:"))
@@ -1481,6 +1517,47 @@ def build_routers(app: "App") -> list[Router]:
                 await q.message.edit_text(text, reply_markup=kb)
             except Exception:
                 await q.message.answer(text, reply_markup=kb)
+            await q.answer()
+            return
+        if key == "SPEED":
+            msg = (
+                "⚡ <b>Скорость трекера — как работает и что крутить</b>\n\n"
+                "<b>Как лоты попадают в канал:</b>\n"
+                "1. Трекер смотрит счётчики всех коллекций "
+                f"каждые <b>{settings.catalog_interval:g} сек</b> (CATALOG_INTERVAL).\n"
+                "2. У коллекции изменился счётчик — читает её верх маркета. "
+                f"«Горячие» коллекции (от {settings.priority_floor}⭐) читает отдельно каждые "
+                f"<b>{settings.priority_poll_interval:g} сек</b> (PRIORITY_POLL_INTERVAL).\n"
+                "3. Если продавец скрыт — пишет боту funstat "
+                f"(пауза между запросами с одного аккаунта <b>{settings.lookup_interval:g} сек</b>, "
+                f"ждёт ответа <b>{settings.lookup_timeout:g} сек</b>).\n"
+                "4. funstat выдал капчу → OCR сам распознаёт слово на картинке и жмёт нужную кнопку "
+                f"(ждём максимум <b>{settings.lookup_captcha_wait:g} сек</b> на fallback).\n"
+                "5. Лоты старше <b>" + f"{settings.lookup_max_age}" + " сек</b> с момента обнаружения не отправляются "
+                "(LOOKUP_MAX_AGE).\n\n"
+                "<b>Текущие настройки (дефолт — ускоренный):</b>\n"
+                f"• CATALOG_INTERVAL = <b>{settings.catalog_interval:g}</b> сек — опрос всех коллекций\n"
+                f"• TRACKER_INTERVAL = <b>{settings.tracker_interval:g}</b> сек — пауза между проходами\n"
+                f"• PRIORITY_POLL_INTERVAL = <b>{settings.priority_poll_interval:g}</b> сек — опрос дорогих коллекций\n"
+                f"• COLD_POLL_INTERVAL = <b>{settings.cold_poll_interval:g}</b> сек — страховочный опрос пустых\n"
+                f"• PAGE_LIMIT = <b>{settings.page_limit}</b> — лотов за запрос\n"
+                f"• LOOKUP_INTERVAL = <b>{settings.lookup_interval:g}</b> сек — пауза в funstat\n"
+                f"• LOOKUP_TIMEOUT = <b>{settings.lookup_timeout:g}</b> сек — ждать ответ funstat\n"
+                f"• LOOKUP_CAPTCHA_WAIT = <b>{settings.lookup_captcha_wait:g}</b> сек — ждать капчу\n"
+                f"• LOOKUP_MAX_AGE = <b>{settings.lookup_max_age}</b> сек — максимальный возраст лота\n\n"
+                "<b>Хочешь ещё быстрее?</b> Выстави в env на Render:\n"
+                "<code>CATALOG_INTERVAL=0.3</code>\n"
+                "<code>TRACKER_INTERVAL=0.3</code>\n"
+                "<code>PRIORITY_POLL_INTERVAL=1.0</code>\n"
+                "<b>Минус:</b> выше шанс поймать FloodWait от Telegram → "
+                "аккаунт отдыхает ~20 минут, лоты задержатся.\n\n"
+                "<b>Главный ускоритель — больше аккаунтов.</b> Каждый новый аккаунт делит нагрузку.\n"
+                "Поменять любую: <code>/set CATALOG_INTERVAL 0.3</code>"
+            )
+            try:
+                await q.message.answer(msg)
+            except Exception:
+                pass
             await q.answer()
             return
         if key == "TRADEBOT":

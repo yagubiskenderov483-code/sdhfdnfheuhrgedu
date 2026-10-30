@@ -155,7 +155,7 @@ class Settings:
     min_ton: float = 0.0
     priority_floor: int = 2500           # коллекции с флором от N ⭐ опрашиваются чаще и первыми (0 = выкл)
     priority_share: float = 0.65         # какая доля мощности аккаунтов уходит на дорогие коллекции
-    priority_poll_interval: float = 2.5  # как часто опрашивать каждую дорогую коллекцию, сек
+    priority_poll_interval: float = 1.5  # ускорено (было 2.5): как часто опрашивать каждую дорогую коллекцию
     auto_remove_dead: bool = True        # сессию, которую снёс Telegram, удалять из трекера автоматически
     max_lot_age: int = 600               # лот, пролежавший в очереди дольше N сек, не отправляется (0 = выкл)
     route_by: str = "floor"              # тема по: floor (флор коллекции = цена гифта) | price (цена лота)
@@ -185,9 +185,9 @@ class Settings:
     lookup_lang_filter: bool = False          # найденного ботом поиска владельца проверять и по языку профиля
     lookup_required: bool = True              # скрытый владелец не найден ботом поиска → лот не слать
     lookup_dedicated: bool = True             # аккаунты поиска НЕ опрашивают маркет — только пишут боту
-    lookup_interval: float = 3.0              # пауза между запросами к боту поиска с одного аккаунта, сек
-    lookup_captcha_wait: float = 600.0        # сколько ждать, пока админ пройдёт капчу бота поиска, сек
-    lookup_timeout: float = 25.0              # сколько секунд ждать ответа бота поиска
+    lookup_interval: float = 1.5              # ускорено (было 3.0): пауза между запросами к боту поиска с одного аккаунта
+    lookup_captcha_wait: float = 90.0         # ускорено: ждём капчу авто-солвером/админом (было 600)
+    lookup_timeout: float = 15.0              # ускорено (было 25): сколько секунд ждать ответа бота поиска
     lookup_skip_over: int = 20                # в ответе бота поиска N+ человек — лот сразу пропустить (0 = выкл)
     lookup_resolve_per_hour: int = 6          # не больше N новых @юзов в час на аккаунт (иначе FloodWait ~20 ч)
     lookup_name_check: bool = True            # найденный аккаунт должен называться так же, как владелец NFT
@@ -214,12 +214,12 @@ class Settings:
     sync_passes: int = 3                     # доп. проходы полной синхронизации, если выдача «уехала»
     resync_retry_seconds: float = 300.0
     max_same_collection_streak: int = 1      # не больше N отправок подряд из одной коллекции (0 = без лимита)
-    tracker_interval: float = 1.0
-    page_limit: int = 30
+    tracker_interval: float = 0.5            # ускорено (было 1.0)
+    page_limit: int = 50                     # ускорено: больше лотов за запрос (было 30)
     live_max_pages: int = 5
     recovery_max_pages: int = 20
-    catalog_interval: float = 1.0            # как часто смотреть счётчики всех коллекций (1 запрос); можно 0.3–0.5 для скорости
-    cold_poll_interval: float = 30.0        # страховочный опрос без изменений счётчика; новые лоты и так ловит каталог за 2с
+    catalog_interval: float = 0.5            # ускорено (было 1.0): как часто смотреть счётчики всех коллекций
+    cold_poll_interval: float = 15.0        # ускорено (было 30): страховочный опрос без изменений счётчика
     market_backup_minutes: float = 30.0      # как часто сохранять снимок рынка в Telegram
     market_snapshot_max_age_hours: float = 6.0
     collections: list[str] = field(default_factory=list)   # пусто = все коллекции
@@ -406,7 +406,7 @@ def _from_env() -> Settings:
         min_ton=_float(e("MIN_TON"), 0.0),
         max_above_floor=max(0, _int(e("MAX_ABOVE_FLOOR"), 0)),
         priority_floor=max(0, _int(e("PRIORITY_FLOOR"), 2500)),
-        priority_poll_interval=max(0.5, _float(e("PRIORITY_POLL_INTERVAL"), 2.5)),
+        priority_poll_interval=max(0.5, _float(e("PRIORITY_POLL_INTERVAL"), 1.5)),
         priority_share=min(0.9, max(0.1, _float(e("PRIORITY_SHARE"), 0.65))),
         max_lot_age=max(0, _int(e("MAX_LOT_AGE"), 600)),
         auto_remove_dead=_bool(e("AUTO_REMOVE_DEAD"), True),
@@ -428,9 +428,9 @@ def _from_env() -> Settings:
         start_fresh=_bool(e("START_FRESH"), True),
         lookup_check_onsale=_bool(e("LOOKUP_CHECK_ONSALE"), True),
         lookup_lang_filter=_bool(e("LOOKUP_LANG_FILTER"), False),
-        lookup_timeout=min(180.0, max(5.0, _float(e("LOOKUP_TIMEOUT"), 25.0))),
-        lookup_interval=min(600.0, max(0.0, _float(e("LOOKUP_INTERVAL"), 3.0))),
-        lookup_captcha_wait=min(7200.0, max(30.0, _float(e("LOOKUP_CAPTCHA_WAIT"), 600.0))),
+        lookup_timeout=min(180.0, max(5.0, _float(e("LOOKUP_TIMEOUT"), 15.0))),
+        lookup_interval=min(600.0, max(0.0, _float(e("LOOKUP_INTERVAL"), 1.5))),
+        lookup_captcha_wait=min(7200.0, max(30.0, _float(e("LOOKUP_CAPTCHA_WAIT"), 90.0))),
         lookup_skip_over=max(0, min(1000, _int(e("LOOKUP_SKIP_OVER"), 20))),
         lookup_resolve_per_hour=max(1, min(200, _int(e("LOOKUP_RESOLVE_PER_HOUR"), 6))),
         lookup_name_check=_bool(e("LOOKUP_NAME_CHECK"), True),
@@ -441,7 +441,7 @@ def _from_env() -> Settings:
         require_free_messages=_bool(e("REQUIRE_FREE_MESSAGES"), True),
         max_seller_nfts=max(0, _int(e("MAX_SELLER_NFTS"), 12)),
         max_seller_level=max(0, _int(e("MAX_SELLER_LEVEL"), 5)),
-        cold_poll_interval=max(1.0, _float(e("COLD_POLL_INTERVAL"), 30.0)),
+        cold_poll_interval=max(1.0, _float(e("COLD_POLL_INTERVAL"), 15.0)),
         market_backup_minutes=max(5.0, _float(e("MARKET_BACKUP_MINUTES"), 30.0)),
         market_snapshot_max_age_hours=max(0.5, _float(e("MARKET_SNAPSHOT_MAX_AGE_HOURS"), 6.0)),
         unique_sellers=_bool(e("UNIQUE_SELLERS"), True),
@@ -454,11 +454,11 @@ def _from_env() -> Settings:
         fast_sync_pages=max(1, min(20, _int(e("FAST_SYNC_PAGES"), 1))),
         resync_retry_seconds=max(10.0, _float(e("RESYNC_RETRY_SECONDS"), 300.0)),
         max_same_collection_streak=max(0, _int(e("MAX_SAME_COLLECTION_STREAK"), 1)),
-        tracker_interval=max(0.2, _float(e("TRACKER_INTERVAL"), 1.0)),
-        page_limit=max(1, min(100, _int(e("PAGE_LIMIT"), 30))),
+        tracker_interval=max(0.2, _float(e("TRACKER_INTERVAL"), 0.5)),
+        page_limit=max(1, min(100, _int(e("PAGE_LIMIT"), 50))),
         live_max_pages=max(1, _int(e("LIVE_MAX_PAGES"), 5)),
         recovery_max_pages=max(1, _int(e("RECOVERY_MAX_PAGES"), 20)),
-        catalog_interval=max(0.3, _float(e("CATALOG_INTERVAL"), 1.0)),
+        catalog_interval=max(0.3, _float(e("CATALOG_INTERVAL"), 0.5)),
         collections=_str_list(e("COLLECTIONS")),
         max_concurrent_sessions=max(1, _int(e("MAX_CONCURRENT_SESSIONS"), 20)),
         session_rps=max(0.05, _float(e("SESSION_RPS"), 1.0)),
