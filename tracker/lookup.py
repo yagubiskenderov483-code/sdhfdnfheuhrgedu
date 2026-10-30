@@ -311,6 +311,7 @@ class OwnerLookup:
         self._pending = 0
         self._cache: dict[str, tuple[float, list[Candidate]]] = {}
         self._started: set[tuple[str, str]] = set()      # (session, bot) — /start уже отправляли
+        self._bot_unresolvable: set[tuple[str, str]] = set()  # (session, bot) — у которого Telegram не находит username
         self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0,
                       "captcha": 0, "captcha_auto": 0, "too_many": 0, "from_memory": 0,
                       "no_candidates": 0, "nft_hidden": 0, "name_mismatch": 0, "trusted_match": 0}
@@ -563,10 +564,19 @@ class OwnerLookup:
                 self._started.add((session, bot))
             return await client.send_message(ent, cmd)
 
+        if (session, bot) in self._bot_unresolvable:
+            log.debug("Lookup: пропускаю %s — ранее не смогла резолвить @%s", session, bot)
+            return None
         try:
             sent = await self._run(session, _send)
         except Exception as e:
-            log.warning("Lookup: не удалось написать @%s с %s: %s", bot, session, e)
+            s = str(e)
+            # "No user has X as username" / "USERNAME_INVALID" / "USERNAME_NOT_OCCUPIED" — permanent
+            if "No user has" in s or "USERNAME" in s.upper():
+                self._bot_unresolvable.add((session, bot))
+                log.warning("Lookup: @%s не резолвится с %s — больше не пробуем с этого аккаунта", bot, session)
+            else:
+                log.warning("Lookup: не удалось написать @%s с %s: %s", bot, session, e)
             return None
         self._last_ask[session] = time.monotonic()
         sent_id = sent.id
@@ -692,18 +702,34 @@ class OwnerLookup:
             (ни одно не совпало — не больше LOOKUP_NOMATCH_CHECK первых);
           • не больше LOOKUP_RESOLVE_PER_HOUR новых юзов в час на аккаунт;
           • уже открытые юзы запоминаем и повторно не открываем."""
+        # дедуп: funstat часто возвращает одного и того же дважды (разные источники — @юз и ID)
+        seen_keys: set[str] = set()
+        unique_cands: list[Candidate] = []
+        for c in cands:
+            k = c.key()
+            if k not in seen_keys:
+                seen_keys.add(k)
+                unique_cands.append(c)
+        cands = unique_cands
+
         matched = [c for c in cands if c.name and same_name(c.name, seller_name)]
         todo = matched if matched else cands[:max(0, settings.lookup_nomatch_check)]
         # сначала те, кого можно открыть без resolveUsername (по ID из ответа бота)
         todo = sorted(todo, key=lambda c: c.user_id is None)
         todo = todo[:max(1, settings.lookup_max_candidates)]
-        # «один кандидат с совпавшим именем» — доверяем funstat без проверки видимости NFT
+        # «есть ровно одно совпадение по имени» — доверяем funstat даже без проверки видимости NFT
         # (многие прячут подарки → profile_has_gift даёт false даже у настоящего владельца)
         trust_without_nft = (settings.lookup_trust_name_match
                              and len(matched) == 1 and todo and todo[0] is matched[0])
+        resolve_blocked_matched: Candidate | None = None   # для fallback-доверия, если резолв упёрся в лимит
+
         for c in todo:
             peer = await self._input_user(session, c)
             if peer is None:
+                # резолв не прошёл (лимит/флуд). Если это кандидат с совпавшим именем —
+                # запомним как fallback: доверим ему, если ничего лучше не найдём.
+                if c in matched and resolve_blocked_matched is None:
+                    resolve_blocked_matched = c
                 continue
 
             if not trust_without_nft:
@@ -718,7 +744,7 @@ class OwnerLookup:
                     continue
             else:
                 self.stats["trusted_match"] += 1
-                llog("LOOKUP", f"{c.key()}: funstat вернул одного с совпадающим именем — "
+                llog("LOOKUP", f"{c.key()}: funstat вернул одного с совпавшим именем — "
                                f"верим без проверки NFT (LOOKUP_TRUST_NAME_MATCH)")
             # NFT у него в профиле — дополнительно сверяем НАСТОЯЩЕЕ имя аккаунта с именем владельца
             # и берём его ТЕКУЩИЙ @юз (база бота поиска бывает старой: юз мог перейти к другому человеку)
@@ -737,6 +763,15 @@ class OwnerLookup:
             uname = getattr(u, "username", None) or next(
                 (x.username for x in getattr(u, "usernames", None) or [] if getattr(x, "active", False)), None)
             return FoundOwner(peer.user_id, uname, real or seller_name, getattr(u, "premium", None), session)
+
+        # fallback: ничего не проверили из-за лимита резолва, но имя совпадало → доверяем funstat
+        if settings.lookup_trust_name_match and resolve_blocked_matched is not None:
+            c = resolve_blocked_matched
+            if c.user_id:
+                self.stats["trusted_match"] += 1
+                llog("LOOKUP", f"{c.key()}: резолв упёрся в лимит, но имя совпало — "
+                               f"доверяем funstat (LOOKUP_TRUST_NAME_MATCH)")
+                return FoundOwner(c.user_id, c.username, c.name or seller_name, None, None)
         return None
 
     async def _input_user(self, session: str, c: Candidate):
