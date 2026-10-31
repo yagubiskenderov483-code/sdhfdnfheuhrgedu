@@ -19,4 +19,5 @@ def username_link(username: str | None) -> str | None:
 
 
 def user_id_deeplink(user_id: int | None) -> str | None:
-    return f"tg://user?id={user_id}" if user_id else None
+    # Negative user_id — наши псевдо-ID (хеш username), tg:// их не откроет
+    return f"tg://user?id={user_id}" if (user_id and user_id > 0) else None

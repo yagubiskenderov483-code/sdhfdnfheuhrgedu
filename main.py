@@ -398,8 +398,7 @@ class App:
                     log.debug("housekeeping failed: %s", e)
             try:
                 ws = list(self.sessions.workers.values())
-                lk = getattr(self.app if False else self, "lookup", None) or getattr(self, "lookup", None)
-                lk_stats = (self.lookup.stats if hasattr(self, "lookup") else {})
+                lk_stats = self.lookup.stats if hasattr(self, "lookup") and self.lookup else {}
                 cur = (sum(w.requests for w in ws), sum(w.floods for w in ws), sum(w.errors for w in ws),
                        self.pipeline.stats.get("new", 0), self.pipeline.stats.get("sent", 0),
                        lk_stats.get("captcha", 0), lk_stats.get("captcha_auto", 0),
