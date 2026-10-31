@@ -109,10 +109,18 @@ def cache_pop(key: str) -> None:
         _cache_dirty = True
 
 
+_LAYER_HITS: dict[str, int] = {}      # сколько раз каждый слой матчера сработал
+
+
 def captcha_cache_stats() -> dict:
     """Для вывода в /panel."""
     _load_cache()
-    return {"size": len(_CAPTCHA_CACHE), "max": _CAPTCHA_CACHE_MAX, "path": _CAPTCHA_CACHE_PATH}
+    return {
+        "size": len(_CAPTCHA_CACHE),
+        "max": _CAPTCHA_CACHE_MAX,
+        "path": _CAPTCHA_CACHE_PATH,
+        "layer_hits": dict(_LAYER_HITS),
+    }
 
 
 def _env(name: str, default: str = "") -> str:
@@ -797,6 +805,7 @@ def _best_button_from_hypotheses(hyps: list[tuple[str, float]],
         if best_dist <= allowed and (second - best_dist) >= 1:
             log.info("Captcha vote[lev]: → кнопка %d (OCR %r → %r, dist %d/%d, second=%d)",
                      best_i, best_pair[0], best_pair[1], best_dist, allowed, second)
+            _LAYER_HITS["lev"] = _LAYER_HITS.get("lev", 0) + 1
             return best_i
 
     # ── 2) Префикс в 2 символа ──
@@ -813,6 +822,7 @@ def _best_button_from_hypotheses(hyps: list[tuple[str, float]],
         if best_votes >= 2 and best_votes > second_votes:
             log.info("Captcha vote[prefix2]: → кнопка %d (голосов %d/%d)",
                      best_i, best_votes, second_votes)
+            _LAYER_HITS["prefix2"] = _LAYER_HITS.get("prefix2", 0) + 1
             return best_i
 
     # ── 3) Первая буква + голосование ──
@@ -837,6 +847,7 @@ def _best_button_from_hypotheses(hyps: list[tuple[str, float]],
            (best_votes >= 2 and best_votes >= second_votes + 2):
             log.info("Captcha vote[first-letter]: → кнопка %d (голосов %d, уникально=%s, второй=%d)",
                      best_i, best_votes, unique, second_votes)
+            _LAYER_HITS["first-letter"] = _LAYER_HITS.get("first-letter", 0) + 1
             return best_i
 
     # ── 4) Подстрока: гипотеза ⊂ слово кнопки или наоборот ──
@@ -856,6 +867,7 @@ def _best_button_from_hypotheses(hyps: list[tuple[str, float]],
         if best_votes > second_votes:
             log.info("Captcha vote[substring]: → кнопка %d (голосов %d/%d)",
                      best_i, best_votes, second_votes)
+            _LAYER_HITS["substring"] = _LAYER_HITS.get("substring", 0) + 1
             return best_i
 
     log.info("Captcha vote: %d гипотез — ни один из 4 слоёв не дал ответа, пропуск", len(hyps))

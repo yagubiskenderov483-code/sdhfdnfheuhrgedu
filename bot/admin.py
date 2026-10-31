@@ -1338,11 +1338,16 @@ def build_routers(app: "App") -> list[Router]:
     _LOOKUP_TIMEOUTS = (15, 25, 40, 60)
 
     def _captcha_cache_line() -> str:
-        """Статус кеша решённых капч, если доступен."""
+        """Статус кеша решённых капч и распределения по слоям матчера."""
         try:
             from tracker.captcha_solver import captcha_cache_stats
             s = captcha_cache_stats()
-            return f"\nКеш решённых капч: {s['size']}/{s['max']}"
+            line = f"\nКеш решённых капч: {s['size']}/{s['max']}"
+            lh = s.get("layer_hits") or {}
+            if lh:
+                parts = ", ".join(f"{k}:{v}" for k, v in sorted(lh.items(), key=lambda x: -x[1]))
+                line += f"\nСлои матчера: {parts}"
+            return line
         except Exception:
             return ""
 
