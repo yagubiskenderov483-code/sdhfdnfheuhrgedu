@@ -646,8 +646,9 @@ class ListingPipeline:
         # - PAID_MESSAGES: пользователь явно не хочет (user: 'выдает людей с платным соо убери')
         # - TOO_MANY_NFTS / LEVEL_TOO_HIGH: пользовательские лимиты имеют смысл
         # Переопределяем только лингвистические/профильные (UNKNOWN_BLOCKED, FOREIGN_TEXT, PHONE_MISMATCH)
-        _HARD_REJECT_EVEN_IF_FOUND = {"BLACKLIST", "PAID_MESSAGES", "TOO_MANY_NFTS",
-                                      "LEVEL_TOO_HIGH", "LOOKUP_FAILED"}
+        # LOOKUP_FAILED убрано: если enrich упал, но funstat нашёл владельца — доверяем funstat'у
+        # (теряем paid-messages защиту для таких лотов, но лучше чем терять лот совсем).
+        _HARD_REJECT_EVEN_IF_FOUND = {"BLACKLIST", "PAID_MESSAGES", "TOO_MANY_NFTS", "LEVEL_TOO_HIGH"}
         if not sr.passed and l.owner_found_via and sr.code not in _HARD_REJECT_EVEN_IF_FOUND:
             llog("FILTER", f"#{l.listing_id} seller rejected by {sr.code} but owner found via lookup bot — overriding")
             self.stats["owner_override"] = self.stats.get("owner_override", 0) + 1
@@ -681,9 +682,11 @@ class ListingPipeline:
         # отбрасывать лот по max_seller_level не надо — это ломает полезный fallback.
         if (getattr(l, "seller_lookup_failed", False) and settings.max_seller_level > 0
                 and not getattr(l, "owner_trusted_no_resolve", False)
-                and not getattr(l, "owner_from_memory", False)):
+                and not getattr(l, "owner_from_memory", False)
+                and not l.owner_found_via):
             # профиль не прочитался ни с одного аккаунта → Level неизвестен; не шлём вслепую.
-            # Исключение: trusted/from_memory — owner уже проверен ранее, доверяем.
+            # Исключение: trusted/from_memory/owner_found_via — owner уже проверен (funstat или память),
+            # доверяем. Иначе теряем лот с реально найденным владельцем из-за временной перегрузки сессий.
             return SellerResult(False, "LOOKUP_FAILED", "seller profile unavailable (all accounts busy)")
 
         # Сначала проверяем то, что уже известно (сообщения, Level, язык), и только если продавец
