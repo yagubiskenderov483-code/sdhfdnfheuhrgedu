@@ -628,6 +628,7 @@ class OwnerLookup:
         deadline = time.monotonic() + max(5.0, settings.lookup_timeout)
         prev_sig, stable, last_cands = None, 0, []
         got_answer = False
+        captcha_rounds = 0        # защита от бесконечного цикла капча→клик→новая капча
         while time.monotonic() < deadline:
             await asyncio.sleep(1.0)
             try:
@@ -639,17 +640,20 @@ class OwnerLookup:
                 continue
             cap = next((m for m in msgs if is_captcha(m)), None)
             if cap is not None:
-                if not _retry:
+                if not _retry or captcha_rounds >= 3:
+                    # 3 капчи подряд на одном /human — больше не вяжемся, уходим
+                    if captcha_rounds >= 3:
+                        log.warning("Lookup: @%s зациклил капчу на %r (3-я подряд) — сдаёмся", bot, seller_name)
                     return None
+                captcha_rounds += 1
                 solved = await self._wait_captcha(session, bot, cap)
                 if not solved:
                     return None
-                # Капчу прошли. НЕ шлём новый /human — многие боты (включая funstat)
-                # после решения капчи сами достают из очереди предыдущую команду и отвечают.
-                # Повторная отправка /human → ещё одна капча → цикл.
-                # Вместо этого просто продляем дедлайн и ждём ответ на этот же sent_id.
+                # Капчу прошли. НЕ шлём новый /human — funstat после решения капчи
+                # САМ отвечает на предыдущую команду (повторная отправка → цикл).
+                # Продляем дедлайн, считаем сообщения ПОСЛЕ капчи, ждём ответ.
                 deadline = time.monotonic() + max(5.0, settings.lookup_timeout)
-                sent_id = cap.id          # теперь считаем сообщения ПОСЛЕ капчи, не после /human
+                sent_id = cap.id
                 prev_sig, stable, last_cands = None, 0, []
                 await asyncio.sleep(2.0)  # даём боту время обработать нажатие
                 continue
