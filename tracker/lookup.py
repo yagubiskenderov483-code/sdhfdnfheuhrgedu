@@ -401,25 +401,22 @@ class OwnerLookup:
             log.info("Lookup: кнопка %d на %s — funstat сказал неправильно (%r)",
                      index, c["session"], answer_text)
             try:
-                from .captcha_solver import _CAPTCHA_CACHE, _cache_key
+                from .captcha_solver import cache_pop, _cache_key
                 photo = c.get("photo")
                 if photo:
                     btn_texts = [t for t, _ in c["buttons"]]
-                    _CAPTCHA_CACHE.pop(_cache_key(photo, btn_texts), None)  # убираем кривой ответ
+                    cache_pop(_cache_key(photo, btn_texts))               # убираем кривой ответ
             except Exception:
                 pass
             # event НЕ ставим — пусть _wait_captcha продолжает ждать (новая капча или админ)
             return f"Нажал, но funstat сказал: {answer_text[:80]}"
         # ответ админа кешируем — следующая такая же капча пройдёт сама
         try:
-            from .captcha_solver import _CAPTCHA_CACHE, _CAPTCHA_CACHE_MAX, _cache_key
+            from .captcha_solver import cache_put, _cache_key
             photo = c.get("photo")
             if photo:
                 btn_texts = [t for t, _ in c["buttons"]]
-                _CAPTCHA_CACHE[_cache_key(photo, btn_texts)] = index
-                if len(_CAPTCHA_CACHE) > _CAPTCHA_CACHE_MAX:
-                    for k in list(_CAPTCHA_CACHE)[:_CAPTCHA_CACHE_MAX // 2]:
-                        _CAPTCHA_CACHE.pop(k, None)
+                cache_put(_cache_key(photo, btn_texts), index)
         except Exception:
             pass
         c["event"].set()

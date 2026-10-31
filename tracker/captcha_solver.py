@@ -42,9 +42,13 @@ from urllib.error import HTTPError, URLError
 log = logging.getLogger("captcha")
 
 # Кеш решённых капч: hash(image_bytes + buttons_signature) → индекс кнопки.
-# Живёт в памяти процесса, восстанавливается при рестарте — не страшно.
+# Персистится на диск (CAPTCHA_CACHE_PATH или /var/data/captcha_cache.json),
+# чтобы Render-деплои / рестарты не теряли накопленные ответы.
 _CAPTCHA_CACHE: dict[str, int] = {}
-_CAPTCHA_CACHE_MAX = 2000      # очищаем при превышении (lru-ish)
+_CAPTCHA_CACHE_MAX = 5000      # LRU-ish очистка при превышении
+_CAPTCHA_CACHE_PATH = (os.environ.get("CAPTCHA_CACHE_PATH") or "/var/data/captcha_cache.json").strip()
+_cache_loaded = False
+_cache_dirty = False
 
 
 def _cache_key(photo: bytes, buttons: list[str]) -> str:
@@ -53,9 +57,62 @@ def _cache_key(photo: bytes, buttons: list[str]) -> str:
     return f"{h}:{sig}"
 
 
+def _load_cache() -> None:
+    """Разово при первом обращении — читаем JSON с диска в _CAPTCHA_CACHE."""
+    global _cache_loaded
+    if _cache_loaded:
+        return
+    _cache_loaded = True
+    try:
+        if os.path.exists(_CAPTCHA_CACHE_PATH):
+            with open(_CAPTCHA_CACHE_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    if isinstance(k, str) and isinstance(v, int):
+                        _CAPTCHA_CACHE[k] = v
+            log.info("Captcha cache загружен: %d записей из %s",
+                     len(_CAPTCHA_CACHE), _CAPTCHA_CACHE_PATH)
+    except Exception as e:                                             # noqa: BLE001
+        log.warning("Captcha cache: не удалось прочитать %s: %s", _CAPTCHA_CACHE_PATH, e)
+
+
+def _save_cache() -> None:
+    """Записывает кеш на диск. Вызывать не чаще раза в минуту (при изменениях)."""
+    global _cache_dirty
+    if not _cache_dirty:
+        return
+    _cache_dirty = False
+    try:
+        os.makedirs(os.path.dirname(_CAPTCHA_CACHE_PATH) or ".", exist_ok=True)
+        tmp = _CAPTCHA_CACHE_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(_CAPTCHA_CACHE, f, ensure_ascii=False)
+        os.replace(tmp, _CAPTCHA_CACHE_PATH)
+    except Exception as e:                                             # noqa: BLE001
+        log.warning("Captcha cache: не удалось сохранить %s: %s", _CAPTCHA_CACHE_PATH, e)
+
+
+def cache_put(key: str, idx: int) -> None:
+    """Добавить в кеш (с LRU-очисткой и пометкой dirty для последующего сохранения)."""
+    global _cache_dirty
+    _CAPTCHA_CACHE[key] = idx
+    _cache_dirty = True
+    if len(_CAPTCHA_CACHE) > _CAPTCHA_CACHE_MAX:
+        for k in list(_CAPTCHA_CACHE)[:_CAPTCHA_CACHE_MAX // 4]:
+            _CAPTCHA_CACHE.pop(k, None)
+
+
+def cache_pop(key: str) -> None:
+    global _cache_dirty
+    if _CAPTCHA_CACHE.pop(key, None) is not None:
+        _cache_dirty = True
+
+
 def captcha_cache_stats() -> dict:
     """Для вывода в /panel."""
-    return {"size": len(_CAPTCHA_CACHE), "max": _CAPTCHA_CACHE_MAX}
+    _load_cache()
+    return {"size": len(_CAPTCHA_CACHE), "max": _CAPTCHA_CACHE_MAX, "path": _CAPTCHA_CACHE_PATH}
 
 
 def _env(name: str, default: str = "") -> str:
@@ -886,6 +943,7 @@ class CaptchaSolver:
         if not btns:
             return None
 
+        _load_cache()
         # 0) Кеш: та же картинка + те же кнопки → мгновенно отвечаем, без OCR (0 сек)
         ck = _cache_key(photo, btns)
         cached = _CAPTCHA_CACHE.get(ck)
@@ -897,11 +955,7 @@ class CaptchaSolver:
         if self._ocr_available:
             idx = await asyncio.to_thread(_ocr_and_match, photo, btns)
             if idx is not None:
-                # запоминаем для будущих повторов
-                _CAPTCHA_CACHE[ck] = idx
-                if len(_CAPTCHA_CACHE) > _CAPTCHA_CACHE_MAX:
-                    for k in list(_CAPTCHA_CACHE)[:_CAPTCHA_CACHE_MAX // 2]:
-                        _CAPTCHA_CACHE.pop(k, None)
+                cache_put(ck, idx)
                 return idx
 
         # 2) vision API

@@ -814,12 +814,19 @@ class App:
 
     async def _backup_loop(self) -> None:
         """История отправленного — раз в 10 мин (если что-то отправлено);
-        снимок рынка — когда все коллекции впервые в LIVE и далее раз в MARKET_BACKUP_MINUTES."""
+        снимок рынка — когда все коллекции впервые в LIVE и далее раз в MARKET_BACKUP_MINUTES.
+        Также каждую минуту сохраняем кеш решённых капч, если он изменился."""
         last_sent = self.pipeline.stats["sent"]
         last_hist = last_market = time.monotonic()
         market_saved_full = False
         while True:
             await asyncio.sleep(60)
+            # кеш капч — сохраняем часто и дёшево
+            try:
+                from tracker.captcha_solver import _save_cache
+                _save_cache()
+            except Exception:
+                pass
             if not self.storage.list_sessions():
                 continue
             now = time.monotonic()
@@ -838,6 +845,12 @@ class App:
 
     async def stop(self) -> None:
         log.info("Shutting down...")
+        # сохранить кеш капч при graceful shutdown — чтобы деплой не потерял накопленное
+        try:
+            from tracker.captcha_solver import _save_cache
+            _save_cache()
+        except Exception:
+            pass
         for t in self._tasks:
             if t.get_name() == "boot" and not t.done():
                 t.cancel()             # SIGTERM во время запуска — не стартуем трекер на выходе
