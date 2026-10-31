@@ -633,11 +633,14 @@ class ListingPipeline:
                 return pre
             return SellerResult(True, "OWNER_TRUSTED", "owner trusted via lookup bot (name match)")
         sr = await self._check_seller_found(l)
-        # Владелец найден через funstat: максимально мягкая фильтрация.
-        # Профиль мы прочитали, но funstat уже подтвердил что это нужный человек.
-        # Пропускаем всё кроме blacklist. Это требование юзера:
-        # 'чтоб ебаные лоты шли а не скипало фильтры эти все'.
-        if not sr.passed and l.owner_found_via and sr.code != "BLACKLIST":
+        # Владелец найден через funstat: мягкая фильтрация, НО не для «жёстких» причин:
+        # - BLACKLIST: сам пользователь банил
+        # - PAID_MESSAGES: пользователь явно не хочет (user: 'выдает людей с платным соо убери')
+        # - TOO_MANY_NFTS / LEVEL_TOO_HIGH: пользовательские лимиты имеют смысл
+        # Переопределяем только лингвистические/профильные (UNKNOWN_BLOCKED, FOREIGN_TEXT, PHONE_MISMATCH)
+        _HARD_REJECT_EVEN_IF_FOUND = {"BLACKLIST", "PAID_MESSAGES", "TOO_MANY_NFTS",
+                                      "LEVEL_TOO_HIGH", "LOOKUP_FAILED"}
+        if not sr.passed and l.owner_found_via and sr.code not in _HARD_REJECT_EVEN_IF_FOUND:
             llog("FILTER", f"#{l.listing_id} seller rejected by {sr.code} but owner found via lookup bot — overriding")
             return SellerResult(True, "OWNER_FOUND_OVERRIDE",
                                 f"owner found via lookup bot (ignored {sr.code})")
@@ -833,7 +836,19 @@ class ListingPipeline:
                 await self.db.update_listing(l)
                 return
         # дальше — обычная проверка и отправка; время поиска в «устаревание» лота не считаем
-        await self.process(ListingEvent(l, time.monotonic(), "lookup"))
+        try:
+            await self.process(ListingEvent(l, time.monotonic(), "lookup"))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # ЛЮБАЯ ошибка в process не должна убивать lookup worker-задачу молча — иначе
+            # пайплайн 'внезапно обрывается' (user: 'потом резко все обрывается')
+            log.exception("process(%s) после lookup упал — лот теряется", l.listing_id)
+            l.status, l.reason = ListingStatus.ERROR, "exception in process after lookup"
+            try:
+                await self.db.update_listing(l)
+            except Exception:
+                pass
 
     async def _still_on_sale(self, l: Listing) -> bool | None:
         """True — лот на маркете, False — продан/снят, None — не удалось проверить (не мешаем отправке)."""

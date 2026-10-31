@@ -534,19 +534,25 @@ def ocr_words(photo: bytes) -> list[tuple[str, float]]:
         (130, 6, False, False, 1.0, False),
         (145, 6, False, False, 1.0, False),
         (160, 6, False, False, 1.0, False),
-        # усиленный контраст — для бледных капч
+        # разные контрасты
+        (130, 6, False, False, 1.8, False),
         (130, 6, False, False, 2.5, False),
+        (130, 6, False, False, 3.5, False),
         # sharpen — для размытых
         (130, 6, False, True, 1.0, False),
+        (115, 6, False, True, 1.5, False),
         # инверсия — на случай светлый шрифт на тёмном фоне
         (130, 6, True, False, 1.0, False),
         # эрозия — утончает буквы, помогает на очень размытых где они сливаются
         (130, 6, False, False, 1.0, True),
         (115, 6, False, False, 1.0, True),
+        (130, 6, False, False, 2.0, True),
         # большой скейл — иногда помогает
+        (130, 8, False, False, 1.0, False),
         (130, 10, False, False, 1.0, False),
+        (115, 8, False, False, 2.0, False),
     ]
-    psms = (7, 8, 6, 13)
+    psms = (7, 8, 6, 13, 10)       # +10 — single char (на случай 1 буквы)
 
     try:
         for threshold, scale, inv, shrp, ctr, ero in variants:

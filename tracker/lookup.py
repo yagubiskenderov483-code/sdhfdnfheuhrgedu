@@ -216,16 +216,23 @@ def _emoji_only(t: str) -> bool:
 
 
 def is_captcha(msg: Any) -> bool:
-    """Бот поиска просит пройти капчу (картинка + «нажми кнопку с похожим значком»)."""
+    """Бот поиска просит пройти капчу (картинка + «нажми кнопку с похожим значком»).
+
+    Строгие требования — чтобы не словить /start-меню funstat с текстом про капчу:
+      1. Есть медиа (картинка-капча).
+      2. Есть кнопки с callback_data.
+      3. Либо кнопки — только эмодзи, либо в тексте есть слово про капчу.
+    """
     btns = _buttons(msg)
     cb = [t for t, d in btns if d]
-    if not cb:
+    if not cb or not (2 <= len(cb) <= 8):
         return False
-    if any(w in _plain(getattr(msg, "message", None) or "") for w in _CAPTCHA_WORDS):
-        return True
-    # по виду: картинка + 2-8 кнопок, на которых только значки (🦊 🐰 🐶)
     has_media = getattr(msg, "media", None) is not None or getattr(msg, "photo", None) is not None
-    return has_media and 2 <= len(cb) <= 8 and all(_emoji_only(t) for t in cb)
+    if not has_media:
+        return False       # без картинки это не капча (меню/напоминание)
+    all_emoji = all(_emoji_only(t) for t in cb)
+    has_captcha_word = any(w in _plain(getattr(msg, "message", None) or "") for w in _CAPTCHA_WORDS)
+    return all_emoji or has_captcha_word
 
 
 def _gift_matches(saved: Any, slug: str | None, unique_id: int | None) -> bool:
@@ -793,15 +800,21 @@ class OwnerLookup:
                 (x.username for x in getattr(u, "usernames", None) or [] if getattr(x, "active", False)), None)
             return FoundOwner(peer.user_id, uname, real or seller_name, getattr(u, "premium", None), session)
 
-        # fallback: ничего не проверили из-за лимита резолва, но имя совпадало → доверяем funstat
-        # ТОЛЬКО если у кандидата есть @username (иначе require_username всё равно режет лот).
-        if settings.lookup_trust_name_match and resolve_blocked_matched is not None:
-            c = resolve_blocked_matched
-            if c.user_id and c.username:
+        # fallback: ничего не проверили. Доверяем funstat если:
+        #   1) есть кандидат с совпавшим именем (resolve_blocked_matched), ИЛИ
+        #   2) funstat вернул ровно 1 кандидата с @username (сильный сигнал — если он
+        #      знает только одного такого юзера, то это он).
+        # Требование @username жёсткое — иначе require_username ниже отобьёт лот.
+        if settings.lookup_trust_name_match:
+            trust_cand = resolve_blocked_matched
+            if trust_cand is None and len(cands) == 1 and cands[0].user_id and cands[0].username:
+                trust_cand = cands[0]
+                llog("LOOKUP", f"{trust_cand.key()}: funstat вернул единственного кандидата с @юзом — "
+                               f"доверяем (LOOKUP_TRUST_NAME_MATCH)")
+            if trust_cand is not None and trust_cand.user_id and trust_cand.username:
                 self.stats["trusted_match"] += 1
-                llog("LOOKUP", f"{c.key()}: резолв упёрся в лимит, но имя совпало — "
-                               f"доверяем funstat (LOOKUP_TRUST_NAME_MATCH)")
-                return FoundOwner(c.user_id, c.username, c.name or seller_name, None, None)
+                return FoundOwner(trust_cand.user_id, trust_cand.username,
+                                  trust_cand.name or seller_name, None, None)
         return None
 
     async def _input_user(self, session: str, c: Candidate):

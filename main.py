@@ -306,6 +306,10 @@ class App:
                                    buttons: list[str]) -> None:
         """Бот поиска показал капчу — шлём её админам с теми же кнопками. Нажатие → кнопка жмётся
         на аккаунте поиска, поиск владельцев продолжается."""
+        # Без картинки это точно не капча (меню/напоминание funstat) — пользователю не кидаем
+        if not photo:
+            log.info("Captcha notify skipped — no photo (likely a text reminder, not real captcha)")
+            return
         from aiogram.types import BufferedInputFile, InlineKeyboardButton, InlineKeyboardMarkup
         bot_u = settings.lookup_bot_username
         row = [InlineKeyboardButton(text=t[:30] or "?", callback_data=f"cap:{token}:{i}"[:64])
