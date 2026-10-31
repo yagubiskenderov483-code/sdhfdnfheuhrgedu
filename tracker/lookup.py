@@ -746,6 +746,7 @@ class OwnerLookup:
 
             # ВСЕГДА пробуем сами. User явно просил не напрягать его капчами.
             if self._auto is not None and getattr(self._auto, "enabled", False) and photo and buttons:
+                t_start = time.monotonic()
                 try:
                     idx = await self._auto.solve(photo, [t for t, _ in buttons])
                 except Exception as e:                               # noqa: BLE001
@@ -756,7 +757,12 @@ class OwnerLookup:
                     # Успех (без текста "Нажал, но funstat сказал ..." → неправильно):
                     if res.startswith("Нажал") and "funstat сказал" not in res:
                         self.stats["captcha_auto"] += 1
-                        llog("LOOKUP", f"@{bot} на {session}: капчу решил авто-солвер → кнопка {idx + 1}")
+                        solve_time = time.monotonic() - t_start
+                        # EMA среднего времени решения
+                        avg = self.stats.get("captcha_auto_avg_sec", solve_time)
+                        self.stats["captcha_auto_avg_sec"] = avg * 0.8 + solve_time * 0.2
+                        llog("LOOKUP", f"@{bot} на {session}: капчу решил авто-солвер за {solve_time:.1f}s → "
+                                       f"кнопка {idx + 1}")
                         self._captcha.pop(token, None)
                         if self._captcha_by_session.get(session) == token:
                             self._captcha_by_session.pop(session, None)

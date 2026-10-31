@@ -1414,8 +1414,9 @@ def build_routers(app: "App") -> list[Router]:
                 f"скип (много людей): {lk.get('too_many', 0)} · "
                 f"в очереди: {len(app.pipeline._lookup_tasks)} · "
                 f"сейчас в капче: {app.lookup.pending_captchas()}\n"
-                f"Капч: {lk.get('captcha', 0)} (авто-решено: <b>{lk.get('captcha_auto', 0)}</b>, "
-                f"не смог: {lk.get('captcha_auto_fail', 0)})\n"
+                f"Капч: {lk.get('captcha', 0)} (авто-решено: <b>{lk.get('captcha_auto', 0)}</b>"
+                + (f" ~{lk['captcha_auto_avg_sec']:.1f}s/капча" if lk.get('captcha_auto_avg_sec') else "")
+                + f", не смог: {lk.get('captcha_auto_fail', 0)})\n"
                 f"Lookup timeouts: {lk.get('lookup_timeout', 0)}"
                 + _captcha_cache_line())
         return text, InlineKeyboardMarkup(inline_keyboard=rows)
