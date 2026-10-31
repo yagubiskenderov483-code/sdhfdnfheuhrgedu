@@ -936,11 +936,17 @@ class OwnerLookup:
                                 uid = getattr(peer, "user_id", None)
                         except Exception:
                             pass
+                # Если user_id всё равно нет, но есть username — делаем псевдо-ID
+                # (стабильный хеш от username) чтобы было куда прицепить seller_id/seller_key.
+                # Пост получит кнопку с t.me/<username> ссылкой.
+                if uid is None and trust_cand.username:
+                    import hashlib as _h
+                    # Отрицательный хеш чтобы не пересечься с настоящими Telegram ID (всегда положительные)
+                    uid = -(int(_h.md5(trust_cand.username.encode()).hexdigest()[:12], 16) & 0x7FFFFFFF)
+                    log.info("Lookup: trust_cand @%s без user_id → псевдо-ID %d (пост по @username)",
+                             trust_cand.username, uid)
                 if uid is None:
-                    # Нет user_id — не можем создать FoundOwner (seller_id обязателен для dedup)
-                    log.info("Lookup: trust_cand %s без user_id и не нашли в кеше — пропуск",
-                             trust_cand.key())
-                    return None
+                    return None   # ни username ни user_id — нечего постить
                 self.stats["trusted_match"] += 1
                 return FoundOwner(uid, trust_cand.username,
                                   trust_cand.name or seller_name, None, None)
