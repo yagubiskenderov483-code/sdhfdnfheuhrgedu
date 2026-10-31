@@ -1322,6 +1322,15 @@ def build_routers(app: "App") -> list[Router]:
 
     _LOOKUP_TIMEOUTS = (15, 25, 40, 60)
 
+    def _captcha_cache_line() -> str:
+        """Статус кеша решённых капч, если доступен."""
+        try:
+            from tracker.captcha_solver import captcha_cache_stats
+            s = captcha_cache_stats()
+            return f"\nКеш решённых капч: {s['size']}/{s['max']}"
+        except Exception:
+            return ""
+
     def _lookup_panel() -> tuple[str, InlineKeyboardMarkup]:
         """Подменю: какие аккаунты пишут боту поиска («/human имя») и как."""
         chosen = set(settings.lookup_sessions)
@@ -1389,8 +1398,10 @@ def build_routers(app: "App") -> list[Router]:
                 f"Без ответа: {lk.get('no_answer', 0)} · "
                 f"скип (много людей): {lk.get('too_many', 0)} · "
                 f"в очереди: {len(app.pipeline._lookup_tasks)}\n"
-                f"Капч: {lk.get('captcha', 0)} (авто-решено: <b>{lk.get('captcha_auto', 0)}</b>)\n"
-                f"Lookup timeouts: {lk.get('lookup_timeout', 0)}")
+                f"Капч: {lk.get('captcha', 0)} (авто-решено: <b>{lk.get('captcha_auto', 0)}</b>, "
+                f"не смог: {lk.get('captcha_auto_fail', 0)})\n"
+                f"Lookup timeouts: {lk.get('lookup_timeout', 0)}"
+                + _captcha_cache_line())
         return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
     @public.callback_query(F.data.startswith("cap:"))
