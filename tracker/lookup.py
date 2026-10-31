@@ -394,6 +394,8 @@ class OwnerLookup:
             return f"Не удалось нажать: {type(e).__name__}"
         # funstat/подобные боты могут ответить "Неверно!" или "Wrong!" в popup —
         # тогда ответ не нужно кешировать, и даже надо из кеша удалить (если был).
+        # ВАЖНО: НЕ ставим event — иначе _wait_captcha воспримет неверный клик как успех
+        # (админ в этом случае не получит шанс исправить, а funstat даст новую капчу → цикл).
         wrong_keywords = ("неверно", "wrong", "incorrect", "неправиль", "попробуй", "try again", "yana")
         if answer_text and any(w in answer_text.lower() for w in wrong_keywords):
             log.info("Lookup: кнопка %d на %s — funstat сказал неправильно (%r)",
@@ -406,7 +408,7 @@ class OwnerLookup:
                     _CAPTCHA_CACHE.pop(_cache_key(photo, btn_texts), None)  # убираем кривой ответ
             except Exception:
                 pass
-            c["event"].set()
+            # event НЕ ставим — пусть _wait_captcha продолжает ждать (новая капча или админ)
             return f"Нажал, но funstat сказал: {answer_text[:80]}"
         # ответ админа кешируем — следующая такая же капча пройдёт сама
         try:
@@ -744,7 +746,16 @@ class OwnerLookup:
                     log.warning("Lookup: авто-клик не прошёл (%s) — передаю админам", res)
                     self.stats["captcha_auto_fail"] = self.stats.get("captcha_auto_fail", 0) + 1
 
-            # 2) fallback — админ
+            # 2) без картинки — админ не сможет её решить, и без на кеш попасть нечему.
+            #    Не ждём 90с впустую, сразу уходим — лот попробует следующую сессию.
+            if photo is None:
+                log.warning("Lookup: @%s на %s — капча без картинки (download failed?), уходим без ожидания",
+                            bot, session)
+                self._captcha.pop(token, None)
+                if self._captcha_by_session.get(session) == token:
+                    self._captcha_by_session.pop(session, None)
+                return False
+            # 3) fallback — админ
             if self.on_captcha is None:
                 log.warning("Lookup: @%s просит капчу на %s — пройдите её вручную в этом аккаунте", bot, session)
                 self._captcha.pop(token, None)
