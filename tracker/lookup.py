@@ -503,11 +503,18 @@ class OwnerLookup:
             items = json.loads(raw) if raw else []
         except Exception:
             return []
+        # отрицательные id — pseudo (legacy до фикса в _remember). Фильтруем на чтении,
+        # чтобы старые записи не портили результат.
         return [Candidate(username=i.get("u"), user_id=i.get("id"), name=name)
-                for i in items if i.get("u") or i.get("id")]
+                for i in items if (i.get("u") or (i.get("id") and i["id"] > 0))]
 
     async def _remember(self, name: str, owner: FoundOwner) -> None:
         if self.db is None:
+            return
+        # Отрицательные user_id — наши псевдо-ID (хеш username) для dedup. Их нельзя сохранять
+        # в память как «уже найденный владелец» — будущие lookup'ы возьмут их из _known() и
+        # отдадут пайплайну бесполезный pseudo-ID вместо настоящего поиска через funstat.
+        if not owner.user_id or owner.user_id < 0:
             return
         key = f"owner:{_norm_name(name)}"
         try:
