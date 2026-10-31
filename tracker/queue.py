@@ -639,10 +639,12 @@ class ListingPipeline:
                 return pre
             return SellerResult(True, "OWNER_NOT_FOUND_SENT", "owner hidden, not found — sent with a note")
         # Владелец от funstat по доверию имени: профиль не читали, фильтры по профилю применить нечего.
-        # Проверяем только blacklist, остальное — пропускаем.
+        # Проверяем ТОЛЬКО то, что известно до профиля: blacklist по имени И платные сообщения
+        # (видны на самой странице маркета, не требуют запроса профиля). user: 'выдает людей с
+        # платным соо убери' — это правило работает и для trusted-fallback.
         if getattr(l, "owner_trusted_no_resolve", False):
             pre = self.seller_filter.check(l)
-            if pre.code == "BLACKLIST":
+            if pre.code in ("BLACKLIST", "PAID_MESSAGES"):
                 return pre
             self.stats["owner_trusted_sent"] = self.stats.get("owner_trusted_sent", 0) + 1
             return SellerResult(True, "OWNER_TRUSTED", "owner trusted via lookup bot (name match)")
