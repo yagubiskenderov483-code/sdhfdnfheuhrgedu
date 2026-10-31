@@ -141,12 +141,7 @@ class _Stale(Exception):
 
 
 _LANG_CODES = {"UNKNOWN_BLOCKED", "FOREIGN_TEXT", "PHONE_MISMATCH"}
-_HIDDEN_HARD_REJECT = {"BLACKLIST"}       # только blacklist режем сразу — остальные пускаем в funstat
-# раньше здесь были SHORT_NAME_HIDDEN / FOREIGN_LETTER_HIDDEN / FOREIGN_NAME_HIDDEN,
-# но так мы отсеивали ТЫСЯЧИ лотов (Kha/Runy/admin) до того, как спросить funstat.
-# Теперь: имя слишком короткое → всё равно спрашиваем бота поиска. Он сам ответит пусто
-# или даст кандидатов. Для коротких имён funstat обычно возвращает слишком много людей —
-# такое уходит в неgative-cache на час и больше не долбит.
+_HIDDEN_HARD_REJECT = {"BLACKLIST", "SHORT_NAME_HIDDEN", "FOREIGN_LETTER_HIDDEN", "FOREIGN_NAME_HIDDEN"}
 
 
 class ListingPipeline:
