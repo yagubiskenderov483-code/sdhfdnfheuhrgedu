@@ -382,14 +382,32 @@ class OwnerLookup:
         async def _click(client):
             ent = await client.get_input_entity(bot)
             try:
-                await client(GetBotCallbackAnswerRequest(peer=ent, msg_id=msg_id, data=data))
+                ans = await client(GetBotCallbackAnswerRequest(peer=ent, msg_id=msg_id, data=data))
+                return getattr(ans, "message", None) or ""
             except Exception as e:          # бот часто не отвечает на callback (timeout) — нажатие всё равно прошло
                 if "timeout" not in str(e).lower() and "BOT_RESPONSE_TIMEOUT" not in str(e):
                     raise
+                return ""
         try:
-            await self._run(c["session"], _click, timeout=20)
+            answer_text = await self._run(c["session"], _click, timeout=20)
         except Exception as e:
             return f"Не удалось нажать: {type(e).__name__}"
+        # funstat/подобные боты могут ответить "Неверно!" или "Wrong!" в popup —
+        # тогда ответ не нужно кешировать, и даже надо из кеша удалить (если был).
+        wrong_keywords = ("неверно", "wrong", "incorrect", "неправиль", "попробуй", "try again", "yana")
+        if answer_text and any(w in answer_text.lower() for w in wrong_keywords):
+            log.info("Lookup: кнопка %d на %s — funstat сказал неправильно (%r)",
+                     index, c["session"], answer_text)
+            try:
+                from .captcha_solver import _CAPTCHA_CACHE, _cache_key
+                photo = c.get("photo")
+                if photo:
+                    btn_texts = [t for t, _ in c["buttons"]]
+                    _CAPTCHA_CACHE.pop(_cache_key(photo, btn_texts), None)  # убираем кривой ответ
+            except Exception:
+                pass
+            c["event"].set()
+            return f"Нажал, но funstat сказал: {answer_text[:80]}"
         # ответ админа кешируем — следующая такая же капча пройдёт сама
         try:
             from .captcha_solver import _CAPTCHA_CACHE, _CAPTCHA_CACHE_MAX, _cache_key
@@ -714,7 +732,8 @@ class OwnerLookup:
                     log.warning("Lookup: авто-решатель капчи упал: %s", e)
                 if idx is not None:
                     res = await self.solve_captcha(token, idx)
-                    if res == "Нажал, продолжаю поиск":
+                    # Успех (без текста "Нажал, но funstat сказал ..." → неправильно):
+                    if res.startswith("Нажал") and "funstat сказал" not in res:
                         self.stats["captcha_auto"] += 1
                         llog("LOOKUP", f"@{bot} на {session}: капчу решил авто-солвер → кнопка {idx + 1}")
                         self._captcha.pop(token, None)
@@ -723,6 +742,7 @@ class OwnerLookup:
                         await asyncio.sleep(2.0)
                         return True
                     log.warning("Lookup: авто-клик не прошёл (%s) — передаю админам", res)
+                    self.stats["captcha_auto_fail"] = self.stats.get("captcha_auto_fail", 0) + 1
 
             # 2) fallback — админ
             if self.on_captcha is None:
