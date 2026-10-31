@@ -769,6 +769,15 @@ class OwnerLookup:
         если OCR вернул None (мусор, не читается)."""
         self.stats["captcha"] += 1
         token = f"{session}-{msg.id}"[-40:]
+        try:
+            return await self._wait_captcha_impl(session, bot, msg, token)
+        finally:
+            # Защита от утечек при любом сценарии (включая CancelledError)
+            self._captcha.pop(token, None)
+            if self._captcha_by_session.get(session) == token:
+                self._captcha_by_session.pop(session, None)
+
+    async def _wait_captcha_impl(self, session: str, bot: str, msg: Any, token: str) -> bool:
         if token not in self._captcha:
             buttons = _buttons(msg)
             ev = asyncio.Event()
