@@ -701,19 +701,23 @@ class OwnerLookup:
         self._last_response_text.pop(session, None)      # очистим перед новым запросом
         sent_id = sent.id
 
-        async def _poll(client):
+        async def _poll(client, min_id_arg):
             ent = await client.get_input_entity(bot)
-            msgs = await client.get_messages(ent, limit=10, min_id=sent_id)
+            if min_id_arg is None:
+                msgs = await client.get_messages(ent, limit=5)  # после капчи: читаем всё, вдруг funstat редактирует
+            else:
+                msgs = await client.get_messages(ent, limit=10, min_id=min_id_arg)
             return [m for m in reversed(msgs) if not getattr(m, "out", False)]
 
         deadline = time.monotonic() + max(5.0, settings.lookup_timeout)
         prev_sig, stable, last_cands = None, 0, []
         got_answer = False
         captcha_rounds = 0        # защита от бесконечного цикла капча→клик→новая капча
+        poll_min_id = sent_id     # после решения капчи ставим None (читаем всё — funstat может редактировать)
         while time.monotonic() < deadline:
             await asyncio.sleep(1.0)
             try:
-                msgs = await self._run(session, _poll, timeout=15)
+                msgs = await self._run(session, lambda c, _mid=poll_min_id: _poll(c, _mid), timeout=15)
             except Exception as e:
                 log.debug("Lookup poll failed: %s", e)
                 continue
@@ -732,9 +736,9 @@ class OwnerLookup:
                     return None
                 # Капчу прошли. НЕ шлём новый /human — funstat после решения капчи
                 # САМ отвечает на предыдущую команду (повторная отправка → цикл).
-                # Продляем дедлайн, считаем сообщения ПОСЛЕ капчи, ждём ответ.
+                # Продляем дедлайн, читаем ВСЕ последние (funstat может редактировать капча-сообщение).
                 deadline = time.monotonic() + max(5.0, settings.lookup_timeout)
-                sent_id = cap.id
+                poll_min_id = None     # после капчи: читаем все последние, не только с min_id
                 prev_sig, stable, last_cands = None, 0, []
                 await asyncio.sleep(2.0)  # даём боту время обработать нажатие
                 continue
