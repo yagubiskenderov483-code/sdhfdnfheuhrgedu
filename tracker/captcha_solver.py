@@ -648,7 +648,11 @@ def _ocr_and_match(photo: bytes, buttons: list[str]) -> Optional[int]:
     ]
     psms = (7, 8, 6, 13, 10)
 
-    base = _base_image(photo)
+    try:
+        base = _base_image(photo)
+    except Exception as e:                                             # noqa: BLE001
+        log.warning("OCR: cannot open image: %s", e)
+        return None
     if base is None:
         return None
     try:
