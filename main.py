@@ -662,7 +662,9 @@ class App:
                                               "Лоты идут медленнее. Подробнее: /sessions" + hint, 3600)
         last_new = self.pipeline.last_new_at
         quiet = time.time() - (last_new or self._started_at)
-        if lasting("no_lots", usable > 0 and quiet > 1800, 0):
+        # 10 минут без лотов — уже странно. user: '20 мин подряд потом стоп' — надо замечать раньше, пусть
+        # первым же сигналом будет сам алерт, а не «ладно, подождём ещё час»
+        if lasting("no_lots", usable > 0 and quiet > 600, 0):
             try:
                 why = "\n\n" + await self.why_report(1)
             except Exception:

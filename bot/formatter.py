@@ -202,7 +202,8 @@ class MessageFormatter:
 
         if l.seller_profile_link:
             seller_profile = html.escape(l.seller_profile_link)
-        elif l.seller_id:
+        elif l.seller_id and l.seller_id > 0:
+            # отрицательные ID — наши псевдо-ID (хеш username), пользователю ничего не говорят
             seller_profile = f"ID {l.seller_id}"
         else:
             seller_profile = DASH
@@ -252,7 +253,7 @@ class MessageFormatter:
             currency=_e(l.currency),
             seller_line=seller_line,
             seller_username=_e(f"@{l.seller_username}" if l.seller_username else None),
-            seller_id=_e(l.seller_id),
+            seller_id=_e(l.seller_id if (l.seller_id and l.seller_id > 0) else None),
             seller_name=_e(l.seller_name),
             seller_profile=seller_profile,
             seller_check=_e(l.seller_filter_result),

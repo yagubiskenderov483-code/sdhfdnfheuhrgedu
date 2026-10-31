@@ -177,6 +177,9 @@ class TelegramSender:
                     await asyncio.sleep(delay)
                 except TelegramBadRequest as e:
                     es = str(e)
+                    # Восстановления (смена markup/preview/thread) НЕ едят лимит attempts: иначе лот
+                    # с несколькими мелкими правками (reopen + drop markup + drop preview) ложно уходит
+                    # в "retries exhausted" ещё до первой реальной сетевой попытки.
                     # тема закрыта → пробуем открыть её (нужно право «Управление темами») и повторить
                     if extra and "TOPIC_CLOSED" in es and not reopened:
                         try:
@@ -184,6 +187,7 @@ class TelegramSender:
                             reopened = extra["message_thread_id"]     # закрывать обратно — только если открыли
                             log.info("Topic %s is closed — opened it for one post, will close again",
                                      extra["message_thread_id"])
+                            attempt -= 1
                             continue
                         except Exception as re_err:
                             log.warning("Topic %s is closed and cannot be reopened (%s). Open the topic "
@@ -196,16 +200,19 @@ class TelegramSender:
                         log.warning("Topic %s unavailable (%s) — posting to the main channel instead",
                                     extra.get("message_thread_id"), es)
                         extra = {}
+                        attempt -= 1
                         continue
                     # кнопка «Продавец» по ID запрещена приватностью продавца → без этой кнопки
                     if ("BUTTON_USER_PRIVACY_RESTRICTED" in es or "BUTTON_URL_INVALID" in es
                             or "BUTTON_USER_INVALID" in es):
                         if fallback_markup is not None and markup is not fallback_markup:
                             markup = fallback_markup
+                            attempt -= 1
                             continue
                     # например, битая ссылка превью — повторяем без превью
                     if preview.is_disabled is not True:      # (у aiogram там бывает Default(...), он «истинный»)
                         preview = LinkPreviewOptions(is_disabled=True)
+                        attempt -= 1
                         continue
                     log.error("Bot API bad request: %s", e)
                     return SendResult(False, error=str(e))
