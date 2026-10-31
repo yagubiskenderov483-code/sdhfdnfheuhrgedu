@@ -61,6 +61,7 @@ class Listing:
     owner_not_found: bool = False        # скрытый владелец не найден, лот отправлен с пометкой — НЕ в БД
     owner_found_via: str | None = None   # скрытый владелец найден ботом поиска (@бот) — НЕ в БД, для поста
     owner_trusted_no_resolve: bool = False  # владелец от funstat по доверию имени, без access_hash — НЕ в БД
+    owner_from_memory: bool = False       # владелец найден в нашей базе памяти (прежде верифицирован) — НЕ в БД
 
     stars_price: int | None = None
     ton_nano: int | None = None

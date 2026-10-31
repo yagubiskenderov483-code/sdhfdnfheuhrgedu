@@ -680,8 +680,10 @@ class ListingPipeline:
         # Владелец от funstat по доверию имени: профиль мы не читаем принципиально,
         # отбрасывать лот по max_seller_level не надо — это ломает полезный fallback.
         if (getattr(l, "seller_lookup_failed", False) and settings.max_seller_level > 0
-                and not getattr(l, "owner_trusted_no_resolve", False)):
-            # профиль не прочитался ни с одного аккаунта → Level неизвестен; не шлём вслепую
+                and not getattr(l, "owner_trusted_no_resolve", False)
+                and not getattr(l, "owner_from_memory", False)):
+            # профиль не прочитался ни с одного аккаунта → Level неизвестен; не шлём вслепую.
+            # Исключение: trusted/from_memory — owner уже проверен ранее, доверяем.
             return SellerResult(False, "LOOKUP_FAILED", "seller profile unavailable (all accounts busy)")
 
         # Сначала проверяем то, что уже известно (сообщения, Level, язык), и только если продавец
@@ -912,8 +914,10 @@ class ListingPipeline:
             # funstat выдал владельца по доверию имени, никакой session не резолвила access_hash
             # (fallback-trust_name_match). _enrich_seller его пропустит, лот пойдёт как есть.
             l.owner_trusted_no_resolve = True
-        # для from_memory: session_source=None, но owner_trusted_no_resolve НЕ ставим —
-        # пусть enrich попробует через любую сессию (кеш access_hash или свежий резолв)
+        else:
+            # from_memory: session_source=None, enrich попробует любую сессию. Если упадёт,
+            # LOOKUP_FAILED → мы помечаем owner_from_memory чтобы не блокировать.
+            l.owner_from_memory = True
         l.owner_found_via = settings.lookup_bot_username.lstrip("@")
         self.stats["owner_found"] = self.stats.get("owner_found", 0) + 1
         llog("FILTER", f"#{l.listing_id} hidden owner found via @{l.owner_found_via} → u{uid}"
