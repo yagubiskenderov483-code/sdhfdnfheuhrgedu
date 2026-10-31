@@ -51,7 +51,7 @@ def detected_at(l: Listing) -> str:
 def seller_url(l: Listing) -> str | None:
     if l.seller_profile_link:
         return l.seller_profile_link
-    if l.seller_type == "user" and l.seller_id:
+    if l.seller_type == "user" and l.seller_id and l.seller_id > 0:
         return f"tg://user?id={l.seller_id}"
     return None
 
@@ -181,8 +181,10 @@ class MessageFormatter:
         if l.seller_username:
             handle = f"@{l.seller_username}"
             seller_line = f'<a href="{html.escape(l.seller_profile_link or f"https://t.me/{l.seller_username}")}">{html.escape(handle)}</a>'
-        elif l.seller_type == "user" and l.seller_id:
-            # без @username — ссылка на профиль по ID и сам ID (можно скопировать и найти)
+        elif l.seller_type == "user" and l.seller_id and l.seller_id > 0:
+            # без @username — ссылка на профиль по ID и сам ID (можно скопировать и найти).
+            # ID > 0 проверяем: отрицательные — это наши псевдо-ID (хеш username для dedup),
+            # tg://user?id= с ними не работает.
             seller_line = (f'<a href="tg://user?id={l.seller_id}">{html.escape(l.seller_name or "профиль")}</a>'
                            f' · ID <code>{l.seller_id}</code>')
         elif l.seller_type == "address":
