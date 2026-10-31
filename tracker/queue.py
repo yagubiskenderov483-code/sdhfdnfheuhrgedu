@@ -576,15 +576,22 @@ class ListingPipeline:
         await self.db.update_listing(l)
 
     async def _sent_before(self, l: Listing) -> str | None:
-        if settings.unique_gifts and await self.db.gift_already_sent(l.gift_unique_id):
-            return "this gift was already sent"
-        if settings.unique_sellers and l.seller_key not in ("n", ""):
-            since = None
-            if settings.seller_repeat_hours > 0:
-                since = (datetime.now(timezone.utc) - timedelta(hours=settings.seller_repeat_hours)
-                         ).isoformat(timespec="seconds")
-            if await self.db.seller_already_sent(l.seller_key, since):
-                return "this seller was already sent"
+        try:
+            if settings.unique_gifts and await self.db.gift_already_sent(l.gift_unique_id):
+                return "this gift was already sent"
+            if settings.unique_sellers and l.seller_key not in ("n", ""):
+                since = None
+                if settings.seller_repeat_hours > 0:
+                    since = (datetime.now(timezone.utc) - timedelta(hours=settings.seller_repeat_hours)
+                             ).isoformat(timespec="seconds")
+                if await self.db.seller_already_sent(l.seller_key, since):
+                    return "this seller was already sent"
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            # БД может временно сбоить (блокировка, диск) — не ломаем pipeline, не блокируем лот
+            log.warning("_sent_before query failed for #%s: %s — assume not sent", l.listing_id, e)
+            return None
         return None
 
     async def _resolve_hidden_owner(self, l: Listing) -> None:
@@ -802,14 +809,16 @@ class ListingPipeline:
         try:
             found = await asyncio.wait_for(self._lookup_owner(l), timeout=timeout)
         except asyncio.TimeoutError:
-            log.warning("Owner lookup for %s timed out after %.0fs — освобождаем pipeline", l.listing_id, timeout)
+            log.warning("Owner lookup for %s (%r) timed out after %.0fs — освобождаем pipeline",
+                        l.listing_id, l.seller_name, timeout)
             found = False
             self.stats["lookup_timeout"] = self.stats.get("lookup_timeout", 0) + 1
         except asyncio.CancelledError:
             raise
-        except Exception:
-            log.exception("Owner lookup for %s failed", l.listing_id)
+        except Exception as e:
+            log.exception("Owner lookup for %s (%r) failed: %s", l.listing_id, l.seller_name, e)
             found = False
+            self.stats["lookup_exception"] = self.stats.get("lookup_exception", 0) + 1
         l.lookup_done = True
         # пока ждали бота поиска (очередь, капча), лот мог сильно устареть — такой не шлём
         if settings.lookup_max_age > 0:
