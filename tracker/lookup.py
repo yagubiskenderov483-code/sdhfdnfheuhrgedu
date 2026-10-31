@@ -434,8 +434,12 @@ class OwnerLookup:
             if ok:
                 self._rr = (getattr(self, "_rr", -1) + 1) % len(ok)
                 order = ok[self._rr:] + ok[:self._rr]
-                # свободные аккаунты (не ведут сейчас разговор с ботом) — первыми
-                return sorted(order, key=lambda n: (n in self._captcha_by_session, self._slock(n).locked()))
+                # приоритет: не в капче → свободная (lock не держится) → быстрая (speed выше)
+                def _rank(n):
+                    w = self.sessions.get(n)
+                    speed = getattr(w, "speed", 1.0) if w is not None else 0.0
+                    return (n in self._captcha_by_session, self._slock(n).locked(), -speed)
+                return sorted(order, key=_rank)
             return []
         # Отдельные аккаунты не выбраны → ищем с ОДНОГО аккаунта трекера. Если он во FloodWait —
         # ждём его, а не перескакиваем на следующий (иначе FloodWait по очереди ловят все аккаунты).
