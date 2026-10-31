@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import heapq
 import json
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -44,7 +45,7 @@ _WAIT_WORDS = ("ищу", "поиск", "подожд", "загруж", "search",
 # Rate-limit / слишком-часто сообщения: не считаем за «не найдено», не кешируем негативно
 _RATE_LIMIT_WORDS = ("слишком часто", "too fast", "slow down", "rate limit", "подожди", "не спеши",
                      "лимит", "ограниче", "too many requests", "флуд", "flood")
-_MAX_PENDING = 2000               # не больше N лотов в очереди на поиск (дальше — пропускаем)
+_MAX_PENDING = int(os.environ.get("LOOKUP_MAX_PENDING") or "5000")   # не больше N лотов в очереди на поиск
 _CACHE_TTL = 3600.0               # кандидаты по одному имени — час
 _NEG_CACHE_TTL = 3600.0           # «не найдено» по имени — час (не долбим funstat повторно)
 _LINE_RE = re.compile(r"\((?:@([A-Za-z][A-Za-z0-9_]{3,31})|id\s*(\d{3,12}))\)", re.I)
