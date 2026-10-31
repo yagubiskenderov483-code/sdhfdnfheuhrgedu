@@ -914,18 +914,35 @@ class OwnerLookup:
 
         # fallback: ничего не проверили. Доверяем funstat если:
         #   1) есть кандидат с совпавшим именем (resolve_blocked_matched), ИЛИ
-        #   2) funstat вернул ровно 1 кандидата с @username (сильный сигнал — если он
-        #      знает только одного такого юзера, то это он).
-        # Требование @username жёсткое — иначе require_username ниже отобьёт лот.
+        #   2) funstat вернул ровно 1 кандидата с @username или user_id.
+        # Нужен хотя бы ОДИН из них, чтобы было куда ссылаться. Если нет user_id —
+        # пробуем взять его из Telethon-кеша по username (бесплатно, без лимитов).
         if settings.lookup_trust_name_match:
             trust_cand = resolve_blocked_matched
-            if trust_cand is None and len(cands) == 1 and cands[0].user_id and cands[0].username:
+            if trust_cand is None and len(cands) == 1 and (cands[0].user_id or cands[0].username):
                 trust_cand = cands[0]
-                llog("LOOKUP", f"{trust_cand.key()}: funstat вернул единственного кандидата с @юзом — "
+                llog("LOOKUP", f"{trust_cand.key()}: funstat вернул единственного кандидата — "
                                f"доверяем (LOOKUP_TRUST_NAME_MATCH)")
-            if trust_cand is not None and trust_cand.user_id and trust_cand.username:
+            if trust_cand is not None and (trust_cand.user_id or trust_cand.username):
+                # Пытаемся заполнить недостающий user_id из локального кеша Telethon
+                uid = trust_cand.user_id
+                if uid is None and trust_cand.username:
+                    w = self.sessions.get(session)
+                    sess = getattr(getattr(w, "client", None), "session", None)
+                    if sess is not None:
+                        try:
+                            peer = sess.get_input_entity(trust_cand.username)
+                            if peer is not None:
+                                uid = getattr(peer, "user_id", None)
+                        except Exception:
+                            pass
+                if uid is None:
+                    # Нет user_id — не можем создать FoundOwner (seller_id обязателен для dedup)
+                    log.info("Lookup: trust_cand %s без user_id и не нашли в кеше — пропуск",
+                             trust_cand.key())
+                    return None
                 self.stats["trusted_match"] += 1
-                return FoundOwner(trust_cand.user_id, trust_cand.username,
+                return FoundOwner(uid, trust_cand.username,
                                   trust_cand.name or seller_name, None, None)
         return None
 
