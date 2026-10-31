@@ -695,6 +695,7 @@ class OwnerLookup:
                 log.warning("Lookup: не удалось написать @%s с %s: %s", bot, session, e)
             return None
         self._last_ask[session] = time.monotonic()
+        self._last_response_text.pop(session, None)      # очистим перед новым запросом
         sent_id = sent.id
 
         async def _poll(client):
