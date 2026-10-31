@@ -348,8 +348,13 @@ class OwnerLookup:
         # (шлёт админам картинку и кнопки); нажатие админа → solve_captcha(token, index).
         self.on_captcha = None
         try:
-            from .captcha_solver import CaptchaSolver
+            from .captcha_solver import CaptchaSolver, _load_cache, captcha_cache_stats
             self._auto = CaptchaSolver()
+            _load_cache()      # загружаем сохранённые ответы из файла
+            cs = captcha_cache_stats()
+            log.info("Captcha solver init: enabled=%s, ocr=%s, vision=%s, cache=%d/%d",
+                     self._auto.enabled, self._auto._ocr_available,
+                     self._auto._vision.enabled, cs["size"], cs["max"])
         except Exception as e:                               # noqa: BLE001
             log.warning("Lookup: авто-решатель капчи недоступен: %s", e)
             self._auto = None
