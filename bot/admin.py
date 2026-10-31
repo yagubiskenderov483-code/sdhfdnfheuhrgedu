@@ -1441,11 +1441,17 @@ def build_routers(app: "App") -> list[Router]:
         except (TypeError, ValueError):
             res = "Неизвестная кнопка"
         await q.answer(res)
+        # ❌ если funstat сказал что ответ неверный (res начинается с "Нажал, но funstat сказал")
+        # или если это "уже неактуальна" / "Неизвестная кнопка" — на успех не похоже; оставляем кнопки
+        # на сообщении, чтобы админ мог нажать другую (капча ещё активна).
+        success = res == "Нажал, продолжаю поиск"
         try:
             cap = q.message.caption if q.message.caption is not None else q.message.text
-            await (q.message.edit_caption if q.message.caption is not None else q.message.edit_text)(
-                **({"caption": f"{cap}\n\n✅ {res}"} if q.message.caption is not None
-                   else {"text": f"{cap}\n\n✅ {res}"}), reply_markup=None)
+            icon = "✅" if success else "❌"
+            kwargs = {"caption" if q.message.caption is not None else "text": f"{cap}\n\n{icon} {res}"}
+            if success:
+                kwargs["reply_markup"] = None     # оставляем кнопки на неудаче
+            await (q.message.edit_caption if q.message.caption is not None else q.message.edit_text)(**kwargs)
         except Exception:
             pass
 

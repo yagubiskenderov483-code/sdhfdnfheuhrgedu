@@ -952,7 +952,9 @@ class _VisionAPI:
                 payload = json.loads(r.read().decode("utf-8", "replace"))
             raw = payload["choices"][0]["message"]["content"].strip()
             return _norm_word(raw) or None
-        except (HTTPError, URLError, KeyError, json.JSONDecodeError, ValueError) as e:
+        except Exception as e:
+            # ЛЮБАЯ ошибка (сеть, таймаут сокета, JSON, индекс, что угодно) — просто откат на админа.
+            # Иначе исключение летит из потока в solve(), и капча не решается НИКАК.
             log.warning("Vision API failed: %s", e)
             return None
 
@@ -995,12 +997,19 @@ class CaptchaSolver:
                 cache_put(ck, idx)
                 return idx
 
-        # 2) vision API
+        # 2) vision API — защитимся от любых исключений, иначе капча не решается НИЧЕМ
         if self._vision.enabled:
-            word = await asyncio.wait_for(
-                asyncio.to_thread(self._vision.ask_word, photo),
-                timeout=self._vision.timeout + 5,
-            )
+            try:
+                word = await asyncio.wait_for(
+                    asyncio.to_thread(self._vision.ask_word, photo),
+                    timeout=self._vision.timeout + 5,
+                )
+            except asyncio.TimeoutError:
+                log.warning("Captcha solver: vision API timeout (%ds)", self._vision.timeout + 5)
+                word = None
+            except Exception as e:
+                log.warning("Captcha solver: vision API упал: %s", e)
+                word = None
             if word:
                 idx = match_word_to_button(word, btns)
                 if idx is not None:
