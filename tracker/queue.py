@@ -638,6 +638,7 @@ class ListingPipeline:
             pre = self.seller_filter.check(l)
             if pre.code == "BLACKLIST":
                 return pre
+            self.stats["owner_trusted_sent"] = self.stats.get("owner_trusted_sent", 0) + 1
             return SellerResult(True, "OWNER_TRUSTED", "owner trusted via lookup bot (name match)")
         sr = await self._check_seller_found(l)
         # Владелец найден через funstat: мягкая фильтрация, НО не для «жёстких» причин:
@@ -649,6 +650,7 @@ class ListingPipeline:
                                       "LEVEL_TOO_HIGH", "LOOKUP_FAILED"}
         if not sr.passed and l.owner_found_via and sr.code not in _HARD_REJECT_EVEN_IF_FOUND:
             llog("FILTER", f"#{l.listing_id} seller rejected by {sr.code} but owner found via lookup bot — overriding")
+            self.stats["owner_override"] = self.stats.get("owner_override", 0) + 1
             return SellerResult(True, "OWNER_FOUND_OVERRIDE",
                                 f"owner found via lookup bot (ignored {sr.code})")
         if (not sr.passed and l.owner_found_via and not settings.lookup_lang_filter
