@@ -635,16 +635,20 @@ def _ocr_and_match(photo: bytes, buttons: list[str]) -> Optional[int]:
         [(115, 6, False, False, 1.0, False),
          (130, 6, False, False, 1.0, False),
          (145, 6, False, False, 1.0, False)],
-        # Блок 2: остальные пороги + контраст
+        # Блок 2: остальные пороги + контраст + sharpen
         [(100, 6, False, False, 1.0, False),
          (160, 6, False, False, 1.0, False),
          (130, 6, False, False, 2.5, False),
-         (130, 6, False, True, 1.0, False)],
-        # Блок 3: тяжёлая артиллерия — erode, invert, большой скейл
+         (130, 6, False, True, 1.0, False),
+         (115, 6, False, True, 1.5, False)],
+        # Блок 3: тяжёлая артиллерия — erode, invert, большой скейл, экстремальный контраст
         [(130, 6, True, False, 1.0, False),
          (130, 6, False, False, 1.0, True),
          (115, 6, False, False, 1.0, True),
-         (130, 10, False, False, 1.0, False)],
+         (130, 10, False, False, 1.0, False),
+         (130, 6, False, False, 3.5, False),
+         (115, 8, False, True, 2.0, True),
+         (145, 6, False, True, 1.5, True)],
     ]
     psms = (7, 8, 6, 13, 10)
 

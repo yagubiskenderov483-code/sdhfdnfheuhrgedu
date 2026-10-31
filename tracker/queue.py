@@ -337,9 +337,11 @@ class ListingPipeline:
                 gid = l.gift_id
                 log.info("Seller %s: session %s unavailable (%s) — switching to another session",
                          uid, l.session_source, type(e).__name__)
+                # больше попыток для найденных через funstat лотов — не хотим потерять
+                attempts = 5 if l.owner_found_via else 3
                 try:
                     full, other = await self.sessions.run(lambda c: fetch_full_user_failover(c, uid, gid),
-                                                          attempts=3, timeout=20)
+                                                          attempts=attempts, timeout=25)
                     l.session_source = other      # дальнейшие проверки продавца — на рабочей session
                     self.stats["failover"] = self.stats.get("failover", 0) + 1
                 except Exception as e2:
