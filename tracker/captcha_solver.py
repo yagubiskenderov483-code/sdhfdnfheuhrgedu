@@ -562,21 +562,26 @@ def _try_import_ocr():
         return None
 
 
-def _preprocess(photo: bytes, threshold: int, scale: int, invert: bool = False,
-                sharpen: bool = False, contrast: float = 1.0, erode: bool = False):
-    """Пред-обработка капчи funstat: порог → апскейл → медианный фильтр.
-    Капчи funstat: маленькие (~120×48) бежевые, с «карандашным» шрифтом и зернистым фоном.
-    Tesseract плохо с ними справляется напрямую — обязательна бинаризация и увеличение.
-
-    invert — иногда tesseract лучше читает инверсию (чёрное на белом → белое на чёрном).
-    sharpen — для совсем размытых.
-    contrast — усилитель контраста до бинаризации (1.0 = норма, >1 жёстче)."""
+def _base_image(photo: bytes):
+    """Разово открывает и готовит grayscale+autocontrast изображение.
+    Возвращает PIL.Image или None (если Pillow/pytesseract не установлены)."""
     mods = _try_import_ocr()
     if mods is None:
         return None
-    _, Image, ImageOps, ImageFilter = mods
-    img = Image.open(io.BytesIO(photo)).convert("L")
-    img = ImageOps.autocontrast(img, cutoff=1)
+    _, Image, ImageOps, _ = mods
+    base = Image.open(io.BytesIO(photo)).convert("L")
+    base = ImageOps.autocontrast(base, cutoff=1)
+    return base
+
+
+def _preprocess_from_base(base, threshold: int, scale: int, invert: bool = False,
+                          sharpen: bool = False, contrast: float = 1.0, erode: bool = False):
+    """Применяет вариант обработки к уже готовому base-изображению."""
+    mods = _try_import_ocr()
+    if mods is None:
+        return None
+    from PIL import Image, ImageOps, ImageFilter
+    img = base
     if contrast != 1.0:
         from PIL import ImageEnhance
         img = ImageEnhance.Contrast(img).enhance(contrast)
@@ -589,8 +594,17 @@ def _preprocess(photo: bytes, threshold: int, scale: int, invert: bool = False,
     img = img.resize((w * scale, h * scale), Image.LANCZOS)
     img = img.filter(ImageFilter.MedianFilter(5))
     if erode:
-        img = img.filter(ImageFilter.MinFilter(3))     # «утончает» толстые буквы — помогает на размытых
+        img = img.filter(ImageFilter.MinFilter(3))
     return img
+
+
+# Обратная совместимость — используется в тестах/вызовах извне
+def _preprocess(photo: bytes, threshold: int, scale: int, invert: bool = False,
+                sharpen: bool = False, contrast: float = 1.0, erode: bool = False):
+    base = _base_image(photo)
+    if base is None:
+        return None
+    return _preprocess_from_base(base, threshold, scale, invert, sharpen, contrast, erode)
 
 
 def _ocr_and_match(photo: bytes, buttons: list[str]) -> Optional[int]:
@@ -626,11 +640,14 @@ def _ocr_and_match(photo: bytes, buttons: list[str]) -> Optional[int]:
     ]
     psms = (7, 8, 6, 13, 10)
 
+    base = _base_image(photo)
+    if base is None:
+        return None
     try:
         for block in blocks:
             for threshold, scale, inv, shrp, ctr, ero in block:
-                img = _preprocess(photo, threshold, scale, invert=inv, sharpen=shrp,
-                                  contrast=ctr, erode=ero)
+                img = _preprocess_from_base(base, threshold, scale, invert=inv, sharpen=shrp,
+                                            contrast=ctr, erode=ero)
                 if img is None:
                     return None
                 for psm in psms:
