@@ -173,12 +173,22 @@ def parse_candidates(messages: list[Any], bot_username: str) -> list[Candidate]:
 
 
 def same_name(a: str | None, b: str | None) -> bool:
-    """Имя продавца из маркета и имя из ответа бота поиска — одно и то же? Бот пишет «похожими»
-    буквами (ł вместо l и т.п.) и с украшениями, поэтому сравниваем только буквы/цифры."""
+    """Имя продавца из маркета и имя из ответа бота поиска — одно и то же?
+
+    Бот пишет «похожими» буквами (ł вместо l и т.п.) и с украшениями.
+    Сравниваем только буквы/цифры. Допускаем вложенность (один содержит другой):
+    'Alex' ⊂ 'Alex Trader'. Минимальная длина общей части — 4 символа чтоб
+    отсечь ложные ('An' в 'Anton' и 'Anna')."""
     def keep(t: str) -> str:              # буквы любых алфавитов + обычные цифры (୨ ୧ и т.п. — украшения)
         return "".join(ch for ch in _plain(t or "") if ch.isalpha() or ch in "0123456789")
     ca, cb = keep(a), keep(b)
-    return bool(ca) and ca == cb
+    if not ca or not cb:
+        return False
+    if ca == cb:
+        return True
+    # допускаем вложенность, если короткое имя ≥4 символов и полностью содержится в длинном
+    short, long = (ca, cb) if len(ca) <= len(cb) else (cb, ca)
+    return len(short) >= 4 and short in long
 
 
 def _buttons(msg: Any) -> list[tuple[str, bytes | None]]:
