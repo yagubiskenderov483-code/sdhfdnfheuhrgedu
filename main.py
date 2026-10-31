@@ -675,12 +675,13 @@ class App:
                               "@BotFather → /revoke, новый токен в BOT_TOKEN, репозиторий — приватный.", 3600)
 
     async def _watchdog_sent(self) -> None:
-        """Лоты находятся, но в группу ничего не уходит 30+ минут — сразу говорим админам почему."""
+        """Лоты находятся, но в группу ничего не уходит 10+ минут — сразу говорим админам почему.
+        Было 30 мин, но user: 'типо 20 мин подряд потом стоп' — надо замечать раньше."""
         if self.booting or self.coordinator.paused or self.coordinator.mode != "LIVE" or settings.test_mode:
             return
         last_new = self.pipeline.last_new_at
         last_sent = getattr(self.pipeline, "last_sent_at", None) or self._started_at
-        if not last_new or last_new <= last_sent or time.time() - last_sent < 1800:
+        if not last_new or last_new <= last_sent or time.time() - last_sent < 600:
             return
         try:
             why = await self.why_report(1)
