@@ -350,7 +350,12 @@ class OwnerLookup:
     async def find_owner(self, seller_name: str, slug: str | None, unique_id: int | None,
                          prio: float = 0.0, deadline: float | None = None) -> FoundOwner | None:
         """prio — чем меньше, тем раньше в очереди к боту поиска (передаём −цена: дорогие первыми)."""
-        if not self.enabled() or not seller_name or not (slug or unique_id):
+        if not self.enabled() or not (slug or unique_id):
+            return None
+        seller_name = (seller_name or "").strip()
+        # Защита: короткое/мусорное имя (<3 букв) → funstat вернёт слишком много людей →
+        # лучше сразу None чем тратить квоту
+        if len(seller_name) < 3:
             return None
         if self._pending >= _MAX_PENDING:
             self.stats["skipped"] += 1
