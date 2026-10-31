@@ -341,7 +341,7 @@ class OwnerLookup:
             self._auto = None
         self._captcha: dict[str, dict] = {}              # token → {session, bot, msg_id, buttons, event}
         self._captcha_by_session: dict[str, str] = {}    # session → token активной капчи
-        self._captcha_streak: dict[str, int] = {}        # session → подряд капч (сбрасывается при успехе)
+        # _captcha_streak удалён — теперь антизацикливание через captcha_rounds в _ask_bot_locked
         self._last_ask: dict[str, float] = {}            # session → когда последний раз писали боту
 
     # ------------------------------------------------------------------ public
@@ -701,7 +701,6 @@ class OwnerLookup:
                 await asyncio.sleep(2.0)  # даём боту время обработать нажатие
                 continue
             # funstat ответил чем-то кроме капчи — значит прошлая капча (если была) прошла нормально
-            self._captcha_streak.pop(session, None)
             got_answer = True
             last_cands = parse_candidates(msgs, bot)
             text = "\n".join((m.message or "") for m in msgs)
