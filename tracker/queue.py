@@ -824,8 +824,10 @@ class ListingPipeline:
             found = False
             self.stats["lookup_exception"] = self.stats.get("lookup_exception", 0) + 1
         l.lookup_done = True
-        # пока ждали бота поиска (очередь, капча), лот мог сильно устареть — такой не шлём
-        if settings.lookup_max_age > 0:
+        # пока ждали бота поиска (очередь, капча), лот мог сильно устареть.
+        # НО: если владелец найден — не бросаем по возрасту, пусть lookup_check_onsale решает
+        # (лот может быть ещё в продаже — он всё равно ценный).
+        if settings.lookup_max_age > 0 and not found:
             try:
                 age = (datetime.now(timezone.utc) - datetime.fromisoformat(l.first_seen)).total_seconds()
             except (TypeError, ValueError):
