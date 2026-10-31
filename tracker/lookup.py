@@ -914,15 +914,19 @@ class OwnerLookup:
 
         # fallback: ничего не проверили. Доверяем funstat если:
         #   1) есть кандидат с совпавшим именем (resolve_blocked_matched), ИЛИ
-        #   2) funstat вернул ровно 1 кандидата с @username или user_id.
-        # Нужен хотя бы ОДИН из них, чтобы было куда ссылаться. Если нет user_id —
-        # пробуем взять его из Telethon-кеша по username (бесплатно, без лимитов).
+        #   2) funstat вернул ровно 1 кандидата, ИЛИ
+        #   3) funstat вернул ≤3 кандидатов, берём ПЕРВОГО (funstat сортирует по релевантности).
+        # Это откроет множество лотов которые раньше терялись в 'NFT ни у кого не виден'.
         if settings.lookup_trust_name_match:
             trust_cand = resolve_blocked_matched
             if trust_cand is None and len(cands) == 1 and (cands[0].user_id or cands[0].username):
                 trust_cand = cands[0]
                 llog("LOOKUP", f"{trust_cand.key()}: funstat вернул единственного кандидата — "
                                f"доверяем (LOOKUP_TRUST_NAME_MATCH)")
+            elif trust_cand is None and 2 <= len(cands) <= 3 and (cands[0].user_id or cands[0].username):
+                trust_cand = cands[0]
+                llog("LOOKUP", f"{trust_cand.key()}: funstat вернул {len(cands)} кандидатов, "
+                               f"берём первого (топ-релевантность)")
             if trust_cand is not None and (trust_cand.user_id or trust_cand.username):
                 # Пытаемся заполнить недостающий user_id из локального кеша Telethon
                 uid = trust_cand.user_id
