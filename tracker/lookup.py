@@ -322,7 +322,9 @@ class OwnerLookup:
         # Экономит квоту и капчи: 'Maria' на разных лотах не долбим в funstat.
         self._neg_cache: dict[str, float] = {}
         self._started: set[tuple[str, str]] = set()      # (session, bot) — /start уже отправляли
-        self._bot_unresolvable: set[tuple[str, str]] = set()  # (session, bot) — у которого Telegram не находит username
+        # (session, bot) → когда отметили как unresolvable. Через 10 мин пробуем снова
+        # (сессия могла переподключиться, кеш Telegram мог обновиться).
+        self._bot_unresolvable: dict[tuple[str, str], float] = {}
         self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0,
                       "captcha": 0, "captcha_auto": 0, "too_many": 0, "from_memory": 0,
                       "no_candidates": 0, "nft_hidden": 0, "name_mismatch": 0, "trusted_match": 0}
@@ -603,17 +605,18 @@ class OwnerLookup:
                 self._started.add((session, bot))
             return await client.send_message(ent, cmd)
 
-        if (session, bot) in self._bot_unresolvable:
-            log.debug("Lookup: пропускаю %s — ранее не смогла резолвить @%s", session, bot)
+        unresolvable_since = self._bot_unresolvable.get((session, bot))
+        if unresolvable_since and time.monotonic() - unresolvable_since < 600:
+            log.debug("Lookup: пропускаю %s — ранее не смогла резолвить @%s (<10 мин назад)", session, bot)
             return None
         try:
             sent = await self._run(session, _send)
         except Exception as e:
             s = str(e)
-            # "No user has X as username" / "USERNAME_INVALID" / "USERNAME_NOT_OCCUPIED" — permanent
+            # "No user has X as username" / "USERNAME_INVALID" / "USERNAME_NOT_OCCUPIED" — через 10 мин попробуем снова
             if "No user has" in s or "USERNAME" in s.upper():
-                self._bot_unresolvable.add((session, bot))
-                log.warning("Lookup: @%s не резолвится с %s — больше не пробуем с этого аккаунта", bot, session)
+                self._bot_unresolvable[(session, bot)] = time.monotonic()
+                log.warning("Lookup: @%s не резолвится с %s — на 10 мин не пробуем", bot, session)
             else:
                 log.warning("Lookup: не удалось написать @%s с %s: %s", bot, session, e)
             return None
