@@ -489,9 +489,8 @@ class ListingPipeline:
             return
         llog("FILTER", f"#{l.listing_id} price passed")
 
-        if (settings.require_username and l.seller_type is not None and not l.seller_username
-                and not l.owner_found_via and not getattr(l, "owner_trusted_no_resolve", False)):
-            # продавец виден, но @юза у него нет и funstat ещё не нашёл — такой лот не нужен
+        if settings.require_username and l.seller_type is not None and not l.seller_username:
+            # продавец виден, но @юза у него нет — такой лот не нужен (user: 'выдает где юза нет')
             await self._reject_no_username(l)
             return
         if l.seller_type is None and not getattr(l, "lookup_done", False):
@@ -563,11 +562,7 @@ class ListingPipeline:
             await self.db.update_listing(l)
             return
         llog("FILTER", f"#{l.listing_id} seller passed ({sr.code})")
-        # require_username обходим если владелец найден через funstat — у него может быть
-        # только user_id без @юза (это норм, можно открыть профиль по tg://user?id=...)
-        if (settings.require_username and not l.seller_username
-                and not l.owner_found_via
-                and not getattr(l, "owner_trusted_no_resolve", False)):
+        if settings.require_username and not l.seller_username:
             await self._reject_no_username(l)
             return
         await self._send_stage(ev, l, base, t_start)

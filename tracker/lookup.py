@@ -624,8 +624,15 @@ class OwnerLookup:
                 solved = await self._wait_captcha(session, bot, cap)
                 if not solved:
                     return None
-                # капчу прошли — повторяем запрос (бот обычно не выполняет команду, на которой спросил капчу)
-                return await self._ask_bot_locked(session, bot, seller_name, _retry=False)
+                # Капчу прошли. НЕ шлём новый /human — многие боты (включая funstat)
+                # после решения капчи сами достают из очереди предыдущую команду и отвечают.
+                # Повторная отправка /human → ещё одна капча → цикл.
+                # Вместо этого просто продляем дедлайн и ждём ответ на этот же sent_id.
+                deadline = time.monotonic() + max(5.0, settings.lookup_timeout)
+                sent_id = cap.id          # теперь считаем сообщения ПОСЛЕ капчи, не после /human
+                prev_sig, stable, last_cands = None, 0, []
+                await asyncio.sleep(2.0)  # даём боту время обработать нажатие
+                continue
             # funstat ответил чем-то кроме капчи — значит прошлая капча (если была) прошла нормально
             self._captcha_streak.pop(session, None)
             got_answer = True
@@ -787,9 +794,10 @@ class OwnerLookup:
             return FoundOwner(peer.user_id, uname, real or seller_name, getattr(u, "premium", None), session)
 
         # fallback: ничего не проверили из-за лимита резолва, но имя совпадало → доверяем funstat
+        # ТОЛЬКО если у кандидата есть @username (иначе require_username всё равно режет лот).
         if settings.lookup_trust_name_match and resolve_blocked_matched is not None:
             c = resolve_blocked_matched
-            if c.user_id:
+            if c.user_id and c.username:
                 self.stats["trusted_match"] += 1
                 llog("LOOKUP", f"{c.key()}: резолв упёрся в лимит, но имя совпало — "
                                f"доверяем funstat (LOOKUP_TRUST_NAME_MATCH)")
