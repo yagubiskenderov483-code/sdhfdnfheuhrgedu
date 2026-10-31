@@ -398,8 +398,12 @@ class App:
                     log.debug("housekeeping failed: %s", e)
             try:
                 ws = list(self.sessions.workers.values())
+                lk = getattr(self.app if False else self, "lookup", None) or getattr(self, "lookup", None)
+                lk_stats = (self.lookup.stats if hasattr(self, "lookup") else {})
                 cur = (sum(w.requests for w in ws), sum(w.floods for w in ws), sum(w.errors for w in ws),
-                       self.pipeline.stats.get("new", 0), self.pipeline.stats.get("sent", 0))
+                       self.pipeline.stats.get("new", 0), self.pipeline.stats.get("sent", 0),
+                       lk_stats.get("captcha", 0), lk_stats.get("captcha_auto", 0),
+                       lk_stats.get("found", 0))
                 if prev is not None:
                     d = [a - b for a, b in zip(cur, prev)]
                     pings = [w.ping_ms for w in ws if getattr(w, "ping_ms", None)]
@@ -407,12 +411,16 @@ class App:
                     lat = self.pipeline.latency
                     self.bench = {"req": d[0], "flood": d[1], "err": d[2], "new": d[3], "sent": d[4],
                                   "ping": (sum(pings) / len(pings)) if pings else None, "slow": slow}
+                    extra = ""
+                    if d[5] or d[6] or d[7]:
+                        extra = f" | funstat: found={d[7]} captcha={d[5]} (авто={d[6]})"
                     log.info("BENCH 60s: requests=%s (%.1f/s) floods=%s errors=%s new=%s sent=%s ping=%s "
-                             "slowed_sessions=%s | lot: request=%s queue=%s check=%s send=%s total=%s",
+                             "slowed_sessions=%s | lot: request=%s queue=%s check=%s send=%s total=%s%s",
                              d[0], d[0] / 60, d[1], d[2], d[3], d[4],
                              f"{self.bench['ping']:.0f}ms" if self.bench["ping"] else "-", slow,
                              *(f"{lat[k]:.2f}s" if k in lat else "-"
-                               for k in ("request", "queue", "check", "send", "total")))
+                               for k in ("request", "queue", "check", "send", "total")),
+                             extra)
                 prev = cur
             except Exception as e:
                 log.debug("bench failed: %s", e)
