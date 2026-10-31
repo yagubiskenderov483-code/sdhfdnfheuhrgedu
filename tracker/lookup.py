@@ -430,15 +430,17 @@ class OwnerLookup:
                 pass
             # event НЕ ставим — пусть _wait_captcha продолжает ждать (новая капча или админ)
             return f"Нажал, но funstat сказал: {answer_text[:80]}"
-        # ответ админа кешируем — следующая такая же капча пройдёт сама
-        try:
-            from .captcha_solver import cache_put, _cache_key
-            photo = c.get("photo")
-            if photo:
-                btn_texts = [t for t, _ in c["buttons"]]
-                cache_put(_cache_key(photo, btn_texts), index)
-        except Exception:
-            pass
+        # ответ админа кешируем — следующая такая же капча пройдёт сама.
+        # НО не кешируем если answer_text пустой (callback timeout — не уверены что клик дошёл).
+        if answer_text:
+            try:
+                from .captcha_solver import cache_put, _cache_key
+                photo = c.get("photo")
+                if photo:
+                    btn_texts = [t for t, _ in c["buttons"]]
+                    cache_put(_cache_key(photo, btn_texts), index)
+            except Exception:
+                pass
         c["event"].set()
         return "Нажал, продолжаю поиск"
 
