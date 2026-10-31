@@ -653,11 +653,15 @@ class ListingPipeline:
         # - BLACKLIST: сам пользователь банил
         # - PAID_MESSAGES: пользователь явно не хочет (user: 'выдает людей с платным соо убери')
         # - TOO_MANY_NFTS / LEVEL_TOO_HIGH: пользовательские лимиты имеют смысл
-        # Переопределяем только лингвистические/профильные (UNKNOWN_BLOCKED, FOREIGN_TEXT, PHONE_MISMATCH)
+        # Переопределяем только лингвистические/профильные (UNKNOWN_BLOCKED, FOREIGN_TEXT, PHONE_MISMATCH),
+        # и только если LOOKUP_LANG_FILTER=False (при True — язык проверяется даже для found).
         # LOOKUP_FAILED убрано: если enrich упал, но funstat нашёл владельца — доверяем funstat'у
         # (теряем paid-messages защиту для таких лотов, но лучше чем терять лот совсем).
         _HARD_REJECT_EVEN_IF_FOUND = {"BLACKLIST", "PAID_MESSAGES", "TOO_MANY_NFTS", "LEVEL_TOO_HIGH"}
-        if not sr.passed and l.owner_found_via and sr.code not in _HARD_REJECT_EVEN_IF_FOUND:
+        # Если LOOKUP_LANG_FILTER включён, не override'им лингвистические отказы
+        skip_override = sr.code in _LANG_CODES and settings.lookup_lang_filter
+        if (not sr.passed and l.owner_found_via and sr.code not in _HARD_REJECT_EVEN_IF_FOUND
+                and not skip_override):
             llog("FILTER", f"#{l.listing_id} seller rejected by {sr.code} but owner found via lookup bot — overriding")
             self.stats["owner_override"] = self.stats.get("owner_override", 0) + 1
             return SellerResult(True, "OWNER_FOUND_OVERRIDE",

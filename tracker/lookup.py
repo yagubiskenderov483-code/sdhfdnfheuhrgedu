@@ -894,6 +894,9 @@ class OwnerLookup:
         trust_without_nft = (settings.lookup_trust_name_match
                              and len(matched) == 1 and todo and todo[0] is matched[0])
         resolve_blocked_matched: Candidate | None = None   # для fallback-доверия, если резолв упёрся в лимит
+        # кандидаты, которых мы ТОЧНО проверили (резолв прошёл) и забраковали (NFT нет / имя не то).
+        # Их НЕЛЬЗЯ брать в trust-fallback: мы уже знаем, что это не владелец.
+        verified_rejected: set[str] = set()
 
         for c in todo:
             peer = await self._input_user(session, c)
@@ -913,6 +916,7 @@ class OwnerLookup:
                     log.debug("Lookup: подарки %s не прочитались: %s", c.key(), e)
                     continue
                 if not ok:
+                    verified_rejected.add(c.key())
                     continue
             else:
                 self.stats["trusted_match"] += 1
@@ -931,26 +935,35 @@ class OwnerLookup:
             if settings.lookup_name_check and not same_name(real, seller_name):
                 self.stats["name_mismatch"] = self.stats.get("name_mismatch", 0) + 1
                 llog("LOOKUP", f"{c.key()}: NFT есть, но имя {real!r} ≠ {seller_name!r} — не он")
+                verified_rejected.add(c.key())
                 continue
             uname = getattr(u, "username", None) or next(
                 (x.username for x in getattr(u, "usernames", None) or [] if getattr(x, "active", False)), None)
             return FoundOwner(peer.user_id, uname, real or seller_name, getattr(u, "premium", None), session)
 
-        # fallback: ничего не проверили. Доверяем funstat если:
-        #   1) есть кандидат с совпавшим именем (resolve_blocked_matched), ИЛИ
-        #   2) funstat вернул ровно 1 кандидата, ИЛИ
-        #   3) funstat вернул ≤3 кандидатов, берём ПЕРВОГО (funstat сортирует по релевантности).
+        # fallback: ничего не проверили (все резолвы упёрлись в лимит, или cands.name пустые).
+        # Доверяем funstat если:
+        #   1) есть кандидат с совпавшим именем, резолв которого упёрся в лимит, ИЛИ
+        #   2) funstat вернул ровно 1 кандидата (всего), ИЛИ
+        #   3) funstat вернул ≤3 кандидатов, из которых только ОДИН совпал по имени — берём его.
         # Это откроет множество лотов которые раньше терялись в 'NFT ни у кого не виден'.
-        if settings.lookup_trust_name_match:
+        # ВАЖНО: если МЫ УЖЕ проверили хотя бы одного кандидата и ЗАБРАКОВАЛИ (NFT нет / имя не то)
+        # — не доверяем funstat'у ВООБЩЕ. База funstat может быть стара, а наша проверка — свежая правда.
+        if settings.lookup_trust_name_match and not verified_rejected:
             trust_cand = resolve_blocked_matched
-            if trust_cand is None and len(cands) == 1 and (cands[0].user_id or cands[0].username):
-                trust_cand = cands[0]
-                llog("LOOKUP", f"{trust_cand.key()}: funstat вернул единственного кандидата — "
-                               f"доверяем (LOOKUP_TRUST_NAME_MATCH)")
-            elif trust_cand is None and 2 <= len(cands) <= 3 and (cands[0].user_id or cands[0].username):
-                trust_cand = cands[0]
-                llog("LOOKUP", f"{trust_cand.key()}: funstat вернул {len(cands)} кандидатов, "
-                               f"берём первого (топ-релевантность)")
+            if trust_cand is None and len(cands) == 1:
+                c0 = cands[0]
+                if c0.user_id or c0.username:
+                    trust_cand = c0
+                    llog("LOOKUP", f"{trust_cand.key()}: funstat вернул единственного кандидата — "
+                                   f"доверяем (LOOKUP_TRUST_NAME_MATCH)")
+            elif trust_cand is None and 2 <= len(cands) <= 3:
+                # берём только из тех, кто совпал по имени
+                matched_valid = [c for c in matched if c.user_id or c.username]
+                if len(matched_valid) == 1:
+                    trust_cand = matched_valid[0]
+                    llog("LOOKUP", f"{trust_cand.key()}: funstat вернул {len(cands)} кандидатов, "
+                                   f"один из них совпал по имени — доверяем ему")
             if trust_cand is not None and (trust_cand.user_id or trust_cand.username):
                 # Пытаемся заполнить недостающий user_id из локального кеша Telethon
                 uid = trust_cand.user_id

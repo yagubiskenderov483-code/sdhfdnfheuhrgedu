@@ -189,13 +189,21 @@ async def main():
             self.clicked = None
 
         async def get_messages(self, ent, limit=10, min_id=0):
-            if min_id and not self.solved:
+            if not self.solved:
+                # до решения капчи любой опрос возвращает капчу (min_id ещё не поставлен в None)
+                if min_id == 0:
+                    return []
                 kb = types.ReplyInlineMarkup(rows=[types.KeyboardInlineButtonRow(buttons=[
                     types.KeyboardInlineButton(text=e, type=types.InlineButtonTypeCallback(data=d))
                     for e, d in (("🦊", b"a"), ("🐰", b"b"), ("🐶", b"c"))])])
-                return [bot_msg(min_id + 1, "⚠️ Cαptchα.\nCʟick тhe buттon wiтh тhe icoŋ тhaт looкs liкe тhe picтure.",
-                                None, kb)]
-            return await super().get_messages(ent, limit, min_id)
+                m = bot_msg(min_id + 1, "⚠️ Cαptchα.\nCʟick тhe buттon wiтh тhe icoŋ тhaт looкs liкe тhe picтure.",
+                            None, kb)
+                m.media = types.MessageMediaPhoto(photo=None)   # is_captcha требует фото
+                return [m]
+            # после капчи: lookup.py ставит min_id=None → _poll вызывает без min_id (limit=5).
+            # Эмулируем funstat: отвечает списком кандидатов. Передаём 1 как min_id в super,
+            # чтобы получить обычный ответ (super не умеет работать с min_id=0).
+            return await super().get_messages(ent, limit, max(1, min_id))
 
         async def download_media(self, msg, file=None):
             return b"img"
@@ -220,7 +228,8 @@ async def main():
     check(got.get("buttons") == ["🦊", "🐰", "🐶"] and got.get("photo") == b"img", "капча пришла админу с кнопками")
     check(cc.clicked == b"a", "нажатие админа передано боту поиска")
     check(f is not None and f.user_id == 222, "после капчи поиск продолжился и нашёл владельца")
-    check(cc.sent.count("/human Иван Иванов") == 2, "команда повторена после капчи")
+    # после капчи funstat САМ отвечает на предыдущую /human — повторная отправка создала бы цикл
+    check(cc.sent.count("/human Иван Иванов") == 1, "команда НЕ повторена после капчи (funstat сам отвечает)")
 
     # капча без узнаваемого текста: картинка + кнопки-значки
     kb = types.ReplyInlineMarkup(rows=[types.KeyboardInlineButtonRow(buttons=[
@@ -303,13 +312,18 @@ async def main():
     check(f is not None and f.username == "ivan_real" and FakeClient.resolves == 1,
           "из 11 человек открыт только 1 (совпал по имени)")
 
-    # лимит новых юзов в час на аккаунт
+    # лимит новых юзов в час на аккаунт.
+    # LOOKUP_TRUST_NAME_MATCH=True (новое поведение) — если имя совпало, берём из trust-fallback
+    # даже без успешного резолва. Проверяем ТОЛЬКО что лимит засчёлся.
     settings.lookup_resolve_per_hour = 1
+    _old_trust = settings.lookup_trust_name_match
+    settings.lookup_trust_name_match = False
     lk = L.OwnerLookup(FakeSessions(FakeClient(REPLY, gifts, users)))
     lk._resolves["session_001"] = [__import__("time").monotonic()]
     check(await lk.find_owner("Иван Иванов", "PlushPepe-77", 5555) is None and lk.stats.get("resolve_limit"),
           "лимит юзов в час исчерпан → не открываем, а пропускаем")
     settings.lookup_resolve_per_hour = 6
+    settings.lookup_trust_name_match = _old_trust
 
     # нет выделенных аккаунтов: аккаунт поиска во FloodWait → НЕ перескакиваем на другие
     class FW:
