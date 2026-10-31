@@ -41,6 +41,9 @@ _ID_NEAR_RE = re.compile(r"\b(?:id|ид)\s*[:#№]?\s*(\d{5,12})\b", re.I)
 _SERVICE_NAMES = {"joinchat", "addstickers", "addemoji", "share", "proxy", "socks", "nft", "boost",
                   "c", "s", "iv", "m", "contact", "addlist", "invoice", "giftcode"}
 _WAIT_WORDS = ("ищу", "поиск", "подожд", "загруж", "search", "wait", "loading", "⏳", "🔎")
+# Rate-limit / слишком-часто сообщения: не считаем за «не найдено», не кешируем негативно
+_RATE_LIMIT_WORDS = ("слишком часто", "too fast", "slow down", "rate limit", "подожди", "не спеши",
+                     "лимит", "ограниче", "too many requests", "флуд", "flood")
 _MAX_PENDING = 2000               # не больше N лотов в очереди на поиск (дальше — пропускаем)
 _CACHE_TTL = 3600.0               # кандидаты по одному имени — час
 _NEG_CACHE_TTL = 3600.0           # «не найдено» по имени — час (не долбим funstat повторно)
@@ -336,6 +339,7 @@ class OwnerLookup:
         # (session, bot) → когда отметили как unresolvable. Через 10 мин пробуем снова
         # (сессия могла переподключиться, кеш Telegram мог обновиться).
         self._bot_unresolvable: dict[tuple[str, str], float] = {}
+        self._last_response_text: dict[str, str] = {}       # session → последний текст от funstat (для rate-limit детекта)
         self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0,
                       "captcha": 0, "captcha_auto": 0, "too_many": 0, "from_memory": 0,
                       "no_candidates": 0, "nft_hidden": 0, "name_mismatch": 0, "trusted_match": 0}
@@ -585,6 +589,19 @@ class OwnerLookup:
             if len(self._cache) > 5000:
                 self._cache.clear()
         if not cands:
+            # Проверяем: может это rate-limit от funstat, не настоящее «нет кандидатов»?
+            # В таком случае не кешируем — попробуем снова позже.
+            last_text = ""
+            try:
+                # cands_text собирали в _ask_bot_locked — тут его нет, но мы можем взять из _cache
+                # вместо этого — проверяем по last-raw-text из _ask_bot
+                last_text = self._last_response_text.get(session, "")
+            except AttributeError:
+                last_text = ""
+            if last_text and any(w in last_text.lower() for w in _RATE_LIMIT_WORDS):
+                self.stats["rate_limited"] = self.stats.get("rate_limited", 0) + 1
+                llog("LOOKUP", f"@{bot} /human {seller_name!r}: rate-limit, НЕ кешируем")
+                return None
             self.stats["not_found"] += 1
             self.stats["no_candidates"] += 1
             self._neg_cache[key] = time.monotonic()
@@ -714,6 +731,7 @@ class OwnerLookup:
             got_answer = True
             last_cands = parse_candidates(msgs, bot)
             text = "\n".join((m.message or "") for m in msgs)
+            self._last_response_text[session] = text        # для rate-limit детекции в _find
             sig = (text, tuple(c.key() for c in last_cands),
                    tuple(getattr(m, "edit_date", None) for m in msgs))
             waiting = not last_cands and any(w in text.lower() for w in _WAIT_WORDS)
