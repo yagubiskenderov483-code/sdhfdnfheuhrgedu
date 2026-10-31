@@ -66,6 +66,7 @@ class FoundOwner:
     name: str | None
     premium: bool | None = None
     session: str | None = None          # аккаунт, который видит этого пользователя (есть access_hash)
+    from_memory: bool = False           # найден из нашей базы — enrich выполнить обычным путём
 
 
 def _norm_name(s: str | None) -> str:
@@ -521,15 +522,17 @@ class OwnerLookup:
             return None
         session = order[0]
         self.stats["lookups"] += 1
-        # владельцы, уже найденные раньше под этим именем — проверяем без бота поиска (и без капчи)
+        # владельцы, уже найденные раньше под этим именем — доверяем без бота поиска, но
+        # всё равно читаем профиль чтобы фильтры (PAID_MESSAGES, LEVEL_TOO_HIGH) могли сработать.
         known = await self._known(seller_name)
         if known:
-            found = await self._verify(session, known, seller_name, slug, unique_id)
-            if found:
+            first = known[0]
+            if first.user_id and first.username:
                 self.stats["found"] += 1
                 self.stats["from_memory"] = self.stats.get("from_memory", 0) + 1
-                llog("LOOKUP", f"{seller_name!r} → u{found.user_id} из памяти (без бота поиска)")
-                return found
+                llog("LOOKUP", f"{seller_name!r} → u{first.user_id} @{first.username} из памяти")
+                return FoundOwner(first.user_id, first.username,
+                                  first.name or seller_name, None, None, from_memory=True)
         key = _norm_name(seller_name)
         # негативный кеш: funstat недавно сказал «нет такого» → не долбим снова
         neg = self._neg_cache.get(key)

@@ -897,10 +897,12 @@ class ListingPipeline:
             l.premium = owner.premium
         if owner.session:
             l.session_source = owner.session       # у этого аккаунта есть доступ к профилю владельца
-        else:
+        elif not getattr(owner, "from_memory", False):
             # funstat выдал владельца по доверию имени, никакой session не резолвила access_hash
             # (fallback-trust_name_match). _enrich_seller его пропустит, лот пойдёт как есть.
             l.owner_trusted_no_resolve = True
+        # для from_memory: session_source=None, но owner_trusted_no_resolve НЕ ставим —
+        # пусть enrich попробует через любую сессию (кеш access_hash или свежий резолв)
         l.owner_found_via = settings.lookup_bot_username.lstrip("@")
         self.stats["owner_found"] = self.stats.get("owner_found", 0) + 1
         llog("FILTER", f"#{l.listing_id} hidden owner found via @{l.owner_found_via} → u{uid}"
