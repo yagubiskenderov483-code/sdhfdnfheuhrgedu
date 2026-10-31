@@ -422,7 +422,9 @@ class OwnerLookup:
         # тогда ответ не нужно кешировать, и даже надо из кеша удалить (если был).
         # ВАЖНО: НЕ ставим event — иначе _wait_captcha воспримет неверный клик как успех
         # (админ в этом случае не получит шанс исправить, а funstat даст новую капчу → цикл).
-        wrong_keywords = ("неверно", "wrong", "incorrect", "неправиль", "попробуй", "try again", "yana")
+        wrong_keywords = ("неверно", "wrong", "incorrect", "неправиль", "попробуй", "try again",
+                          "yana", "ошиб", "error", "fail", "не то", "not that", "еще раз",
+                          "ещё раз", "retry", "wrong button", "noto'g'ri", "notogri")
         if answer_text and any(w in answer_text.lower() for w in wrong_keywords):
             log.info("Lookup: кнопка %d на %s — funstat сказал неправильно (%r)",
                      index, c["session"], answer_text)
