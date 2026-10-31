@@ -295,6 +295,10 @@ class ListingPipeline:
     async def _enrich_seller(self, l: Listing) -> None:
         if not settings.fetch_full_seller or l.seller_type != "user" or not l.seller_id:
             return
+        # Отрицательный seller_id — это наш псевдо-ID (хеш username), настоящего
+        # user_id у нас нет. fetch_full_user с ним гарантированно упадёт.
+        if l.seller_id < 0:
+            return
         # Владельца funstat выдал по доверию имени, резолва не было → access_hash нет
         # ни у одной сессии. Любая попытка fetch_full_user даст
         # 'Could not find input entity' → seller_lookup_failed → лот отбрасывается.
