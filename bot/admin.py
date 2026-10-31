@@ -604,7 +604,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1178,6 +1178,21 @@ def build_routers(app: "App") -> list[Router]:
                        (f" ({', '.join(wait)})" if wait else "") +
                        f"\n❌ Действительно мёртвые (удалятся снова): {len(dead)}" +
                        (f" ({', '.join(dead)})" if dead else ""))
+
+    @admin.message(Command("clear_captcha_cache"))
+    async def cmd_clear_captcha_cache(m: Message) -> None:
+        """Сбросить кеш решённых капч (если нажрался ложных ответов)."""
+        try:
+            from tracker.captcha_solver import _CAPTCHA_CACHE, _save_cache
+            n = len(_CAPTCHA_CACHE)
+            _CAPTCHA_CACHE.clear()
+            # пометить dirty и сохранить
+            import tracker.captcha_solver as _cs
+            _cs._cache_dirty = True
+            _save_cache()
+            await m.answer(f"🧩 Кеш решённых капч очищен ({n} записей удалено).")
+        except Exception as e:
+            await m.answer(f"❌ Не удалось: {html.escape(str(e))}")
 
     @admin.message(Command("reload"))
     async def cmd_reload(m: Message) -> None:
