@@ -429,8 +429,19 @@ class OwnerLookup:
     def _pick_sessions(self) -> list[str]:
         """Аккаунты для бота поиска: выделенные (LOOKUP_SESSIONS) по кругу, иначе первый рабочий."""
         want = [n for n in settings.lookup_sessions if n]
+        bot = settings.lookup_bot_username.lstrip("@")
+        now = time.monotonic()
         if want:
-            ok = [n for n in want if (w := self.sessions.get(n)) is not None and w.is_usable()]
+            def _ok(n):
+                w = self.sessions.get(n)
+                if w is None or not w.is_usable():
+                    return False
+                # Пропускаем сессии где funstat недавно (<10 мин) не резолвился
+                unres = self._bot_unresolvable.get((n, bot))
+                if unres and now - unres < 600:
+                    return False
+                return True
+            ok = [n for n in want if _ok(n)]
             if ok:
                 self._rr = (getattr(self, "_rr", -1) + 1) % len(ok)
                 order = ok[self._rr:] + ok[:self._rr]
