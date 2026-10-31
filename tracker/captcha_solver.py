@@ -485,7 +485,7 @@ def _try_import_ocr():
 
 
 def _preprocess(photo: bytes, threshold: int, scale: int, invert: bool = False,
-                sharpen: bool = False, contrast: float = 1.0):
+                sharpen: bool = False, contrast: float = 1.0, erode: bool = False):
     """Пред-обработка капчи funstat: порог → апскейл → медианный фильтр.
     Капчи funstat: маленькие (~120×48) бежевые, с «карандашным» шрифтом и зернистым фоном.
     Tesseract плохо с ними справляется напрямую — обязательна бинаризация и увеличение.
@@ -510,6 +510,8 @@ def _preprocess(photo: bytes, threshold: int, scale: int, invert: bool = False,
     w, h = img.size
     img = img.resize((w * scale, h * scale), Image.LANCZOS)
     img = img.filter(ImageFilter.MedianFilter(5))
+    if erode:
+        img = img.filter(ImageFilter.MinFilter(3))     # «утончает» толстые буквы — помогает на размытых
     return img
 
 
@@ -524,27 +526,32 @@ def ocr_words(photo: bytes) -> list[tuple[str, float]]:
                  "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
     hyps: list[tuple[str, float]] = []
 
-    # Варианты предобработки: (threshold, scale, invert, sharpen, contrast)
-    # Главный блок — классика с 5 порогами. Добавочные — для редких edge-cases.
+    # Варианты предобработки: (threshold, scale, invert, sharpen, contrast, erode)
     variants = [
         # базовые 5 порогов
-        (100, 6, False, False, 1.0),
-        (115, 6, False, False, 1.0),
-        (130, 6, False, False, 1.0),
-        (145, 6, False, False, 1.0),
-        (160, 6, False, False, 1.0),
-        # усиленный контраст
-        (130, 6, False, False, 2.5),
-        # с sharpen для размытых
-        (130, 6, False, True, 1.0),
-        # инверсия (на случай светлый шрифт на тёмном фоне)
-        (130, 6, True, False, 1.0),
+        (100, 6, False, False, 1.0, False),
+        (115, 6, False, False, 1.0, False),
+        (130, 6, False, False, 1.0, False),
+        (145, 6, False, False, 1.0, False),
+        (160, 6, False, False, 1.0, False),
+        # усиленный контраст — для бледных капч
+        (130, 6, False, False, 2.5, False),
+        # sharpen — для размытых
+        (130, 6, False, True, 1.0, False),
+        # инверсия — на случай светлый шрифт на тёмном фоне
+        (130, 6, True, False, 1.0, False),
+        # эрозия — утончает буквы, помогает на очень размытых где они сливаются
+        (130, 6, False, False, 1.0, True),
+        (115, 6, False, False, 1.0, True),
+        # большой скейл — иногда помогает
+        (130, 10, False, False, 1.0, False),
     ]
     psms = (7, 8, 6, 13)
 
     try:
-        for threshold, scale, inv, shrp, ctr in variants:
-            img = _preprocess(photo, threshold, scale, invert=inv, sharpen=shrp, contrast=ctr)
+        for threshold, scale, inv, shrp, ctr, ero in variants:
+            img = _preprocess(photo, threshold, scale, invert=inv, sharpen=shrp,
+                              contrast=ctr, erode=ero)
             if img is None:
                 return hyps
             for psm in psms:
