@@ -1383,13 +1383,14 @@ def build_routers(app: "App") -> list[Router]:
                 f"из памяти: {lk.get('from_memory', 0)}\n"
                 f"Не найдено: {lk.get('not_found', 0)} — из них:\n"
                 f"  • funstat не вернул кандидатов: <b>{lk.get('no_candidates', 0)}</b>\n"
-                f"  • funstat вернул, но NFT не виден в профиле: <b>{lk.get('nft_hidden', 0)}</b> "
-                f"← включи <code>LOOKUP_TRUST_NAME_MATCH=true</code> если это проблема\n"
+                f"  • funstat вернул, но NFT не виден в профиле: <b>{lk.get('nft_hidden', 0)}</b>\n"
                 f"  • имя не совпало: {lk.get('name_mismatch', 0)}\n"
+                f"  • скип по негативному кешу (повторный): <b>{lk.get('neg_cached', 0)}</b>\n"
                 f"Без ответа: {lk.get('no_answer', 0)} · "
                 f"скип (много людей): {lk.get('too_many', 0)} · "
                 f"в очереди: {len(app.pipeline._lookup_tasks)}\n"
-                f"Капч: {lk.get('captcha', 0)} (авто-решено: <b>{lk.get('captcha_auto', 0)}</b>)")
+                f"Капч: {lk.get('captcha', 0)} (авто-решено: <b>{lk.get('captcha_auto', 0)}</b>)\n"
+                f"Lookup timeouts: {lk.get('lookup_timeout', 0)}")
         return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
     @public.callback_query(F.data.startswith("cap:"))

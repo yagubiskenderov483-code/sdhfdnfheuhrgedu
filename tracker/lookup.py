@@ -367,7 +367,8 @@ class OwnerLookup:
         return len(self._captcha)
 
     async def solve_captcha(self, token: str, index: int) -> str:
-        """Админ нажал кнопку капчи → жмём ту же кнопку на аккаунте поиска."""
+        """Админ нажал кнопку капчи → жмём ту же кнопку на аккаунте поиска.
+        Запоминаем ответ в кеш — следующая такая же капча решится автоматически."""
         c = self._captcha.get(token)
         if c is None:
             return "Эта капча уже неактуальна"
@@ -387,6 +388,18 @@ class OwnerLookup:
             await self._run(c["session"], _click, timeout=20)
         except Exception as e:
             return f"Не удалось нажать: {type(e).__name__}"
+        # ответ админа кешируем — следующая такая же капча пройдёт сама
+        try:
+            from .captcha_solver import _CAPTCHA_CACHE, _CAPTCHA_CACHE_MAX, _cache_key
+            photo = c.get("photo")
+            if photo:
+                btn_texts = [t for t, _ in c["buttons"]]
+                _CAPTCHA_CACHE[_cache_key(photo, btn_texts)] = index
+                if len(_CAPTCHA_CACHE) > _CAPTCHA_CACHE_MAX:
+                    for k in list(_CAPTCHA_CACHE)[:_CAPTCHA_CACHE_MAX // 2]:
+                        _CAPTCHA_CACHE.pop(k, None)
+        except Exception:
+            pass
         c["event"].set()
         return "Нажал, продолжаю поиск"
 
@@ -671,7 +684,7 @@ class OwnerLookup:
             buttons = _buttons(msg)
             ev = asyncio.Event()
             self._captcha[token] = {"session": session, "bot": bot, "msg_id": msg.id,
-                                    "buttons": buttons, "event": ev}
+                                    "buttons": buttons, "event": ev, "photo": None}
             self._captcha_by_session[session] = token
 
             async def _photo(client):
@@ -683,6 +696,7 @@ class OwnerLookup:
                 photo = await self._run(session, _photo, timeout=30)
             except Exception:
                 photo = None
+            self._captcha[token]["photo"] = photo
 
             # ВСЕГДА пробуем сами. User явно просил не напрягать его капчами.
             if self._auto is not None and getattr(self._auto, "enabled", False) and photo and buttons:

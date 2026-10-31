@@ -796,8 +796,15 @@ class ListingPipeline:
                 and bool(l.gift_slug or l.gift_unique_id))
 
     async def _lookup_then_process(self, l: Listing) -> None:
+        # Жёсткий таймаут на весь lookup. Иначе task может висеть на сессии в FloodWait
+        # + ожидании капчи + ответа funstat десятки минут (user: '20 мин подряд потом стоп').
+        timeout = max(60.0, min(600.0, settings.lookup_captcha_wait + settings.lookup_timeout * 2 + 30))
         try:
-            found = await self._lookup_owner(l)
+            found = await asyncio.wait_for(self._lookup_owner(l), timeout=timeout)
+        except asyncio.TimeoutError:
+            log.warning("Owner lookup for %s timed out after %.0fs — освобождаем pipeline", l.listing_id, timeout)
+            found = False
+            self.stats["lookup_timeout"] = self.stats.get("lookup_timeout", 0) + 1
         except asyncio.CancelledError:
             raise
         except Exception:

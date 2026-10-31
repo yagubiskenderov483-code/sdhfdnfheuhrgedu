@@ -1,5 +1,9 @@
 """Авто-решатель капчи funstat / fun_xsearchx_bot и аналогов.
 
+Включает кеш решённых капч (image_hash → button_index): если bot прислал
+точно такую же картинку, которую мы уже решали, мгновенно повторяем ответ
+без OCR. Это ускоряет повторные одинаковые капчи и повышает точность.
+
 Капча: картинка со СЛОВОМ (напр. "Star", "Fox", "Dog") + 2–8 кнопок с эмодзи.
 Надо нажать ту кнопку, чьё эмодзи означает это слово.
 
@@ -24,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import io
 import json
 import logging
@@ -35,6 +40,22 @@ from urllib import request as _urlreq
 from urllib.error import HTTPError, URLError
 
 log = logging.getLogger("captcha")
+
+# Кеш решённых капч: hash(image_bytes + buttons_signature) → индекс кнопки.
+# Живёт в памяти процесса, восстанавливается при рестарте — не страшно.
+_CAPTCHA_CACHE: dict[str, int] = {}
+_CAPTCHA_CACHE_MAX = 2000      # очищаем при превышении (lru-ish)
+
+
+def _cache_key(photo: bytes, buttons: list[str]) -> str:
+    h = hashlib.md5(photo).hexdigest()[:16]
+    sig = "|".join(buttons)
+    return f"{h}:{sig}"
+
+
+def captcha_cache_stats() -> dict:
+    """Для вывода в /panel."""
+    return {"size": len(_CAPTCHA_CACHE), "max": _CAPTCHA_CACHE_MAX}
 
 
 def _env(name: str, default: str = "") -> str:
@@ -796,13 +817,25 @@ class CaptchaSolver:
         if not btns:
             return None
 
-        # 1) OCR локально: собираем 20 гипотез (5 порогов × 4 psm) и голосуем —
-        #    кнопка выигрывает, если ХОТЬ ОДНА гипотеза хорошо на неё матчит.
+        # 0) Кеш: та же картинка + те же кнопки → мгновенно отвечаем, без OCR
+        ck = _cache_key(photo, btns)
+        cached = _CAPTCHA_CACHE.get(ck)
+        if cached is not None and 0 <= cached < len(btns):
+            log.info("Captcha solver: кеш попал → кнопка %d (%s)", cached, btns[cached])
+            return cached
+
+        # 1) OCR локально
         if self._ocr_available:
             hyps = await asyncio.to_thread(ocr_words, photo)
             if hyps:
                 idx = _best_button_from_hypotheses(hyps, btns)
                 if idx is not None:
+                    # запоминаем для будущих повторов
+                    _CAPTCHA_CACHE[ck] = idx
+                    if len(_CAPTCHA_CACHE) > _CAPTCHA_CACHE_MAX:
+                        # грубая очистка — выбрасываем половину старых
+                        for k in list(_CAPTCHA_CACHE)[:_CAPTCHA_CACHE_MAX // 2]:
+                            _CAPTCHA_CACHE.pop(k, None)
                     return idx
                 log.info("Captcha solver: %d гипотез, но ни одна не подошла — передаю vision/админу",
                          len(hyps))
