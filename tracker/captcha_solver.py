@@ -536,6 +536,75 @@ def _preprocess(photo: bytes, threshold: int, scale: int, invert: bool = False,
     return img
 
 
+def _ocr_and_match(photo: bytes, buttons: list[str]) -> Optional[int]:
+    """OCR + матч к кнопкам с ранним выходом.
+
+    Прогоняем варианты пред-обработки блоками (быстрые сначала). После каждого блока
+    пробуем матч. Если нашли уверенный ответ — выходим не прогоняя все 85 попыток.
+    Экономит 2-3 секунды на капчу которая читается с первого раза."""
+    mods = _try_import_ocr()
+    if mods is None or not photo:
+        return None
+    pytesseract = mods[0]
+    whitelist = ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                 "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
+    hyps: list[tuple[str, float]] = []
+
+    # Блоки вариантов по приоритету (быстрые сначала)
+    blocks = [
+        # Блок 1: 3 базовых порога × основные psm — покрывает ~90% случаев
+        [(115, 6, False, False, 1.0, False),
+         (130, 6, False, False, 1.0, False),
+         (145, 6, False, False, 1.0, False)],
+        # Блок 2: остальные пороги + контраст
+        [(100, 6, False, False, 1.0, False),
+         (160, 6, False, False, 1.0, False),
+         (130, 6, False, False, 2.5, False),
+         (130, 6, False, True, 1.0, False)],
+        # Блок 3: тяжёлая артиллерия — erode, invert, большой скейл
+        [(130, 6, True, False, 1.0, False),
+         (130, 6, False, False, 1.0, True),
+         (115, 6, False, False, 1.0, True),
+         (130, 10, False, False, 1.0, False)],
+    ]
+    psms = (7, 8, 6, 13, 10)
+
+    try:
+        for block in blocks:
+            for threshold, scale, inv, shrp, ctr, ero in block:
+                img = _preprocess(photo, threshold, scale, invert=inv, sharpen=shrp,
+                                  contrast=ctr, erode=ero)
+                if img is None:
+                    return None
+                for psm in psms:
+                    cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist={whitelist}"
+                    try:
+                        data = pytesseract.image_to_data(img, config=cfg,
+                                                         output_type=pytesseract.Output.DICT)
+                    except Exception:
+                        continue
+                    for i, raw in enumerate(data.get("text", [])):
+                        word = _norm_word(raw or "")
+                        if not word or not (2 <= len(word) <= 32):
+                            continue
+                        try:
+                            conf = float(data["conf"][i])
+                        except (ValueError, TypeError, IndexError):
+                            continue
+                        if conf < 0:
+                            continue
+                        hyps.append((word, conf))
+            # пробуем матч после каждого блока
+            idx = _best_button_from_hypotheses(hyps, buttons)
+            if idx is not None:
+                return idx
+    except Exception as e:                                             # noqa: BLE001
+        log.warning("OCR failed: %s", e)
+    log.info("Captcha solver: ни один из %d гипотез (%d вариантов) не подошёл",
+             len(hyps), sum(len(b) for b in blocks))
+    return None
+
+
 def ocr_words(photo: bytes) -> list[tuple[str, float]]:
     """Собираем ВСЕ гипотезы OCR в несколько проходов с разной предобработкой.
     Нужно по максимуму — чтобы хоть одна гипотеза совпала с кнопкой."""
@@ -817,28 +886,23 @@ class CaptchaSolver:
         if not btns:
             return None
 
-        # 0) Кеш: та же картинка + те же кнопки → мгновенно отвечаем, без OCR
+        # 0) Кеш: та же картинка + те же кнопки → мгновенно отвечаем, без OCR (0 сек)
         ck = _cache_key(photo, btns)
         cached = _CAPTCHA_CACHE.get(ck)
         if cached is not None and 0 <= cached < len(btns):
             log.info("Captcha solver: кеш попал → кнопка %d (%s)", cached, btns[cached])
             return cached
 
-        # 1) OCR локально
+        # 1) OCR с early-exit: после первых базовых вариантов пробуем матч; если нашли — выходим.
         if self._ocr_available:
-            hyps = await asyncio.to_thread(ocr_words, photo)
-            if hyps:
-                idx = _best_button_from_hypotheses(hyps, btns)
-                if idx is not None:
-                    # запоминаем для будущих повторов
-                    _CAPTCHA_CACHE[ck] = idx
-                    if len(_CAPTCHA_CACHE) > _CAPTCHA_CACHE_MAX:
-                        # грубая очистка — выбрасываем половину старых
-                        for k in list(_CAPTCHA_CACHE)[:_CAPTCHA_CACHE_MAX // 2]:
-                            _CAPTCHA_CACHE.pop(k, None)
-                    return idx
-                log.info("Captcha solver: %d гипотез, но ни одна не подошла — передаю vision/админу",
-                         len(hyps))
+            idx = await asyncio.to_thread(_ocr_and_match, photo, btns)
+            if idx is not None:
+                # запоминаем для будущих повторов
+                _CAPTCHA_CACHE[ck] = idx
+                if len(_CAPTCHA_CACHE) > _CAPTCHA_CACHE_MAX:
+                    for k in list(_CAPTCHA_CACHE)[:_CAPTCHA_CACHE_MAX // 2]:
+                        _CAPTCHA_CACHE.pop(k, None)
+                return idx
 
         # 2) vision API
         if self._vision.enabled:
