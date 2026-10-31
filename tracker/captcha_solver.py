@@ -484,17 +484,29 @@ def _try_import_ocr():
         return None
 
 
-def _preprocess(photo: bytes, threshold: int, scale: int):
+def _preprocess(photo: bytes, threshold: int, scale: int, invert: bool = False,
+                sharpen: bool = False, contrast: float = 1.0):
     """Пред-обработка капчи funstat: порог → апскейл → медианный фильтр.
     Капчи funstat: маленькие (~120×48) бежевые, с «карандашным» шрифтом и зернистым фоном.
-    Tesseract плохо с ними справляется напрямую — обязательна бинаризация и увеличение."""
+    Tesseract плохо с ними справляется напрямую — обязательна бинаризация и увеличение.
+
+    invert — иногда tesseract лучше читает инверсию (чёрное на белом → белое на чёрном).
+    sharpen — для совсем размытых.
+    contrast — усилитель контраста до бинаризации (1.0 = норма, >1 жёстче)."""
     mods = _try_import_ocr()
     if mods is None:
         return None
     _, Image, ImageOps, ImageFilter = mods
     img = Image.open(io.BytesIO(photo)).convert("L")
     img = ImageOps.autocontrast(img, cutoff=1)
+    if contrast != 1.0:
+        from PIL import ImageEnhance
+        img = ImageEnhance.Contrast(img).enhance(contrast)
+    if sharpen:
+        img = img.filter(ImageFilter.SHARPEN)
     img = img.point(lambda p, t=threshold: 0 if p < t else 255, mode="1").convert("L")
+    if invert:
+        img = ImageOps.invert(img)
     w, h = img.size
     img = img.resize((w * scale, h * scale), Image.LANCZOS)
     img = img.filter(ImageFilter.MedianFilter(5))
@@ -502,9 +514,8 @@ def _preprocess(photo: bytes, threshold: int, scale: int):
 
 
 def ocr_words(photo: bytes) -> list[tuple[str, float]]:
-    """Собираем ВСЕ гипотезы OCR (разные пороги × режимы) — не одну «лучшую»,
-    а список кандидатов. Потом вызывающий выбирает ту, что лучше всего матчит
-    к текущим кнопкам."""
+    """Собираем ВСЕ гипотезы OCR в несколько проходов с разной предобработкой.
+    Нужно по максимуму — чтобы хоть одна гипотеза совпала с кнопкой."""
     mods = _try_import_ocr()
     if mods is None or not photo:
         return []
@@ -512,13 +523,31 @@ def ocr_words(photo: bytes) -> list[tuple[str, float]]:
     whitelist = ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
                  "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
     hyps: list[tuple[str, float]] = []
+
+    # Варианты предобработки: (threshold, scale, invert, sharpen, contrast)
+    # Главный блок — классика с 5 порогами. Добавочные — для редких edge-cases.
+    variants = [
+        # базовые 5 порогов
+        (100, 6, False, False, 1.0),
+        (115, 6, False, False, 1.0),
+        (130, 6, False, False, 1.0),
+        (145, 6, False, False, 1.0),
+        (160, 6, False, False, 1.0),
+        # усиленный контраст
+        (130, 6, False, False, 2.5),
+        # с sharpen для размытых
+        (130, 6, False, True, 1.0),
+        # инверсия (на случай светлый шрифт на тёмном фоне)
+        (130, 6, True, False, 1.0),
+    ]
+    psms = (7, 8, 6, 13)
+
     try:
-        # 5 порогов × 4 режима = 20 попыток. ~0.5-1 сек всего.
-        for threshold in (100, 115, 130, 145, 160):
-            img = _preprocess(photo, threshold, scale=6)
+        for threshold, scale, inv, shrp, ctr in variants:
+            img = _preprocess(photo, threshold, scale, invert=inv, sharpen=shrp, contrast=ctr)
             if img is None:
                 return hyps
-            for psm in (7, 8, 6, 13):
+            for psm in psms:
                 cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist={whitelist}"
                 try:
                     data = pytesseract.image_to_data(img, config=cfg,
@@ -626,9 +655,10 @@ def _best_button_from_hypotheses(hyps: list[tuple[str, float]],
         second_votes = max((v for k, v in first_letter_votes.items() if k != best_i), default=0)
         # уникальность: буквы этой кнопки встречаются ТОЛЬКО у неё
         unique = all(all_first_letters.count(l) == 1 for l in button_first_letters[best_i])
-        if best_votes >= 3 and (unique or best_votes > second_votes * 2):
-            log.info("Captcha vote[first-letter]: → кнопка %d (голосов %d, уникально=%s)",
-                     best_i, best_votes, unique)
+        # Условия: 2+ голосов и либо уникальная буква, либо явный отрыв от второго
+        if best_votes >= 2 and (unique or best_votes >= second_votes + 2):
+            log.info("Captcha vote[first-letter]: → кнопка %d (голосов %d, уникально=%s, второй=%d)",
+                     best_i, best_votes, unique, second_votes)
             return best_i
 
     # ── 4) Подстрока: гипотеза ⊂ слово кнопки или наоборот ──
