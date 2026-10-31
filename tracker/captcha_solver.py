@@ -655,8 +655,9 @@ def _best_button_from_hypotheses(hyps: list[tuple[str, float]],
         second_votes = max((v for k, v in first_letter_votes.items() if k != best_i), default=0)
         # уникальность: буквы этой кнопки встречаются ТОЛЬКО у неё
         unique = all(all_first_letters.count(l) == 1 for l in button_first_letters[best_i])
-        # Условия: 2+ голосов и либо уникальная буква, либо явный отрыв от второго
-        if best_votes >= 2 and (unique or best_votes >= second_votes + 2):
+        # Условия (мягко): 1+ голосов с уникальной буквой ИЛИ 2+ с отрывом ≥2
+        if (best_votes >= 1 and unique and best_votes > second_votes) or \
+           (best_votes >= 2 and best_votes >= second_votes + 2):
             log.info("Captcha vote[first-letter]: → кнопка %d (голосов %d, уникально=%s, второй=%d)",
                      best_i, best_votes, unique, second_votes)
             return best_i
@@ -682,6 +683,28 @@ def _best_button_from_hypotheses(hyps: list[tuple[str, float]],
 
     log.info("Captcha vote: %d гипотез — ни один из 4 слоёв не дал ответа, пропуск", len(hyps))
     return None
+
+
+def estimate_letter_count(photo: bytes) -> int:
+    """Оценить сколько букв на картинке по плотности тёмных пикселей.
+    Эмпирика на капчах funstat 120×48: ~30 пикселей чернил на букву."""
+    mods = _try_import_ocr()
+    if mods is None or not photo:
+        return 0
+    _, Image, ImageOps, _ = mods
+    try:
+        img = Image.open(io.BytesIO(photo)).convert("L")
+        img = ImageOps.autocontrast(img, cutoff=1)
+        img = img.point(lambda p: 1 if p < 130 else 0, mode="1")
+        try:
+            ink = sum(img.get_flattened_data())  # Pillow 14+
+        except AttributeError:
+            ink = sum(1 for p in img.getdata() if p)
+        # эмпирика: fox(3)=117, star(4)=111, robot(5)=161, bear(4)=132,
+        #           rabbit(6)=225, dog(3)=131, ghost(5)=291. ~30px per letter.
+        return max(2, min(10, round(ink / 30)))
+    except Exception:
+        return 0
 
 
 # ---------------------------------------------------------------------------
