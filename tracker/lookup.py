@@ -504,9 +504,14 @@ class OwnerLookup:
         except Exception:
             return []
         # отрицательные id — pseudo (legacy до фикса в _remember). Фильтруем на чтении,
-        # чтобы старые записи не портили результат.
-        return [Candidate(username=i.get("u"), user_id=i.get("id"), name=name)
-                for i in items if (i.get("u") or (i.get("id") and i["id"] > 0))]
+        # чтобы старые записи не портили результат. Нули/негатив — тоже выкидываем из поля id.
+        out = []
+        for i in items:
+            uid = i.get("id") if (i.get("id") and i["id"] > 0) else None
+            u = i.get("u") or None
+            if u or uid:
+                out.append(Candidate(username=u, user_id=uid, name=name))
+        return out
 
     async def _remember(self, name: str, owner: FoundOwner) -> None:
         if self.db is None:
