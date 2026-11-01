@@ -29,6 +29,30 @@ class SessionManager:
         self._connect_sem = asyncio.Semaphore(settings.connect_concurrency)
         self._changed = asyncio.Event()
         self.on_auth_error = None      # async callback(worker)
+        self._base_rps = float(settings.global_rps)        # оригинал — чтобы разгон вернул на исходное
+        self._throttle_until = 0.0                          # до какого момента держим пониженный RPS
+
+    def flood_rate_per_minute(self) -> int:
+        """Сколько FloodWait поймано всеми аккаунтами за последние 60 секунд."""
+        now = time.monotonic()
+        return sum(1 for w in self.workers.values()
+                   for t in getattr(w, "recent_floods", []) if now - t < 60)
+
+    def apply_adaptive_throttle(self) -> None:
+        """Если шторм FloodWait по всему флоту — замедляем GLOBAL RPS в 2-5x.
+        Через 3 минуты спокойствия возвращаем. Вызывается из _bench_loop."""
+        n = self.flood_rate_per_minute()
+        now = time.monotonic()
+        if n >= 10:
+            factor = 0.2 if n >= 30 else (0.3 if n >= 20 else 0.5)
+            new_rate = max(0.5, self._base_rps * factor)
+            if abs(self.limiter.rate - new_rate) > 0.1:
+                self.limiter.set_rate(new_rate)
+                log.warning("FloodWait storm (%s/min) — global RPS → %.1f (×%.2f)", n, new_rate, factor)
+            self._throttle_until = now + 180
+        elif self.limiter.rate < self._base_rps and now >= self._throttle_until:
+            self.limiter.set_rate(self._base_rps)
+            log.info("FloodWait calmed — global RPS → %.1f (base)", self._base_rps)
 
     # ------------------------------------------------------------------ loading
     async def start_all(self) -> None:

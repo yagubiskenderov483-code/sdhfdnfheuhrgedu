@@ -425,6 +425,8 @@ class App:
                 log.debug("bench failed: %s", e)
             try:
                 await self._save_speeds()
+                # адаптивный глобальный throttle по шторму FloodWait: 10+ за минуту ⇒ GLOBAL_RPS × 0.5-0.2
+                self.sessions.apply_adaptive_throttle()
                 await self._watchdog()
                 await self._watchdog_sent()
                 await self._watchdog_conflict()
