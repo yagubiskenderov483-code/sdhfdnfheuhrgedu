@@ -264,6 +264,14 @@ class SessionWorker:
             factor *= 0.6
         self.speed = max(0.15, self.speed * factor)
         self.ok_streak = 0
+        # шторм FloodWait: 20+ за час — Telegram явно давит, продолжать на этом же темпе нельзя.
+        # Удлиняем паузу в 2-5 раз больше, чем сам FloodWait: это даёт Telegram'у «забыть» этот
+        # аккаунт как спамера. Иначе: сессия отдыхает 30с → снова мгновенный FloodWait → цикл.
+        if len(self.recent_floods) >= 20:
+            extra = min(flood_seconds * 4, 900)       # не больше 15 мин сверху
+            self.flood_until = now + flood_seconds + extra + 1
+            log.warning("Session %s: шторм FloodWait (%s за час) — продлил паузу на %ss",
+                        self.name, len(self.recent_floods), extra)
         log.warning("Session %s: FloodWait %ss (%s за час) — замедляю до x%.2f",
                     self.name, flood_seconds, len(self.recent_floods), self.speed)
 
