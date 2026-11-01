@@ -654,8 +654,10 @@ class OwnerLookup:
         if found:
             self.stats["found"] += 1
             await self._remember(seller_name, found)
+            # session=None → trust-fallback (резолв упёрся в лимит / без проверки NFT), иначе _verify
+            how = "trust" if found.session is None else "NFT в профиле"
             llog("LOOKUP", f"/human {seller_name!r} → u{found.user_id}"
-                           + (f" @{found.username}" if found.username else "") + " (NFT в профиле)")
+                           + (f" @{found.username}" if found.username else "") + f" ({how})")
         else:
             self.stats["not_found"] += 1
             self.stats["nft_hidden"] += 1
