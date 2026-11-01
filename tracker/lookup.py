@@ -565,10 +565,16 @@ class OwnerLookup:
         known = await self._known(seller_name)
         if known:
             first = known[0]
-            if first.user_id and first.username:
+            # Раньше требовалось И user_id И username, иначе шли по новой к funstat. Но у многих
+            # пользователей @юза нет — после первой проверки память хранит только user_id, и каждый
+            # следующий лот этого продавца снова грыз лимит funstat'а. Теперь достаточно user_id
+            # (user_id > 0): username (при наличии) всё равно подтянется из enrich_seller через
+            # session.get_entity. Если user_id нет — через память не ходим: нужно резолвить username.
+            if first.user_id and first.user_id > 0:
                 self.stats["found"] += 1
                 self.stats["from_memory"] = self.stats.get("from_memory", 0) + 1
-                llog("LOOKUP", f"{seller_name!r} → u{first.user_id} @{first.username} из памяти")
+                llog("LOOKUP", f"{seller_name!r} → u{first.user_id} "
+                               f"@{first.username or '—'} из памяти")
                 return FoundOwner(first.user_id, first.username,
                                   first.name or seller_name, None, None, from_memory=True)
         key = _norm_name(seller_name)
