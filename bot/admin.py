@@ -610,8 +610,7 @@ def build_routers(app: "App") -> list[Router]:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
                        f"Ваш Telegram ID: <code>{m.from_user.id}</code> — его можно вписать в ADMIN_IDS.")
 
-    @users.message(or_f(Command("status"), F.text == BTN_STATUS))
-    async def cmd_status(m: Message) -> None:
+    def _status_text() -> str:
         c = app.sessions.counts()
         coord, pipe = app.coordinator, app.pipeline
         running = coord.mode == "LIVE" and not coord.paused
@@ -677,8 +676,45 @@ def build_routers(app: "App") -> list[Router]:
         ]
         if settings.test_mode:
             lines += ["", "🧪 <b>Тестовый режим</b>: в канал ничего не уходит"]
-        text = "\n".join(lines)
-        await _answer_long(m, text)
+        return "\n".join(lines)
+
+    def _status_kb() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔄 Обновить", callback_data="status:refresh"),
+            InlineKeyboardButton(text="⚙️ Панель", callback_data="status:panel"),
+        ]])
+
+    @users.message(or_f(Command("status"), F.text == BTN_STATUS))
+    async def cmd_status(m: Message) -> None:
+        await _answer_long(m, _status_text(), reply_markup=_status_kb())
+
+    @public.callback_query(F.data == "status:refresh")
+    async def cb_status_refresh(q: CallbackQuery) -> None:
+        if not is_allowed(q.from_user.id):
+            await q.answer("Только для админов", show_alert=True)
+            return
+        try:
+            await q.message.edit_text(_status_text(), reply_markup=_status_kb(),
+                                      parse_mode="HTML", disable_web_page_preview=True)
+            await q.answer("Обновлено")
+        except Exception as e:
+            if "message is not modified" in str(e):
+                await q.answer("Без изменений")
+            else:
+                await q.answer(f"Ошибка: {type(e).__name__}", show_alert=True)
+
+    @public.callback_query(F.data == "status:panel")
+    async def cb_status_panel(q: CallbackQuery) -> None:
+        if not is_allowed(q.from_user.id):
+            await q.answer("Только для админов", show_alert=True)
+            return
+        text, kb = _panel()
+        try:
+            await q.message.edit_text(text, reply_markup=kb, parse_mode="HTML",
+                                      disable_web_page_preview=True)
+            await q.answer()
+        except Exception:
+            await q.answer()
 
     def _boot_note() -> str:
         if not app.backup.restore_done:

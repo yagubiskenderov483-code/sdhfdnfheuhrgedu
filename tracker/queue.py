@@ -495,12 +495,11 @@ class ListingPipeline:
             return
         llog("FILTER", f"#{l.listing_id} price passed")
 
-        # has_contactable: есть @username ИЛИ настоящий user_id (положительный, не псевдо) — профиль открывается.
-        has_contactable = bool(l.seller_username) or (
-            l.owner_found_via and l.seller_id is not None and l.seller_id > 0)
-        if settings.require_username and l.seller_type is not None and not has_contactable:
-            # продавец ВИДЕН на маркете, но ни @юза ни рабочего user_id нет — такой лот не нужен.
-            # Исключение: funstat вернул реальный user_id (ссылка tg://user?id= откроет профиль).
+        if settings.require_username and l.seller_type is not None and not l.seller_username:
+            # @юза нет — лот не нужен. tg://user?id= не всегда открывает профиль (у многих
+            # приватность: кидает в чат с ботом, а не в профиль). user явно сказал:
+            # 'он перебрасывает бота а не в проф' — отбрасываем такие даже если funstat
+            # нашёл user_id, но без @username.
             await self._reject_no_username(l)
             return
         if l.seller_type is None and not getattr(l, "lookup_done", False):
@@ -572,12 +571,11 @@ class ListingPipeline:
             await self.db.update_listing(l)
             return
         llog("FILTER", f"#{l.listing_id} seller passed ({sr.code})")
-        # Ссылка tg://user?id= работает для положительных user_id (owner_found_via).
-        has_contactable = bool(l.seller_username) or (
-            l.owner_found_via and l.seller_id is not None and l.seller_id > 0)
-        # owner_not_found путь шлёт лот С ПОМЕТКОЙ (user: 'и бывает иногда что акки выдает где юза нет'
-        # — но тот был для видимых продавцов; скрытых не-найденных шлём как есть, с пометкой в seller_line)
-        if settings.require_username and not has_contactable and not getattr(l, "owner_not_found", False):
+        # user: 'он перебрасывает бота а не в проф' — без @username пост не нужен,
+        # tg://user?id= у большинства уходит в чат бота, а не в профиль продавца.
+        # Исключение: owner_not_found шлёт лот С ПОМЕТКОЙ (нет кнопки продавца).
+        if (settings.require_username and not l.seller_username
+                and not getattr(l, "owner_not_found", False)):
             await self._reject_no_username(l)
             return
         await self._send_stage(ev, l, base, t_start)
