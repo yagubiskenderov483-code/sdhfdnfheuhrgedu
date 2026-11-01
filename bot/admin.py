@@ -1447,8 +1447,12 @@ def build_routers(app: "App") -> list[Router]:
         success = res == "Нажал, продолжаю поиск"
         try:
             cap = q.message.caption if q.message.caption is not None else q.message.text
+            # Отрезаем прошлые ❌/✅ строки — иначе на каждом клике caption растёт и упирается в лимит
+            cap_lines = cap.split("\n\n") if cap else [""]
+            base = "\n\n".join(l for l in cap_lines if not (l.startswith("✅ ") or l.startswith("❌ ")))
             icon = "✅" if success else "❌"
-            kwargs = {"caption" if q.message.caption is not None else "text": f"{cap}\n\n{icon} {res}"}
+            new_text = f"{base}\n\n{icon} {res}"[:1024]
+            kwargs = {"caption" if q.message.caption is not None else "text": new_text}
             if success:
                 kwargs["reply_markup"] = None     # оставляем кнопки на неудаче
             await (q.message.edit_caption if q.message.caption is not None else q.message.edit_text)(**kwargs)

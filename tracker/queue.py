@@ -931,6 +931,11 @@ class ListingPipeline:
         if owner is None:
             return False
         uid = owner.user_id
+        # Защита: owner.user_id = 0 — поломанная запись (не должно случаться после фильтра в _known
+        # и после fallback'а в _verify, но если проскочит — не создаём лот с seller_key='u0')
+        if not uid:
+            log.warning("Owner lookup returned uid=0 for %s — считаем не найденным", l.seller_name)
+            return False
         l.seller_type, l.seller_id, l.seller_key = "user", uid, f"u{uid}"
         l.seller_username = owner.username
         l.seller_profile_link = username_link(owner.username) if owner.username else None
