@@ -23,9 +23,12 @@ class TokenBucket:
     async def acquire(self) -> None:
         if self.rate <= 0:
             return
-        async with self._lock:
-            while True:
-                if self.rate <= 0:          # лимит сняли через /set, пока ждали
+        while True:
+            # Критическая секция без await — только обновление токенов и попытка захвата.
+            # Иначе под lock во время asyncio.sleep блокировались ВСЕ ждущие — глобальный rps
+            # падал в 1 запрос за цикл вместо настроенного темпа.
+            async with self._lock:
+                if self.rate <= 0:
                     return
                 now = time.monotonic()
                 self.tokens = min(self.capacity, self.tokens + (now - self.updated) * self.rate)
@@ -33,8 +36,9 @@ class TokenBucket:
                 if self.tokens >= 1:
                     self.tokens -= 1
                     return
-                # спим короткими шагами: если лимит подняли через /set, ждущие сразу это заметят
-                await asyncio.sleep(min(1.0, (1 - self.tokens) / self.rate))
+                need = 1 - self.tokens
+            # спим ВНЕ lock, параллельные вызовы могут обновить токены и пройти
+            await asyncio.sleep(min(1.0, need / self.rate))
 
 
 def backoff_delay(attempt: int, base: float = 2.0, cap: float = 300.0) -> float:
