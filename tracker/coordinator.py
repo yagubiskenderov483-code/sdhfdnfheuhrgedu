@@ -784,7 +784,9 @@ class MarketplaceCoordinator:
         self._stop.set()
         for t in list(self._tasks) + list(self._polls):
             t.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
+        # ждём ВСЕХ, иначе _persist() может сработать параллельно с ещё живым _apply на тех же _dirty →
+        # race в save_collection_state. _polls тоже ждём, чтобы они не упали логами уже после shutdown
+        await asyncio.gather(*self._tasks, *self._polls, return_exceptions=True)
         try:
             await self._persist()
         except Exception:
