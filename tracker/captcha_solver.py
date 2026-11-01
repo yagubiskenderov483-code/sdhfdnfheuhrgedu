@@ -976,11 +976,18 @@ class CaptchaSolver:
 
     async def solve(self, photo: Optional[bytes], buttons: Iterable[str]) -> Optional[int]:
         """Вернуть индекс кнопки или None."""
+        idxs = await self.solve_ranked(photo, buttons)
+        return idxs[0] if idxs else None
+
+    async def solve_ranked(self, photo: Optional[bytes], buttons: Iterable[str]) -> list[int]:
+        """Вернуть ранжированный список индексов кнопок (лучший первым).
+        Используется для retry: если первый клик funstat назвал неверным,
+        можно попробовать второй-третий без прохода через админа."""
         if not self.enabled or not photo:
-            return None
+            return []
         btns = list(buttons)
         if not btns:
-            return None
+            return []
 
         _load_cache()
         # 0) Кеш: та же картинка + те же кнопки → мгновенно отвечаем, без OCR (0 сек)
@@ -988,14 +995,28 @@ class CaptchaSolver:
         cached = _CAPTCHA_CACHE.get(ck)
         if cached is not None and 0 <= cached < len(btns):
             log.info("Captcha solver: кеш попал → кнопка %d (%s)", cached, btns[cached])
-            return cached
+            return [cached]
+
+        results: list[int] = []
 
         # 1) OCR с early-exit: после первых базовых вариантов пробуем матч; если нашли — выходим.
         if self._ocr_available:
             idx = await asyncio.to_thread(_ocr_and_match, photo, btns)
             if idx is not None:
                 cache_put(ck, idx)
-                return idx
+                results.append(idx)
+                # дополнительно — лучшие OCR слова, сматченные к кнопкам (как 2-3 кандидата)
+                try:
+                    hyps = await asyncio.to_thread(ocr_words, photo)
+                    for w, _ in hyps[:8]:
+                        alt = match_word_to_button(w, btns)
+                        if alt is not None and alt != idx and alt not in results:
+                            results.append(alt)
+                            if len(results) >= 3:
+                                break
+                except Exception:
+                    pass
+                return results
 
         # 2) vision API — защитимся от любых исключений, иначе капча не решается НИЧЕМ
         if self._vision.enabled:
@@ -1014,7 +1035,7 @@ class CaptchaSolver:
                 idx = match_word_to_button(word, btns)
                 if idx is not None:
                     log.info("Captcha solver: vision → %r → кнопка %d (%s)", word, idx, btns[idx])
-                    return idx
+                    return [idx]
                 log.info("Captcha solver: vision вернул %r, но ни одна кнопка не подошла", word)
 
-        return None
+        return results

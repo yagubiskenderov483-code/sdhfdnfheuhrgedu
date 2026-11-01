@@ -819,30 +819,43 @@ class OwnerLookup:
             self._captcha[token]["photo"] = photo
 
             # ВСЕГДА пробуем сами. User явно просил не напрягать его капчами.
+            # solve_ranked возвращает топ-3 кандидата от OCR — если funstat назвал
+            # первую кнопку неверной, пробуем вторую-третью без прохода через админа.
             if self._auto is not None and getattr(self._auto, "enabled", False) and photo and buttons:
                 t_start = time.monotonic()
                 try:
-                    idx = await self._auto.solve(photo, [t for t, _ in buttons])
+                    idxs = await self._auto.solve_ranked(photo, [t for t, _ in buttons])
                 except Exception as e:                               # noqa: BLE001
-                    idx = None
+                    idxs = []
                     log.warning("Lookup: авто-решатель капчи упал: %s", e)
-                if idx is not None:
+                tried: set[int] = set()
+                for idx in idxs:
+                    if idx in tried:
+                        continue
+                    tried.add(idx)
                     res = await self.solve_captcha(token, idx)
-                    # Успех (без текста "Нажал, но funstat сказал ..." → неправильно):
                     if res.startswith("Нажал") and "funstat сказал" not in res:
                         self.stats["captcha_auto"] += 1
                         solve_time = time.monotonic() - t_start
-                        # EMA среднего времени решения
                         avg = self.stats.get("captcha_auto_avg_sec", solve_time)
                         self.stats["captcha_auto_avg_sec"] = avg * 0.8 + solve_time * 0.2
                         llog("LOOKUP", f"@{bot} на {session}: капчу решил авто-солвер за {solve_time:.1f}s → "
-                                       f"кнопка {idx + 1}")
+                                       f"кнопка {idx + 1}"
+                                       + (f" (с {len(tried)}-й попытки)" if len(tried) > 1 else ""))
                         self._captcha.pop(token, None)
                         if self._captcha_by_session.get(session) == token:
                             self._captcha_by_session.pop(session, None)
                         await asyncio.sleep(2.0)
                         return True
-                    log.warning("Lookup: авто-клик не прошёл (%s) — передаю админам", res)
+                    log.info("Lookup: авто-клик %d (из топ-%d) не прошёл (%s)",
+                             idx + 1, len(idxs), res)
+                    # funstat мог заменить капчу новой — пауза даёт боту время
+                    await asyncio.sleep(1.5)
+                    # перепроверим: токен ещё активен? Иначе funstat уже сдался
+                    if token not in self._captcha:
+                        break
+                if idxs:
+                    log.warning("Lookup: все %d авто-кандидатов не прошли — передаю админам", len(idxs))
                     self.stats["captcha_auto_fail"] = self.stats.get("captcha_auto_fail", 0) + 1
 
             # 2) без картинки — админ не сможет её решить, и без на кеш попасть нечему.
