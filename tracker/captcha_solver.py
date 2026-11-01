@@ -1019,6 +1019,22 @@ class CaptchaSolver:
                     pass
                 return results
 
+        # 1b) OCR не дал однозначного ответа, но собрал гипотезы — вытащим топ слабых матчей.
+        # Это оправданная трата токенов retry: пусть funstat подтвердит или отвергнет,
+        # а не отправляем сразу админу.
+        if self._ocr_available:
+            try:
+                hyps = await asyncio.to_thread(ocr_words, photo)
+                hyps.sort(key=lambda x: -x[1])
+                for w, _ in hyps[:12]:
+                    alt = match_word_to_button(w, btns)
+                    if alt is not None and alt not in results:
+                        results.append(alt)
+                        if len(results) >= 2:
+                            break
+            except Exception:
+                pass
+
         # 2) vision API — защитимся от любых исключений, иначе капча не решается НИЧЕМ
         if self._vision.enabled:
             try:
@@ -1036,7 +1052,13 @@ class CaptchaSolver:
                 idx = match_word_to_button(word, btns)
                 if idx is not None:
                     log.info("Captcha solver: vision → %r → кнопка %d (%s)", word, idx, btns[idx])
-                    return [idx]
+                    # vision — первая, OCR-слабый — потом (на retry)
+                    if idx not in results:
+                        results.insert(0, idx)
+                    else:
+                        results.remove(idx)
+                        results.insert(0, idx)
+                    return results
                 log.info("Captcha solver: vision вернул %r, но ни одна кнопка не подошла", word)
 
         return results
