@@ -572,10 +572,12 @@ class ListingPipeline:
             await self.db.update_listing(l)
             return
         llog("FILTER", f"#{l.listing_id} seller passed ({sr.code})")
-        # См. выше — ссылка tg://user?id= работает для положительных user_id (owner_found_via).
+        # Ссылка tg://user?id= работает для положительных user_id (owner_found_via).
         has_contactable = bool(l.seller_username) or (
             l.owner_found_via and l.seller_id is not None and l.seller_id > 0)
-        if settings.require_username and not has_contactable:
+        # owner_not_found путь шлёт лот С ПОМЕТКОЙ (user: 'и бывает иногда что акки выдает где юза нет'
+        # — но тот был для видимых продавцов; скрытых не-найденных шлём как есть, с пометкой в seller_line)
+        if settings.require_username and not has_contactable and not getattr(l, "owner_not_found", False):
             await self._reject_no_username(l)
             return
         await self._send_stage(ev, l, base, t_start)
