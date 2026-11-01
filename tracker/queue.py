@@ -703,23 +703,24 @@ class ListingPipeline:
 
         # Сначала проверяем то, что уже известно (сообщения, Level, язык), и только если продавец
         # прошёл — отдельный запрос за количеством его NFT. Отсеянным продавцам лишний запрос не нужен.
+        # Отрицательные seller_id — pseudo-ID (из хеша username, настоящего ID у нас нет) — пропускаем
+        # все профильные запросы: они гарантированно упадут 'Could not find input entity'.
+        has_real_id = l.seller_type == "user" and l.seller_id and l.seller_id > 0
         sr = self.seller_filter.check(l)
-        if sr.passed and settings.max_seller_nfts > 0 and l.seller_type == "user" and l.seller_id:
+        if sr.passed and settings.max_seller_nfts > 0 and has_real_id:
             l.seller_nfts = await self._nft_count(l)
             sr = self.seller_filter.check(l)
         # продавец без телефона/био/канала: последний объективный шанс — язык текстов к его подаркам
-        if sr.code == "UNKNOWN_BLOCKED" and l.seller_type == "user" and l.seller_id:
+        if sr.code == "UNKNOWN_BLOCKED" and has_real_id:
             l.seller_gift_text = await self._gift_texts(l)
             sr = self.seller_filter.check(l)
         # всё ещё непонятно — смотрим истории и посты личного канала
         # (2-3 лишних запроса на продавца — только для дорогих лотов, чтобы не перегружать аккаунты)
-        if (sr.code == "UNKNOWN_BLOCKED" and l.seller_type == "user" and l.seller_id
-                and self._is_expensive(l)):
+        if (sr.code == "UNKNOWN_BLOCKED" and has_real_id and self._is_expensive(l)):
             l.seller_extra_text = await self._extra_texts(l)
             sr = self.seller_filter.check(l)
         # продавец прошёл только по текстам/историям — лимит NFT ещё не проверяли
-        if (sr.passed and l.seller_nfts is None and settings.max_seller_nfts > 0
-                and l.seller_type == "user" and l.seller_id):
+        if (sr.passed and l.seller_nfts is None and settings.max_seller_nfts > 0 and has_real_id):
             l.seller_nfts = await self._nft_count(l)      # часто уже в кэше из запроса текстов подарков
             sr = self.seller_filter.check(l)
         return sr
