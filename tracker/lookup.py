@@ -44,7 +44,9 @@ _SERVICE_NAMES = {"joinchat", "addstickers", "addemoji", "share", "proxy", "sock
 _WAIT_WORDS = ("ищу", "поиск", "подожд", "загруж", "search", "wait", "loading", "⏳", "🔎")
 # Rate-limit / слишком-часто сообщения: не считаем за «не найдено», не кешируем негативно
 _RATE_LIMIT_WORDS = ("слишком часто", "too fast", "slow down", "rate limit", "подожди", "не спеши",
-                     "лимит", "ограниче", "too many requests", "флуд", "flood")
+                     "лимит", "ограниче", "too many requests", "флуд", "flood",
+                     "попробуйте позже", "попробуй позже", "try later", "try again later",
+                     "cooldown", "кулдаун", "retry", "повторите позже")
 _MAX_PENDING = int(os.environ.get("LOOKUP_MAX_PENDING") or "5000")   # не больше N лотов в очереди на поиск
 _CACHE_TTL = 3600.0               # кандидаты по одному имени — час
 _NEG_CACHE_TTL = 3600.0           # «не найдено» по имени — час (не долбим funstat повторно)
