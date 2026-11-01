@@ -1005,10 +1005,11 @@ class CaptchaSolver:
             if idx is not None:
                 cache_put(ck, idx)
                 results.append(idx)
-                # дополнительно — лучшие OCR слова, сматченные к кнопкам (как 2-3 кандидата)
+                # дополнительно — лучшие OCR слова (по confidence), сматченные к кнопкам
                 try:
                     hyps = await asyncio.to_thread(ocr_words, photo)
-                    for w, _ in hyps[:8]:
+                    hyps.sort(key=lambda x: -x[1])          # сначала гипотезы с высокой confidence
+                    for w, _ in hyps[:12]:
                         alt = match_word_to_button(w, btns)
                         if alt is not None and alt != idx and alt not in results:
                             results.append(alt)
