@@ -563,13 +563,12 @@ class OwnerLookup:
         # владельцы, уже найденные раньше под этим именем — доверяем без бота поиска, но
         # всё равно читаем профиль чтобы фильтры (PAID_MESSAGES, LEVEL_TOO_HIGH) могли сработать.
         known = await self._known(seller_name)
-        if known:
-            first = known[0]
-            # Раньше требовалось И user_id И username, иначе шли по новой к funstat. Но у многих
-            # пользователей @юза нет — после первой проверки память хранит только user_id, и каждый
-            # следующий лот этого продавца снова грыз лимит funstat'а. Теперь достаточно user_id
-            # (user_id > 0): username (при наличии) всё равно подтянется из enrich_seller через
-            # session.get_entity. Если user_id нет — через память не ходим: нужно резолвить username.
+        # Раньше требовалось И user_id И username, иначе шли по новой к funstat. Но у многих
+        # пользователей @юза нет — после первой проверки память хранит только user_id, и каждый
+        # следующий лот этого продавца снова грыз лимит funstat'а. Теперь достаточно user_id
+        # (user_id > 0): username (при наличии) всё равно подтянется из enrich_seller через
+        # session.get_entity. Если user_id нет — через память не ходим: нужно резолвить username.
+        for first in known:
             if first.user_id and first.user_id > 0:
                 self.stats["found"] += 1
                 self.stats["from_memory"] = self.stats.get("from_memory", 0) + 1
@@ -859,8 +858,10 @@ class OwnerLookup:
                              idx + 1, len(idxs), res)
                     # funstat мог заменить капчу новой — пауза даёт боту время
                     await asyncio.sleep(1.5)
-                    # перепроверим: токен ещё активен? Иначе funstat уже сдался
-                    if token not in self._captcha:
+                    # перепроверим: токен ещё активен? Иначе funstat уже сдался или
+                    # параллельно админ успел нажать и закрыть капчу
+                    c_now = self._captcha.get(token)
+                    if c_now is None or c_now.get("event", asyncio.Event()).is_set():
                         break
                 if idxs:
                     log.warning("Lookup: все %d авто-кандидатов не прошли — передаю админам", len(idxs))
