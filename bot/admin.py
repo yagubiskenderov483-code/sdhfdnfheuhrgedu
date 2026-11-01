@@ -1359,15 +1359,25 @@ def build_routers(app: "App") -> list[Router]:
             text=f"💰 Торговый бот: @{tb}" if tb else "💰 Добавить торгового бота (оффер)",
             callback_data="flt:TRADEBOT")])
         rows.append([InlineKeyboardButton(text="⚡ Скорость трекера", callback_data="flt:SPEED")])
+        rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="flt:REFRESH"),
+                     InlineKeyboardButton(text="📊 Статус", callback_data="status:refresh")])
         # короткая строка о текущих настройках скорости — чтоб сразу видеть
         speed_line = (f"⚡ Скорость: маркет {settings.catalog_interval:g}s · "
                       f"трекер {settings.tracker_interval:g}s · "
                       f"funstat {settings.lookup_interval:g}s · "
                       f"капча-ждать {settings.lookup_captcha_wait:g}s")
+        # мини-статус: сколько аккаунтов живо, сколько капч, какой темп
+        c = app.sessions.counts()
+        pipe_stats = app.pipeline.stats
+        lk_stats = getattr(app.lookup, "stats", {}) if hasattr(app, "lookup") else {}
+        mini_status = (f"👥 Аккаунты: 🟢{c.get('ACTIVE', 0)} ⏳{c.get('FLOOD_WAIT', 0)} 🔴{c.get('ERROR', 0) + c.get('AUTH_ERROR', 0)}  "
+                       f"| 🎁 найдено {pipe_stats.get('new', 0)} / отправлено {pipe_stats.get('sent', 0)}  "
+                       f"| 🧩 капч: {lk_stats.get('captcha', 0)} (авто {lk_stats.get('captcha_auto', 0)})")
         text = ("🎛 <b>Фильтры лотов</b>\nНажмите, чтобы переключить — применяется сразу и переживает деплой.\n"
                 f"Мин. цена: {settings.min_stars}⭐ · флор коллекции от {settings.collection_min_floor}⭐ "
                 "(менять: /set MIN_STARS …)\n"
                 f"{speed_line}\n"
+                f"{mini_status}\n"
                 "Почему лоты отсеиваются: /why")
         return text, InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1590,6 +1600,19 @@ def build_routers(app: "App") -> list[Router]:
             await q.answer("Только для админов", show_alert=True)
             return
         key = q.data.split(":", 1)[1]
+        if key == "REFRESH":
+            # Перерисовать /panel целиком — обновятся мини-статус и состояния всех переключателей
+            text, kb = _panel()
+            try:
+                await q.message.edit_text(text, reply_markup=kb, parse_mode="HTML",
+                                          disable_web_page_preview=True)
+                await q.answer("Обновлено")
+            except Exception as e:
+                if "message is not modified" in str(e):
+                    await q.answer("Без изменений")
+                else:
+                    await q.answer(f"Ошибка: {type(e).__name__}", show_alert=True)
+            return
         if key == "LOOKUPBOT":
             cur = settings.lookup_bot_username or ""
             msg = ("🔍 <b>Бот поиска по имени</b>\n\n"
