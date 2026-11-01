@@ -662,10 +662,20 @@ def build_routers(app: "App") -> list[Router]:
                 if len(xs) >= 3:
                     lines.append(f"{title}: обычно {_q(xs, .5):.1f} с, 9 из 10 быстрее {_q(xs, .9):.1f} с "
                                  f"(последние {len(xs)})")
+        lk_stats = getattr(getattr(app, "lookup", None), "stats", {}) or {}
+        pend_cap = app.lookup.pending_captchas() if hasattr(app, "lookup") and app.lookup else 0
         lines += [
             "", "<b>🎁 Лоты</b>",
             f"Найдено: {pipe.stats['new']} · отправлено: {pipe.stats['sent']} · в очереди: {pipe.queue.qsize()}",
             f"Последний найден: {_ago(pipe.last_new_at)} · отправлен: {_ago(pipe.last_sent_at)}",
+        ]
+        if lk_stats:
+            lines.append(f"🔍 funstat: найдено {lk_stats.get('found', 0)} · не найдено {lk_stats.get('not_found', 0)} "
+                         f"· из памяти {lk_stats.get('from_memory', 0)} · в очереди на поиск {app.lookup.queue_size()}")
+            lines.append(f"🧩 капч: {lk_stats.get('captcha', 0)} · авто-решено {lk_stats.get('captcha_auto', 0)} "
+                         f"· не смог {lk_stats.get('captcha_auto_fail', 0)}"
+                         + (f" · активных сейчас {pend_cap}" if pend_cap else ""))
+        lines += [
             f"Повторы {pipe.stats.get('duplicates', 0)} · смена цены {coord.stats.get('price_moves', 0)} · "
             f"старые {coord.stats.get('silent', 0)} · устаревшие {pipe.stats.get('stale', 0)} · "
             f"автозамена аккаунта {pipe.stats.get('failover', 0)} · ошибки опроса {coord.stats.get('poll_errors', 0)}",
