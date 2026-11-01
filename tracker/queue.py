@@ -832,7 +832,10 @@ class ListingPipeline:
     async def _lookup_then_process(self, l: Listing) -> None:
         # Жёсткий таймаут на весь lookup. Иначе task может висеть на сессии в FloodWait
         # + ожидании капчи + ответа funstat десятки минут (user: '20 мин подряд потом стоп').
-        timeout = max(60.0, min(600.0, settings.lookup_captcha_wait + settings.lookup_timeout * 2 + 30))
+        # До 3 капч подряд × (captcha_wait + lookup_timeout) + подстраховка 30с.
+        # Для 90с capchta_wait и 15с lookup_timeout → ~345s. Иначе лоты с несколькими капчами
+        # тонут в 150с таймауте и теряются до admin fallback'а.
+        timeout = max(60.0, min(600.0, (settings.lookup_captcha_wait + settings.lookup_timeout) * 3 + 30))
         try:
             found = await asyncio.wait_for(self._lookup_owner(l), timeout=timeout)
         except asyncio.TimeoutError:

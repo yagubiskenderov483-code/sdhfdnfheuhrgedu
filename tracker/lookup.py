@@ -812,10 +812,18 @@ class OwnerLookup:
                     return await client.download_media(msg, file=bytes)
                 except Exception:
                     return None
-            try:
-                photo = await self._run(session, _photo, timeout=30)
-            except Exception:
-                photo = None
+            # 2 попытки скачать картинку — Telegram иногда возвращает FILE_REFERENCE_EXPIRED
+            # или кратковременные ошибки, повторная загрузка через 1с обычно проходит
+            photo = None
+            for attempt in range(2):
+                try:
+                    photo = await self._run(session, _photo, timeout=30)
+                except Exception:
+                    photo = None
+                if photo:
+                    break
+                if attempt == 0:
+                    await asyncio.sleep(1.0)
             self._captcha[token]["photo"] = photo
 
             # ВСЕГДА пробуем сами. User явно просил не напрягать его капчами.
