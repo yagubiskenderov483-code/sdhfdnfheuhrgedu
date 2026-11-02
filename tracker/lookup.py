@@ -1002,18 +1002,22 @@ class OwnerLookup:
                     llog("LOOKUP", f"{trust_cand.key()}: funstat вернул {len(cands)} кандидатов, "
                                    f"один из них совпал по имени — доверяем ему")
             if trust_cand is not None and (trust_cand.user_id or trust_cand.username):
-                # Пытаемся заполнить недостающий user_id из локального кеша Telethon
+                # Пытаемся заполнить недостающий user_id из локального кеша ЛЮБОЙ Telethon session
+                # (не только текущей — вдруг другая сессия уже видела этого юзера)
                 uid = trust_cand.user_id
                 if uid is None and trust_cand.username:
-                    w = self.sessions.get(session)
-                    sess = getattr(getattr(w, "client", None), "session", None)
-                    if sess is not None:
+                    for w in self.sessions.workers.values():
+                        sess = getattr(getattr(w, "client", None), "session", None)
+                        if sess is None:
+                            continue
                         try:
                             peer = sess.get_input_entity(trust_cand.username)
                             if peer is not None:
                                 uid = getattr(peer, "user_id", None)
+                                if uid:
+                                    break
                         except Exception:
-                            pass
+                            continue
                 # Если user_id всё равно нет, но есть username — делаем псевдо-ID
                 # (стабильный хеш от username) чтобы было куда прицепить seller_id/seller_key.
                 # Пост получит кнопку с t.me/<username> ссылкой.
@@ -1037,6 +1041,7 @@ class OwnerLookup:
         if key in self._peers:
             return self._peers[key]
         peer = None
+        # Сначала — текущая сессия (её кэш первый, он быстрее)
         w = self.sessions.get(session)
         sess = getattr(getattr(w, "client", None), "session", None)
         if sess is not None:
@@ -1046,6 +1051,24 @@ class OwnerLookup:
                     break
                 except Exception:
                     continue
+        # Если текущая не нашла — проверим кэши ВСЕХ других сессий (бесплатно, без лимита).
+        # Один из других аккаунтов мог видеть этого юзера раньше и иметь access_hash.
+        if peer is None:
+            for w2 in self.sessions.workers.values():
+                if w2.name == session:
+                    continue
+                sess2 = getattr(getattr(w2, "client", None), "session", None)
+                if sess2 is None:
+                    continue
+                for k in ((c.username,) if c.username else ()) + ((c.user_id,) if c.user_id else ()):
+                    try:
+                        peer = sess2.get_input_entity(k)
+                        if peer is not None:
+                            break
+                    except Exception:
+                        continue
+                if peer is not None:
+                    break
         if peer is None:
             now = time.monotonic()
             hist = [t for t in self._resolves.get(session, []) if now - t < 3600]
