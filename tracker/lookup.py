@@ -883,10 +883,19 @@ class OwnerLookup:
                 if self._captcha_by_session.get(session) == token:
                     self._captcha_by_session.pop(session, None)
                 return False
+            notify_failed = False
             try:
                 await self.on_captcha(token, session, photo, [t for t, _ in buttons])
             except Exception as e:
                 log.warning("Lookup: не удалось отправить капчу админам: %s", e)
+                notify_failed = True
+            if notify_failed:
+                # Админы не получили капчу (бот без прав, админов нет, сеть) — ждать админа
+                # смысла нет. Освобождаем сессию для следующего лота.
+                self._captcha.pop(token, None)
+                if self._captcha_by_session.get(session) == token:
+                    self._captcha_by_session.pop(session, None)
+                return False
             llog("LOOKUP", f"@{bot} на {session} просит капчу — отправил админам")
         c = self._captcha[token]
         try:
