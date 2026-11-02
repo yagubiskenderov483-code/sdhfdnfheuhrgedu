@@ -1248,6 +1248,7 @@ def build_routers(app: "App") -> list[Router]:
             return
         reload_settings()
         app.sessions.limiter.set_rate(settings.global_rps)
+        app.sessions._base_rps = float(settings.global_rps)
         app.formatter.template_path = settings.path(settings.template_path)
         app.formatter.reload()
         app.seller_filter.reload()
@@ -1802,6 +1803,8 @@ def build_routers(app: "App") -> list[Router]:
             return
         if parts[0].upper() == "GLOBAL_RPS":
             app.sessions.limiter.set_rate(settings.global_rps)
+            # обновляем «базовый» RPS для adaptive_throttle, иначе шторм вернёт старое значение
+            app.sessions._base_rps = float(settings.global_rps)
         if parts[0].upper() in ("COLLECTION_MIN_FLOOR", "COLLECTION_FLOOR_MODE") and not app.coordinator.paused:
             try:
                 await app.coordinator.refresh_catalog()   # применить порог сразу, а не через цикл

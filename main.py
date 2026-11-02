@@ -274,6 +274,7 @@ class App:
                                     "COLD_POLL_INTERVAL", "SYNC_MODE"])
             await self._set_flag("migr_speed_v5")
         self.sessions.limiter.set_rate(settings.global_rps)     # значения после восстановления /set
+        self.sessions._base_rps = float(settings.global_rps)     # baseline для adaptive throttle
         if os.getenv("USE_PROXIES", "0").strip().lower() not in ("1", "true", "yes", "on"):
             n = self.storage.wipe_proxies()          # прокси выключены — стираем пул и привязки
             if n:
@@ -456,6 +457,7 @@ class App:
                         log.warning("Could not store paused flag: %s", e)
                 self.users_closed = bool(self.backup.flags.get("users_closed"))
                 self.sessions.limiter.set_rate(settings.global_rps)
+                self.sessions._base_rps = float(settings.global_rps)
                 found = bool(self.backup.backup_names) or self.backup.restored_count
                 try:
                     await self.sessions.rescan()
