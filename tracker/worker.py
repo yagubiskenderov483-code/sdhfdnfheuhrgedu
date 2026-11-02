@@ -312,8 +312,18 @@ class SessionWorker:
                 await asyncio.sleep(wait)
             await self.limiter.acquire()
             rps = max(0.05, self._rps() * self.speed)
+            # ПРЕВЕНТИВНАЯ пауза: аккаунт недавно часто ловил FloodWait — не доводим до нового.
+            # Добавляем +50% к обычной паузе, пока не стихнет 10 мин без флуда.
+            # user: 'сделай чтоб акки не сдыхали'
+            now_m = time.monotonic()
+            hot_floods = sum(1 for t in self.recent_floods if now_m - t < 1800)
+            padding = 1.0
+            if hot_floods >= 5:
+                padding = 1.8    # х1.8 к интервалу — Telegram явно давит
+            elif hot_floods >= 3:
+                padding = 1.4
             # сокращённая пауза не теряется: следующий запрос подождёт её остаток плюс свою обычную
-            self.next_allowed = max(time.monotonic(), self.next_allowed) + 1.0 / rps
+            self.next_allowed = max(time.monotonic(), self.next_allowed) + (1.0 / rps) * padding
             self.requests += 1
             if self.status == WorkerStatus.FLOOD:
                 self.status = WorkerStatus.ACTIVE
