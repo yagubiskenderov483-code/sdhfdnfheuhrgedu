@@ -1036,12 +1036,13 @@ class OwnerLookup:
 
     async def _input_user(self, session: str, c: Candidate):
         """InputPeerUser кандидата: из своего кэша, из кэша сессии Telethon (без запросов), и только
-        потом — запросом к Telegram, с лимитом в час (чтобы не словить FloodWait на сутки)."""
+        потом — запросом к Telegram, с лимитом в час (чтобы не словить FloodWait на сутки).
+        ВАЖНО: access_hash специфичен к сессии — не используем кэш ДРУГОЙ сессии, иначе получим
+        'entity invalid' при реальном запросе на этой сессии."""
         key = (session, c.key())
         if key in self._peers:
             return self._peers[key]
         peer = None
-        # Сначала — текущая сессия (её кэш первый, он быстрее)
         w = self.sessions.get(session)
         sess = getattr(getattr(w, "client", None), "session", None)
         if sess is not None:
@@ -1051,24 +1052,6 @@ class OwnerLookup:
                     break
                 except Exception:
                     continue
-        # Если текущая не нашла — проверим кэши ВСЕХ других сессий (бесплатно, без лимита).
-        # Один из других аккаунтов мог видеть этого юзера раньше и иметь access_hash.
-        if peer is None:
-            for w2 in self.sessions.workers.values():
-                if w2.name == session:
-                    continue
-                sess2 = getattr(getattr(w2, "client", None), "session", None)
-                if sess2 is None:
-                    continue
-                for k in ((c.username,) if c.username else ()) + ((c.user_id,) if c.user_id else ()):
-                    try:
-                        peer = sess2.get_input_entity(k)
-                        if peer is not None:
-                            break
-                    except Exception:
-                        continue
-                if peer is not None:
-                    break
         if peer is None:
             now = time.monotonic()
             hist = [t for t in self._resolves.get(session, []) if now - t < 3600]
