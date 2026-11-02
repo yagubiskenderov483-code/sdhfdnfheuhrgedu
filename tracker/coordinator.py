@@ -934,7 +934,20 @@ class MarketplaceCoordinator:
                     t = asyncio.create_task(once(seq), name=f"catalog-{seq}")
                     inflight.add(t)
                     t.add_done_callback(inflight.discard)
-                await asyncio.sleep(max(0.2, settings.catalog_interval))
+                # Если идёт шторм FloodWait, разряжаем каталог тоже: не нужно долбить каждые 0.5с
+                # когда и так аккаунты падают. 10+/мин → x2, 30+/мин → x5.
+                sleep_time = max(0.2, settings.catalog_interval)
+                try:
+                    fpm = self.sessions.flood_rate_per_minute()
+                    if fpm >= 30:
+                        sleep_time *= 5
+                    elif fpm >= 20:
+                        sleep_time *= 3
+                    elif fpm >= 10:
+                        sleep_time *= 2
+                except Exception:
+                    pass
+                await asyncio.sleep(sleep_time)
         finally:
             for t in list(inflight):
                 t.cancel()
