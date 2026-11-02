@@ -39,8 +39,9 @@ class SessionManager:
                    for t in getattr(w, "recent_floods", []) if now - t < 60)
 
     def apply_adaptive_throttle(self) -> None:
-        """Если шторм FloodWait по всему флоту — замедляем GLOBAL RPS в 2-5x.
-        Через 3 минуты спокойствия возвращаем. Вызывается из _bench_loop."""
+        """Если шторм FloodWait по всему флоту — замедляем GLOBAL RPS в 2-5x
+        И превентивно даём ВСЕМ рабочим воркерам speed-штраф, чтобы те кто ещё не словил
+        тоже не словили. Через 3 минуты спокойствия возвращаем. Вызывается из _bench_loop."""
         n = self.flood_rate_per_minute()
         now = time.monotonic()
         if n >= 10:
@@ -49,6 +50,16 @@ class SessionManager:
             if abs(self.limiter.rate - new_rate) > 0.1:
                 self.limiter.set_rate(new_rate)
                 log.warning("FloodWait storm (%s/min) — global RPS → %.1f (×%.2f)", n, new_rate, factor)
+            # превентив: ВСЕ ACTIVE воркеры (не flood'нувшие) тоже замедляются до speed*factor,
+            # но не ниже 0.3 (чтобы не умирать совсем). Это распределяет нагрузку равномерно.
+            min_speed = 0.3 if factor >= 0.5 else 0.2
+            for w in self.workers.values():
+                if w.is_usable() and w.speed > min_speed:
+                    old = w.speed
+                    w.speed = max(min_speed, old * factor)
+                    if old - w.speed > 0.05:
+                        log.info("Session %s: превентивно speed %.2f → %.2f (шторм)",
+                                 w.name, old, w.speed)
             self._throttle_until = now + 180
         elif self.limiter.rate < self._base_rps and now >= self._throttle_until:
             self.limiter.set_rate(self._base_rps)
