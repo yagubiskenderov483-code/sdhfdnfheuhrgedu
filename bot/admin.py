@@ -1380,9 +1380,18 @@ def build_routers(app: "App") -> list[Router]:
         c = app.sessions.counts()
         pipe_stats = app.pipeline.stats
         lk_stats = getattr(app.lookup, "stats", {}) if hasattr(app, "lookup") else {}
+        # адаптивный throttle: если шторм FloodWait активен — покажем
+        try:
+            fpm = app.sessions.flood_rate_per_minute()
+            base = app.sessions._base_rps
+            cur = app.sessions.limiter.rate
+            throttle_bar = f"\n⚠️ Адаптивный throttle: {fpm} FloodWait/мин, глобальный RPS {cur:.0f}/{base:.0f}" if cur < base else ""
+        except Exception:
+            throttle_bar = ""
         mini_status = (f"👥 Аккаунты: 🟢{c.get('ACTIVE', 0)} ⏳{c.get('FLOOD_WAIT', 0)} 🔴{c.get('ERROR', 0) + c.get('AUTH_ERROR', 0)}  "
                        f"| 🎁 найдено {pipe_stats.get('new', 0)} / отправлено {pipe_stats.get('sent', 0)}  "
-                       f"| 🧩 капч: {lk_stats.get('captcha', 0)} (авто {lk_stats.get('captcha_auto', 0)})")
+                       f"| 🧩 капч: {lk_stats.get('captcha', 0)} (авто {lk_stats.get('captcha_auto', 0)})"
+                       + throttle_bar)
         text = ("🎛 <b>Фильтры лотов</b>\nНажмите, чтобы переключить — применяется сразу и переживает деплой.\n"
                 f"Мин. цена: {settings.min_stars}⭐ · флор коллекции от {settings.collection_min_floor}⭐ "
                 "(менять: /set MIN_STARS …)\n"
