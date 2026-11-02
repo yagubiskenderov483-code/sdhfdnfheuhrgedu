@@ -587,6 +587,31 @@ class App:
         if last_fail:
             lines += ["", f"❌ Последняя ошибка отправки: <code>{html.escape(last_fail[:300])}</code>",
                       "Проверьте, что бот — админ группы с правом писать и управлять темами (/test channel)."]
+        # Адаптивный throttle: если шторм FloodWait, пишем причину явно
+        try:
+            fpm = self.sessions.flood_rate_per_minute()
+            base = getattr(self.sessions, "_base_rps", 0)
+            cur = self.sessions.limiter.rate
+            if fpm >= 10 or (base and cur < base):
+                lines += ["", f"⚠️ <b>Шторм FloodWait</b>: {fpm}/мин. Трекер превентивно замедлен "
+                              f"(GLOBAL_RPS {cur:.0f} из {base:.0f}). Аккаунты получают передышку, "
+                              f"как шторм утихнет — скорость восстановится автоматически.",
+                              "Проверьте /sessions — скорее всего нужны прокси (USE_PROXIES=1 → /proxies)."]
+        except Exception:
+            pass
+        # funstat статистика по капчам: если авто-решатель не справляется, админ видит
+        try:
+            lk = self.lookup.stats if self.lookup else {}
+            cap_total = lk.get("captcha", 0)
+            cap_auto = lk.get("captcha_auto", 0)
+            cap_fail = lk.get("captcha_auto_fail", 0)
+            if cap_total > 0:
+                pct = (cap_auto / cap_total * 100) if cap_total else 0
+                lines += ["", f"🧩 Капч: {cap_total} · авто-решено {cap_auto} ({pct:.0f}%) · "
+                              f"не смог {cap_fail}" + (f" · активных {self.lookup.pending_captchas()}"
+                                                       if self.lookup.pending_captchas() else "")]
+        except Exception:
+            pass
         if found == 0 and self.sessions.usable() and not self.coordinator.paused:
             lines += ["", "Новых лотов не найдено совсем — рынок тихий или коллекции ещё синхронизируются."]
         return "\n".join(lines)
