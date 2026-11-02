@@ -698,6 +698,22 @@ def build_routers(app: "App") -> list[Router]:
     async def cmd_status(m: Message) -> None:
         await _answer_long(m, _status_text(), reply_markup=_status_kb())
 
+    @public.callback_query(F.data == "sess:refresh")
+    async def cb_sessions_refresh(q: CallbackQuery) -> None:
+        if not is_allowed(q.from_user.id):
+            await q.answer("Только для админов", show_alert=True)
+            return
+        try:
+            text, kb = _sessions_view(q.from_user.id)
+            await q.message.edit_text(text, reply_markup=kb, parse_mode="HTML",
+                                      disable_web_page_preview=True)
+            await q.answer("Обновлено")
+        except Exception as e:
+            if "message is not modified" in str(e):
+                await q.answer("Без изменений")
+            else:
+                await q.answer(f"Ошибка: {type(e).__name__}", show_alert=True)
+
     @public.callback_query(F.data == "status:refresh")
     async def cb_status_refresh(q: CallbackQuery) -> None:
         if not is_allowed(q.from_user.id):
@@ -768,7 +784,9 @@ def build_routers(app: "App") -> list[Router]:
                     rows.append([btn])
         if len(app.sessions.workers) > 95:
             lines.append(f"… и ещё {len(app.sessions.workers) - 95}")
-        return "\n".join(lines), (InlineKeyboardMarkup(inline_keyboard=rows) if rows else None)
+        rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="sess:refresh"),
+                     InlineKeyboardButton(text="📊 Статус", callback_data="status:refresh")])
+        return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows)
 
     @users.message(or_f(Command("sessions"), F.text == BTN_SESSIONS))
     async def cmd_sessions(m: Message) -> None:
