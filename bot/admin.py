@@ -1318,8 +1318,7 @@ def build_routers(app: "App") -> list[Router]:
                          f"— {price}" + (f" — {html.escape(reason[:60])}" if r["status"] != "SENT" else ""))
         await _answer_long(m, "\n".join(lines))
 
-    @users.message(or_f(Command("stats"), F.text == BTN_STATS))
-    async def cmd_stats(m: Message) -> None:
+    async def _stats_text() -> str:
         counts = await app.db.status_counts()
         since = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - 86400))
         day = await app.db.counts_since(since)
@@ -1343,7 +1342,32 @@ def build_routers(app: "App") -> list[Router]:
             lines += [f"{names.get(k, k)}: {v}" for k, v in sorted(rej.items(), key=lambda x: -x[1])]
         lines += ["", "<b>За 24 часа:</b>"]
         lines += [f"{_ST.get(k, k)}: {v}" for k, v in sorted(day.items(), key=lambda x: -x[1])] or ["—"]
-        await _answer_long(m, "\n".join(lines))
+        return "\n".join(lines)
+
+    def _stats_kb() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text="🔄 Обновить", callback_data="stats:refresh"),
+            InlineKeyboardButton(text="📊 Статус", callback_data="status:refresh"),
+        ]])
+
+    @users.message(or_f(Command("stats"), F.text == BTN_STATS))
+    async def cmd_stats(m: Message) -> None:
+        await _answer_long(m, await _stats_text(), reply_markup=_stats_kb())
+
+    @public.callback_query(F.data == "stats:refresh")
+    async def cb_stats_refresh(q: CallbackQuery) -> None:
+        if not is_allowed(q.from_user.id):
+            await q.answer("Только для админов", show_alert=True)
+            return
+        try:
+            await q.message.edit_text(await _stats_text(), reply_markup=_stats_kb(),
+                                      parse_mode="HTML", disable_web_page_preview=True)
+            await q.answer("Обновлено")
+        except Exception as e:
+            if "message is not modified" in str(e):
+                await q.answer("Без изменений")
+            else:
+                await q.answer(f"Ошибка: {type(e).__name__}", show_alert=True)
 
     @users.message(or_f(Command("settings"), Command("filters")))
     async def cmd_settings(m: Message) -> None:
