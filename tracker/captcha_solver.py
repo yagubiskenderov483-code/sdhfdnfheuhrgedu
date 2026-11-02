@@ -436,13 +436,22 @@ _WORD_TO_EMOJI: dict[str, tuple[str, ...]] = {
 
 def _norm_word(s: str) -> str:
     """Нормализуем OCR-результат: только буквы, нижний регистр, замена похожих.
-    Сначала заменяем цифры на буквы которые OCR мог спутать: 0→o, 1→l, 5→s, 2→z,
-    8→b, 6→g, 4→a, 7→t. Иначе 'c4t' превращался в 'ct' вместо 'cat'."""
+    Этапы:
+    1. Цифры на похожие буквы (OCR часто путает: 0↔o, 1↔l, 5↔s, 2↔z, 8↔b, 6↔g, 4↔a).
+    2. Кириллические «близнецы» на латиницу (а→a, о→o, е→e, р→p, с→c, ...) —
+       OCR с смешанным whitelist иногда читает 'star' как 'ѕтар' вперемешку.
+    3. Остаются только буквы, нижний регистр."""
     s = unicodedata.normalize("NFKD", s or "").lower()
-    # tesseract путает: 0↔o, 1↔l, 5↔s, 2↔z, 8↔b, 6↔g, 4↔a, 7↔t, 3↔e, 9↔g
     digit_map = str.maketrans({"0": "o", "1": "l", "2": "z", "3": "e", "4": "a",
                                "5": "s", "6": "g", "7": "t", "8": "b", "9": "g"})
     s = s.translate(digit_map)
+    # Кириллица → латиница (визуальные близнецы)
+    cyr_map = str.maketrans({
+        "а": "a", "в": "b", "е": "e", "ё": "e", "к": "k", "м": "m", "н": "h",
+        "о": "o", "р": "p", "с": "c", "т": "t", "у": "y", "х": "x", "і": "i",
+        "ј": "j", "ɡ": "g", "ѕ": "s", "ԛ": "q", "ѵ": "v",
+    })
+    s = s.translate(cyr_map)
     s = "".join(ch for ch in s if ch.isalpha())
     return s
 
@@ -629,8 +638,11 @@ def _ocr_and_match(photo: bytes, buttons: list[str]) -> Optional[int]:
     if mods is None or not photo:
         return None
     pytesseract = mods[0]
+    # Разрешаем цифры тоже — OCR часто читает 's' как '5', 'o' как '0' на размытых капчах.
+    # _norm_word вернёт обратно в буквы через digit→letter mapping.
     whitelist = ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                 "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
+                 "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
+                 "0123456789")
     hyps: list[tuple[str, float]] = []
 
     # Блоки вариантов по приоритету (быстрые сначала)
@@ -707,7 +719,8 @@ def ocr_words(photo: bytes) -> list[tuple[str, float]]:
         return []
     pytesseract = mods[0]
     whitelist = ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                 "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ")
+                 "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
+                 "0123456789")
     hyps: list[tuple[str, float]] = []
 
     # Варианты предобработки: (threshold, scale, invert, sharpen, contrast, erode)
