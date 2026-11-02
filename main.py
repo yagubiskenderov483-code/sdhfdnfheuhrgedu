@@ -326,6 +326,8 @@ class App:
             targets.add(owner)
         if not targets:
             log.warning("Captcha from @%s on %s: no admins to send it to", bot_u, session)
+            raise RuntimeError("no admins to receive captcha")
+        delivered = 0
         for uid in sorted(targets):
             try:
                 if photo:
@@ -333,8 +335,12 @@ class App:
                                               reply_markup=kb)
                 else:
                     await self.bot.send_message(uid, text, reply_markup=kb)
+                delivered += 1
             except Exception as e:
                 log.warning("Captcha notify %s failed: %s", uid, e)
+        if delivered == 0:
+            # ни один админ не получил капчу — raise, чтобы lookup сразу вышел и не ждал 90с
+            raise RuntimeError("captcha not delivered to any admin")
 
     async def _notify_auth_error(self, w) -> None:
         """Telegram снёс сессию (выкинули из «Устройств», две копии бота, бан) — она уже не оживёт.
