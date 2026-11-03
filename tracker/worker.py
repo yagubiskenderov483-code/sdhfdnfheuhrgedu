@@ -259,21 +259,30 @@ class SessionWorker:
         Чем чаще и дольше FloodWait за последний час, тем сильнее замедление."""
         now = time.monotonic()
         self.recent_floods = [t for t in self.recent_floods if now - t < 3600] + [now]
+        n = len(self.recent_floods)
         factor = 0.5 if flood_seconds < 60 else 0.3
-        if len(self.recent_floods) >= 3:
+        if n >= 3:
             factor *= 0.6
-        self.speed = max(0.15, self.speed * factor)
+        if n >= 10:                 # 10+/час на одном аккаунте — Telegram режет жёстче, спасаем акк
+            factor *= 0.5
+        # Минимум speed: нельзя падать ниже 0.1 при 15+/час (user: 16/час → акк умирает)
+        # нормально; ниже 0.15 при обычной эксплуатации
+        floor = 0.08 if n >= 15 else 0.15
+        self.speed = max(floor, self.speed * factor)
         self.ok_streak = 0
-        # шторм FloodWait: 20+ за час — Telegram явно давит, продолжать на этом же темпе нельзя.
+        # шторм FloodWait: 10+ за час — Telegram явно давит, продолжать на этом же темпе нельзя.
         # Удлиняем паузу в 2-5 раз больше, чем сам FloodWait: это даёт Telegram'у «забыть» этот
         # аккаунт как спамера. Иначе: сессия отдыхает 30с → снова мгновенный FloodWait → цикл.
-        if len(self.recent_floods) >= 20:
-            extra = min(flood_seconds * 4, 900)       # не больше 15 мин сверху
+        # Раньше порог был 20/час — user'ы жаловались что аккаунты уже сдохли при 15-16, но x4 паузы
+        # ещё не включались; снизили до 10/час.
+        if n >= 10:
+            mult = 6 if n >= 20 else (4 if n >= 15 else 3)
+            extra = min(flood_seconds * mult, 1800)       # до 30 мин сверху (было 15)
             self.flood_until = now + flood_seconds + extra + 1
             log.warning("Session %s: шторм FloodWait (%s за час) — продлил паузу на %ss",
-                        self.name, len(self.recent_floods), extra)
+                        self.name, n, extra)
         log.warning("Session %s: FloodWait %ss (%s за час) — замедляю до x%.2f",
-                    self.name, flood_seconds, len(self.recent_floods), self.speed)
+                    self.name, flood_seconds, n, self.speed)
 
     def risk(self) -> str:
         """Оценка риска: ok | warn | high — по частоте FloodWait и ошибок."""
