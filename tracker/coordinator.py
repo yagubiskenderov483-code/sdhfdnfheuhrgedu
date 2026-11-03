@@ -933,7 +933,11 @@ class MarketplaceCoordinator:
 
         async def once(n: int) -> None:
             try:
-                await self.refresh_catalog(n)
+                # жёсткий потолок: если sessions.run ушёл в 6×60с retry-петлю при шторме FloodWait,
+                # inflight задача «ест» слот каталога на 6 минут и мы перестаём опрашивать каталог
+                await asyncio.wait_for(self.refresh_catalog(n), timeout=120)
+            except asyncio.TimeoutError:
+                log.warning("Catalog refresh #%s took > 120s — abandoned", n)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
