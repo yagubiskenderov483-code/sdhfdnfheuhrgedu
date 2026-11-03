@@ -621,10 +621,14 @@ class OwnerLookup:
             # Проверяем: может это rate-limit от funstat, не настоящее «нет кандидатов»?
             # В таком случае не кешируем — попробуем снова позже.
             last_text = ""
+            # ВАЖНО: session определён только в ветке «новый запрос»; из inflight-ветки
+            # и cached-ветки его нет — иначе был бы NameError. locals() безопаснее getattr.
+            session_var = locals().get("session")
             try:
                 # cands_text собирали в _ask_bot_locked — тут его нет, но мы можем взять из _cache
                 # вместо этого — проверяем по last-raw-text из _ask_bot
-                last_text = self._last_response_text.get(session, "")
+                if session_var is not None:
+                    last_text = self._last_response_text.get(session_var, "")
             except AttributeError:
                 last_text = ""
             if last_text and any(w in last_text.lower() for w in _RATE_LIMIT_WORDS):
