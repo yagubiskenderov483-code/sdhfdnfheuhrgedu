@@ -77,6 +77,13 @@ _WHY_RU = (
     ("messages:", "у продавца платные сообщения / только Premium"),
     ("level N >", "уровень продавца выше MAX_SELLER_LEVEL"),
     ("N NFT >", "у продавца больше NFT, чем MAX_SELLER_NFTS"),
+    ("у продавца нет @username", "у продавца нет @username (REQUIRE_USERNAME=true)"),
+    ("владелец не найден ботом поиска", "скрытый владелец — бот поиска не нашёл (LOOKUP_REQUIRED=true)"),
+    ("name has fewer than N letters", "имя короче 5 букв (profile hidden)"),
+    ("foreign-script letters in name", "имя не на кириллице (profile hidden)"),
+    ("foreign script in name", "имя иностранным шрифтом (profile hidden)"),
+    ("process timeout", "обработка лота зависла больше 10 минут"),
+    ("лот уже продан", "лот продали/сняли, пока искали владельца"),
 )
 
 
