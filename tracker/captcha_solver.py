@@ -1021,6 +1021,12 @@ class CaptchaSolver:
         cached = _CAPTCHA_CACHE.get(ck)
         if cached is not None and 0 <= cached < len(btns):
             log.info("Captcha solver: кеш попал → кнопка %d (%s)", cached, btns[cached])
+            # Истинный LRU: при попадании перемещаем ключ в конец — чтобы часто
+            # используемые капчи не выпадали при FIFO-очистке cache_put.
+            try:
+                _CAPTCHA_CACHE[ck] = _CAPTCHA_CACHE.pop(ck)
+            except KeyError:
+                pass
             return [cached]
 
         results: list[int] = []
