@@ -880,6 +880,15 @@ class OwnerLookup:
                 if self._captcha_by_session.get(session) == token:
                     self._captcha_by_session.pop(session, None)
                 return False
+            # 2b) без кнопок админ тоже не может решить (не на что жать) — не вешаем ему пустую
+            # клавиатуру и не ждём 90с; освобождаем сессию, лот пробует следующую
+            if not buttons:
+                log.warning("Lookup: @%s на %s — у капчи нет inline-кнопок (новый формат?), уходим",
+                            bot, session)
+                self._captcha.pop(token, None)
+                if self._captcha_by_session.get(session) == token:
+                    self._captcha_by_session.pop(session, None)
+                return False
             # 3) fallback — админ
             if self.on_captcha is None:
                 log.warning("Lookup: @%s просит капчу на %s — пройдите её вручную в этом аккаунте", bot, session)
