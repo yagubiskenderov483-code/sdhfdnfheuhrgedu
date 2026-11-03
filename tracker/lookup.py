@@ -350,6 +350,10 @@ class OwnerLookup:
         # on_captcha(token, session, photo_bytes, button_texts) — задаёт App
         # (шлёт админам картинку и кнопки); нажатие админа → solve_captcha(token, index).
         self.on_captcha = None
+        # on_bot_blocked(session: str, bot: str) — задаёт App: шлёт админу «разблокируй бот».
+        # Бьёт один раз в сутки на пару (session, bot) — не спамим.
+        self.on_bot_blocked = None
+        self._blocked_notified: dict[tuple[str, str], float] = {}
         try:
             from .captcha_solver import CaptchaSolver, _load_cache, captcha_cache_stats
             self._auto = CaptchaSolver()
@@ -721,11 +725,19 @@ class OwnerLookup:
                 log.warning("Lookup: @%s не резолвится с %s — на 10 мин не пробуем", bot, session)
             # Аккаунт заблокировал бота (владелец ЛИЧНО нажал /block в чате с funstat на этом
             # аккаунте). Пока не разблокирует — писать невозможно. Блочим на 6 часов, чтобы не
-            # тратить попытки на мёртвую пару (session, bot) снова и снова.
+            # тратить попытки на мёртвую пару (session, bot) снова и снова. Уведомим админа раз в сутки.
             elif "YOU_BLOCKED_USER" in s.upper() or "you blocked this user" in s.lower():
                 self._bot_unresolvable[(session, bot)] = time.monotonic() + 6 * 3600 - 600
                 log.error("Lookup: аккаунт %s заблокировал @%s — не пробуем 6 часов. "
                           "Разблокируйте бота в этом аккаунте вручную.", session, bot)
+                now_t = time.time()
+                last = self._blocked_notified.get((session, bot), 0)
+                if self.on_bot_blocked and now_t - last > 86400:
+                    self._blocked_notified[(session, bot)] = now_t
+                    try:
+                        await self.on_bot_blocked(session, bot)
+                    except Exception as e2:
+                        log.debug("on_bot_blocked notify failed: %s", e2)
             else:
                 log.warning("Lookup: не удалось написать @%s с %s: %s", bot, session, e)
             return None

@@ -135,6 +135,7 @@ class App:
         self.lookup = OwnerLookup(self.sessions, self.db)       # автопоиск скрытого владельца через бота поиска
         self.pipeline.owner_lookup = self.lookup
         self.lookup.on_captcha = self._send_lookup_captcha  # капчу бота поиска решает админ
+        self.lookup.on_bot_blocked = self._notify_bot_blocked  # 'You blocked this user' — просим админа разблокировать
         self.pipeline.paused_getter = lambda: self.coordinator.paused
         self.pipeline.floor_getter = lambda gid: getattr(self.coordinator.states.get(gid), "floor_stars", None)
         # коллекции, выключенные админом через /mute (хранятся в резервной копии)
@@ -348,6 +349,23 @@ class App:
         if delivered == 0:
             # ни один админ не получил капчу — raise, чтобы lookup сразу вышел и не ждал 90с
             raise RuntimeError("captcha not delivered to any admin")
+
+    async def _notify_bot_blocked(self, session: str, bot: str) -> None:
+        """Аккаунт session лично заблокировал @bot (кто-то нажал /block в чате с funstat на этом
+        аккаунте). Пока не разблокирует — лоты через него не ищутся. Шлём админу один раз в сутки."""
+        owner = next((r.owner_id for r in self.storage.list_sessions() if r.name == session), None)
+        targets = set(settings.admin_ids or set()) | set(all_admins())
+        if owner:
+            targets.add(owner)
+        text = (f"⚠️ Аккаунт <b>{html.escape(session)}</b> заблокировал @{html.escape(bot)}.\n"
+                f"Пока он в блоке, через эту сессию funstat не работает (мы её не используем 6 ч).\n\n"
+                f"Войдите в этот Telegram аккаунт → откройте чат с @{html.escape(bot)} → "
+                "«Разблокировать» внизу экрана. После этого /reload.")
+        for chat in sorted(targets):
+            try:
+                await self.bot.send_message(chat, text)
+            except Exception:
+                pass
 
     async def _notify_auth_error(self, w) -> None:
         """Telegram снёс сессию (выкинули из «Устройств», две копии бота, бан) — она уже не оживёт.
