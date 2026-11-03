@@ -1017,14 +1017,27 @@ class CaptchaSolver:
         results: list[int] = []
 
         # 1) OCR с early-exit: после первых базовых вариантов пробуем матч; если нашли — выходим.
+        # ВАЖНО: оборачиваем в wait_for — tesseract на сломанной картинке
+        # может зависнуть на минуты, блокируя всю очередь lookup.
         if self._ocr_available:
-            idx = await asyncio.to_thread(_ocr_and_match, photo, btns)
+            try:
+                idx = await asyncio.wait_for(
+                    asyncio.to_thread(_ocr_and_match, photo, btns), timeout=30
+                )
+            except asyncio.TimeoutError:
+                log.warning("Captcha solver: OCR timeout на 30s — пропускаем")
+                idx = None
+            except Exception as e:            # noqa: BLE001
+                log.warning("Captcha solver: OCR упал: %s", e)
+                idx = None
             if idx is not None:
                 cache_put(ck, idx)
                 results.append(idx)
                 # дополнительно — лучшие OCR слова (по confidence), сматченные к кнопкам
                 try:
-                    hyps = await asyncio.to_thread(ocr_words, photo)
+                    hyps = await asyncio.wait_for(
+                        asyncio.to_thread(ocr_words, photo), timeout=30
+                    )
                     hyps.sort(key=lambda x: -x[1])          # сначала гипотезы с высокой confidence
                     for w, _ in hyps[:12]:
                         alt = match_word_to_button(w, btns)
@@ -1041,7 +1054,9 @@ class CaptchaSolver:
         # а не отправляем сразу админу.
         if self._ocr_available:
             try:
-                hyps = await asyncio.to_thread(ocr_words, photo)
+                hyps = await asyncio.wait_for(
+                    asyncio.to_thread(ocr_words, photo), timeout=30
+                )
                 hyps.sort(key=lambda x: -x[1])
                 for w, _ in hyps[:12]:
                     alt = match_word_to_button(w, btns)
