@@ -681,7 +681,7 @@ def _ocr_and_match(photo: bytes, buttons: list[str]) -> Optional[int]:
                 img = _preprocess_from_base(base, threshold, scale, invert=inv, sharpen=shrp,
                                             contrast=ctr, erode=ero)
                 if img is None:
-                    return None
+                    continue        # один вариант не отрендерился — пробуем остальные
                 for psm in psms:
                     cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist={whitelist}"
                     try:
@@ -756,7 +756,7 @@ def ocr_words(photo: bytes) -> list[tuple[str, float]]:
             img = _preprocess(photo, threshold, scale, invert=inv, sharpen=shrp,
                               contrast=ctr, erode=ero)
             if img is None:
-                return hyps
+                continue        # один вариант не удался — пробуем остальные
             for psm in psms:
                 cfg = f"--oem 3 --psm {psm} -c tessedit_char_whitelist={whitelist}"
                 try:
