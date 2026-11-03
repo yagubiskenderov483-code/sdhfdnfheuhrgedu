@@ -724,6 +724,8 @@ class OwnerLookup:
             return None
         self._last_ask[session] = time.monotonic()
         self._last_response_text.pop(session, None)      # очистим перед новым запросом
+        # резолв прошёл — чистим флаг «unresolvable», иначе 10мин блок висел бы даже после восстановления
+        self._bot_unresolvable.pop((session, bot), None)
         sent_id = sent.id
 
         async def _poll(client, min_id_arg):
