@@ -287,7 +287,18 @@ class ListingPipeline:
         while True:
             _, _, ev = await self.queue.get()
             try:
-                await self.process(ev)
+                # жёсткий потолок 10мин на один лот: lookup (345с) + enrich (25с) + send (ретраи)
+                # помещаются с запасом. Если дольше — что-то залипло (бесконечное ожидание капчи,
+                # висящая сессия) и воркер нельзя терять, иначе он не берёт следующие лоты.
+                await asyncio.wait_for(self.process(ev), timeout=600)
+            except asyncio.TimeoutError:
+                log.warning("Processing %s timed out after 10min — abandoning (worker alive)",
+                            ev.listing.listing_id)
+                ev.listing.status, ev.listing.reason = ListingStatus.ERROR, "process timeout 10min"
+                try:
+                    await self.db.update_listing(ev.listing)
+                except Exception:
+                    pass
             except asyncio.CancelledError:
                 raise
             except Exception as e:
