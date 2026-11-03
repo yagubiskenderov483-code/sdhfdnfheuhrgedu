@@ -225,8 +225,10 @@ async def main():
         asyncio.get_running_loop().call_later(0.1, lambda: asyncio.ensure_future(lk.solve_captcha(token, 0)))
     lk.on_captcha = on_cap
     f = await lk.find_owner("Иван Иванов", "PlushPepe-77", 5555)
-    check(got.get("buttons") == ["🦊", "🐰", "🐶"] and got.get("photo") == b"img", "капча пришла админу с кнопками")
-    check(cc.clicked == b"a", "нажатие админа передано боту поиска")
+    # с рандом-фоллбеком (user: «не распознает → рандом → потом админ») первая кнопка кликается
+    # случайно и funstat в тестовом стабе принимает ЛЮБОЙ клик. Админ получает капчу ТОЛЬКО если
+    # рандом тоже не прошёл — поэтому в тесте проверяем что капча была решена хоть как-то.
+    check(cc.clicked in (b"a", b"b", b"c"), "кнопка нажата — авто или рандом")
     check(f is not None and f.user_id == 222, "после капчи поиск продолжился и нашёл владельца")
     # после капчи funstat САМ отвечает на предыдущую /human — повторная отправка создала бы цикл
     check(cc.sent.count("/human Иван Иванов") == 1, "команда НЕ повторена после капчи (funstat сам отвечает)")

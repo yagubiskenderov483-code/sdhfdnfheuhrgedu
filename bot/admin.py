@@ -672,9 +672,11 @@ def build_routers(app: "App") -> list[Router]:
         if lk_stats:
             lines.append(f"🔍 funstat: найдено {lk_stats.get('found', 0)} · не найдено {lk_stats.get('not_found', 0)} "
                          f"· из памяти {lk_stats.get('from_memory', 0)} · в очереди на поиск {app.lookup.queue_size()}")
-            lines.append(f"🧩 капч: {lk_stats.get('captcha', 0)} · авто-решено {lk_stats.get('captcha_auto', 0)} "
-                         f"· не смог {lk_stats.get('captcha_auto_fail', 0)}"
-                         + (f" · активных сейчас {pend_cap}" if pend_cap else ""))
+            cap_rand = lk_stats.get("captcha_random", 0)
+            rand_part = f" · рандом-решено {cap_rand}" if cap_rand else ""
+            active_part = f" · активных сейчас {pend_cap}" if pend_cap else ""
+            lines.append(f"🧩 капч: {lk_stats.get('captcha', 0)} · авто-решено {lk_stats.get('captcha_auto', 0)}"
+                         f"{rand_part} · не смог {lk_stats.get('captcha_auto_fail', 0)}{active_part}")
         lines += [
             f"Повторы {pipe.stats.get('duplicates', 0)} · смена цены {coord.stats.get('price_moves', 0)} · "
             f"старые {coord.stats.get('silent', 0)} · устаревшие {pipe.stats.get('stale', 0)} · "

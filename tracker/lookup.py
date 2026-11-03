@@ -719,6 +719,13 @@ class OwnerLookup:
             if "No user has" in s or "USERNAME" in s.upper():
                 self._bot_unresolvable[(session, bot)] = time.monotonic()
                 log.warning("Lookup: @%s не резолвится с %s — на 10 мин не пробуем", bot, session)
+            # Аккаунт заблокировал бота (владелец ЛИЧНО нажал /block в чате с funstat на этом
+            # аккаунте). Пока не разблокирует — писать невозможно. Блочим на 6 часов, чтобы не
+            # тратить попытки на мёртвую пару (session, bot) снова и снова.
+            elif "YOU_BLOCKED_USER" in s.upper() or "you blocked this user" in s.lower():
+                self._bot_unresolvable[(session, bot)] = time.monotonic() + 6 * 3600 - 600
+                log.error("Lookup: аккаунт %s заблокировал @%s — не пробуем 6 часов. "
+                          "Разблокируйте бота в этом аккаунте вручную.", session, bot)
             else:
                 log.warning("Lookup: не удалось написать @%s с %s: %s", bot, session, e)
             return None
@@ -834,6 +841,8 @@ class OwnerLookup:
             # ВСЕГДА пробуем сами. User явно просил не напрягать его капчами.
             # solve_ranked возвращает топ-3 кандидата от OCR — если funstat назвал
             # первую кнопку неверной, пробуем вторую-третью без прохода через админа.
+            idxs: list[int] = []
+            tried: set[int] = set()
             if self._auto is not None and getattr(self._auto, "enabled", False) and photo and buttons:
                 t_start = time.monotonic()
                 try:
@@ -841,7 +850,6 @@ class OwnerLookup:
                 except Exception as e:                               # noqa: BLE001
                     idxs = []
                     log.warning("Lookup: авто-решатель капчи упал: %s", e)
-                tried: set[int] = set()
                 for idx in idxs:
                     if idx in tried:
                         continue
@@ -876,6 +884,33 @@ class OwnerLookup:
                 if idxs:
                     log.warning("Lookup: все %d авто-кандидатов не прошли — передаю админам", len(idxs))
                     self.stats["captcha_auto_fail"] = self.stats.get("captcha_auto_fail", 0) + 1
+
+            # 2a) OCR не распознал (idxs пусто) → РАНДОМ-фоллбек.
+            # user: «если не распознает какая капча, пусть рандом кликает, а в конце кидает админу».
+            # Пробуем до 2 случайных кнопок из ещё не пробованных — при 4-6 кнопках ≈20-33% решим сами.
+            # Не прошло — упадём ниже в админ-фоллбек.
+            if photo and buttons and not idxs:
+                import random as _r
+                remaining = [i for i in range(len(buttons)) if i not in tried]
+                _r.shuffle(remaining)
+                for idx in remaining[:2]:
+                    tried.add(idx)
+                    res = await self.solve_captcha(token, idx)
+                    if res.startswith("Нажал") and "funstat сказал" not in res:
+                        self.stats["captcha_random"] = self.stats.get("captcha_random", 0) + 1
+                        llog("LOOKUP", f"@{bot} на {session}: капчу решил РАНДОМ → кнопка {idx + 1}")
+                        self._captcha.pop(token, None)
+                        if self._captcha_by_session.get(session) == token:
+                            self._captcha_by_session.pop(session, None)
+                        await asyncio.sleep(2.0)
+                        return True
+                    log.info("Lookup: рандом-клик %d не прошёл (%s)", idx + 1, res)
+                    if "неактуальна" in res or "Неизвестная кнопка" in res:
+                        break
+                    await asyncio.sleep(1.5)
+                    c_now = self._captcha.get(token)
+                    if c_now is None or c_now.get("event", asyncio.Event()).is_set():
+                        break
 
             # 2) без картинки — админ не сможет её решить, и без на кеш попасть нечему.
             #    Не ждём 90с впустую, сразу уходим — лот попробует следующую сессию.

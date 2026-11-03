@@ -159,7 +159,9 @@ class Settings:
     auto_remove_dead: bool = True        # сессию, которую снёс Telegram, удалять из трекера автоматически
     max_lot_age: int = 1800              # ускорено: было 600, лот в очереди до 30 мин ещё релевантен (0 = выкл)
     route_by: str = "floor"              # тема по: floor (флор коллекции = цена гифта) | price (цена лота)
-    max_above_floor: int = 0            # не слать лоты дороже флора коллекции больше чем на N% (0 = выкл)
+    max_above_floor: int = 500           # не слать лоты дороже флора коллекции больше чем на N% (0 = выкл).
+    # По умолчанию 500% (6х флора): фильтрует явный overprice типа «NFT с флором 400⭐ выставлен за 20k»,
+    # но пропускает редкие атрибуты (2-5х от флора — нормально). /set MAX_ABOVE_FLOOR N для изменения.
     allow_ton_only: bool = False
 
     # --- фильтр продавца ---
@@ -407,7 +409,7 @@ def _from_env() -> Settings:
         low_priority_poll_interval=max(5.0, _float(e("LOW_PRIORITY_POLL_INTERVAL"), 60.0)),
         low_priority_hot_min=max(1.0, _float(e("LOW_PRIORITY_HOT_MIN"), 10.0)),
         min_ton=_float(e("MIN_TON"), 0.0),
-        max_above_floor=max(0, _int(e("MAX_ABOVE_FLOOR"), 0)),
+        max_above_floor=max(0, _int(e("MAX_ABOVE_FLOOR"), 500)),
         priority_floor=max(0, _int(e("PRIORITY_FLOOR"), 2500)),
         priority_poll_interval=max(0.5, _float(e("PRIORITY_POLL_INTERVAL"), 1.5)),
         priority_share=min(0.9, max(0.1, _float(e("PRIORITY_SHARE"), 0.65))),
