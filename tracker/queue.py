@@ -451,7 +451,9 @@ class ListingPipeline:
         if settings.unique_gifts and (l.gift_unique_id in self._reserved_gifts
                                       or await self.db.gift_already_sent(l.gift_unique_id)):
             return "this gift was already sent"
-        if settings.unique_sellers and l.seller_key not in ("n", ""):
+        # См. _sent_before — слабые ключи (n/n:<имя>) не используем для дедупа продавца.
+        if (settings.unique_sellers and l.seller_key
+                and not l.seller_key.startswith("n")):
             if l.seller_key in self._reserved_sellers:
                 return "this seller is being sent right now"
             since = None
@@ -601,7 +603,11 @@ class ListingPipeline:
         try:
             if settings.unique_gifts and await self.db.gift_already_sent(l.gift_unique_id):
                 return "this gift was already sent"
-            if settings.unique_sellers and l.seller_key not in ("n", ""):
+            # Слабые ключи (seller_key='n' или 'n:<имя>') общие для всех одноимённых скрытых —
+            # дедуп по имени ЛОЖНО считает их одним продавцом. Пропускаем дедуп для таких;
+            # для сильных ключей (u<id>/c<id>/g<id>/a<...>) дедуп работает как обычно.
+            if (settings.unique_sellers and l.seller_key
+                    and not l.seller_key.startswith("n")):
                 since = None
                 if settings.seller_repeat_hours > 0:
                     since = (datetime.now(timezone.utc) - timedelta(hours=settings.seller_repeat_hours)
