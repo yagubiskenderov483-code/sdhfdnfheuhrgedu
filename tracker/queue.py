@@ -188,35 +188,44 @@ class ListingPipeline:
     # ------------------------------------------------------------------ admission (global dedup)
     async def admit(self, items: list[ResaleItem], session: str | None, mode: str,
                     floor_stars: int | None = None, t_detect: float | None = None) -> int:
-        """items — сверху вниз (новейшие первыми). В очередь кладём от старых к новым."""
+        """items — сверху вниз (новейшие первыми). В очередь кладём от старых к новым.
+        Защитимся от падения одного лота: если build_listing или insert_listing_if_new упадёт
+        для одного item'а, остальные ВСЁ РАВНО обработаются."""
         admitted = 0
         t_found = time.monotonic()
         for it in reversed(items):
-            listing = build_listing(it, session)
-            listing.floor_stars = floor_stars
-            listing.t_detect, listing.t_found = t_detect, t_found
-            # быстрый отсев дублей в памяти — без обращения к БД
-            if listing.listing_id in self._seen_ids:
-                self.stats["duplicates"] += 1
-                continue
-            # Глобальная дедупликация: право на обработку получает только тот, чей INSERT прошёл.
-            if not await self.db.insert_listing_if_new(listing):
+            try:
+                listing = build_listing(it, session)
+                listing.floor_stars = floor_stars
+                listing.t_detect, listing.t_found = t_detect, t_found
+                # быстрый отсев дублей в памяти — без обращения к БД
+                if listing.listing_id in self._seen_ids:
+                    self.stats["duplicates"] += 1
+                    continue
+                # Глобальная дедупликация: право на обработку получает только тот, чей INSERT прошёл.
+                if not await self.db.insert_listing_if_new(listing):
+                    self._remember(listing.listing_id)
+                    self.stats["duplicates"] += 1
+                    llog("DUPLICATE", f"listing={listing.listing_id} already_known=true")
+                    continue
                 self._remember(listing.listing_id)
-                self.stats["duplicates"] += 1
-                llog("DUPLICATE", f"listing={listing.listing_id} already_known=true")
+                admitted += 1
+                self.stats["new"] += 1
+                self.last_new_at = time.time()
+                price = " / ".join(x for x in (
+                    f"{listing.stars_price}⭐" if listing.stars_price is not None else "",
+                    f"{listing.ton_price:g}TON" if listing.ton_price is not None else "") if x) or "none"
+                # detected = время ПЕРВОГО ОБНАРУЖЕНИЯ трекером, не дата выставления (API её не отдаёт)
+                llog("NEW", f'listing={listing.listing_id} gift="{listing.gift_name} #{listing.gift_num}" '
+                            f"price={price} seller={listing.seller_key} detected={listing.first_seen} "
+                            f"via={session} mode={mode}")
+                await self._enqueue(ListingEvent(listing, time.monotonic(), mode))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # один лот сломан (кривое поле, уникс-коллизия и т.п.) — не отменяем остальные
+                log.warning("admit: skipped bad item %s: %s", getattr(it, "listing_id", "?"), e)
                 continue
-            self._remember(listing.listing_id)
-            admitted += 1
-            self.stats["new"] += 1
-            self.last_new_at = time.time()
-            price = " / ".join(x for x in (
-                f"{listing.stars_price}⭐" if listing.stars_price is not None else "",
-                f"{listing.ton_price:g}TON" if listing.ton_price is not None else "") if x) or "none"
-            # detected = время ПЕРВОГО ОБНАРУЖЕНИЯ трекером, не дата выставления (API её не отдаёт)
-            llog("NEW", f'listing={listing.listing_id} gift="{listing.gift_name} #{listing.gift_num}" '
-                        f"price={price} seller={listing.seller_key} detected={listing.first_seen} "
-                        f"via={session} mode={mode}")
-            await self._enqueue(ListingEvent(listing, time.monotonic(), mode))
         return admitted
 
     @staticmethod
