@@ -119,6 +119,12 @@ class TelegramSender:
                    markup: InlineKeyboardMarkup | None = None,
                    fallback_markup: InlineKeyboardMarkup | None = None, attempts: int = 5,
                    thread_id: int | None = None, priority: bool = False) -> SendResult:
+        # Telegram message limit — 4096 символов. Если шаблон на длинное поле раздулся
+        # (длинное имя продавца, длинный gift_slug, кусок unicode) — обрежем до безопасного
+        # предела с подсказкой, иначе send_message упадёт с MESSAGE_TOO_LONG → лот теряется.
+        if text and len(text) > 4000:
+            text = text[:3990] + "\n…(обрезано)"
+            log.warning("send: text too long, truncated to %d chars", len(text))
         preview = (LinkPreviewOptions(url=preview_url, prefer_small_media=True, show_above_text=False)
                    if preview_url else LinkPreviewOptions(is_disabled=True))
         extra = {"message_thread_id": thread_id} if thread_id else {}
