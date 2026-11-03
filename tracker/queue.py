@@ -678,20 +678,22 @@ class ListingPipeline:
         skip_override = sr.code in _LANG_CODES and settings.lookup_lang_filter
         if (not sr.passed and l.owner_found_via and sr.code not in _HARD_REJECT_EVEN_IF_FOUND
                 and not skip_override):
+            # Прежде чем override'нуть — ЕСЛИ seller_nfts ещё не читали и lookup вытащил real_id,
+            # проверим NFT (чтобы спамеров-коллекционеров не пропустить). Для pseudo-id пропускаем.
+            if (settings.max_seller_nfts > 0 and l.seller_nfts is None
+                    and l.seller_id and l.seller_id > 0):
+                try:
+                    l.seller_nfts = await self._nft_count(l)
+                except Exception:
+                    pass
+            if (settings.max_seller_nfts > 0 and l.seller_nfts is not None
+                    and l.seller_nfts > settings.max_seller_nfts):
+                return SellerResult(False, "TOO_MANY_NFTS",
+                                    f"{l.seller_nfts} NFT > MAX_SELLER_NFTS={settings.max_seller_nfts}")
             llog("FILTER", f"#{l.listing_id} seller rejected by {sr.code} but owner found via lookup bot — overriding")
             self.stats["owner_override"] = self.stats.get("owner_override", 0) + 1
             return SellerResult(True, "OWNER_FOUND_OVERRIDE",
                                 f"owner found via lookup bot (ignored {sr.code})")
-        if (not sr.passed and l.owner_found_via and not settings.lookup_lang_filter
-                and sr.code in _LANG_CODES):
-            # владельца нашёл бот поиска, имя уже прошло проверку — язык профиля не решает.
-            # Лимит NFT при языковом отказе ещё не проверялся — проверяем здесь.
-            if settings.max_seller_nfts > 0 and l.seller_nfts is None and l.seller_id:
-                l.seller_nfts = await self._nft_count(l)
-            if settings.max_seller_nfts > 0 and l.seller_nfts is not None and l.seller_nfts > settings.max_seller_nfts:
-                return SellerResult(False, "TOO_MANY_NFTS",
-                                    f"{l.seller_nfts} NFT > MAX_SELLER_NFTS={settings.max_seller_nfts}")
-            return SellerResult(True, "OWNER_FOUND", f"owner found via lookup bot (ignored {sr.code})")
         return sr
 
     async def _check_seller_found(self, l: Listing) -> SellerResult:
