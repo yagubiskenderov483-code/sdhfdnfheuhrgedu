@@ -263,15 +263,28 @@ class MarketplaceCoordinator:
 
     # ------------------------------------------------------------------ polling one collection
     # ------------------------------------------------------------------ sharding
+    def _shard_cache(self) -> tuple[list[str], dict[int, int]]:
+        """Кешируем список рабочих сессий и индексы коллекций — иначе каждый поллинг
+        делал O(n) sort + O(n) index() и мы жгли CPU на тысяче коллекций × 20 сессий."""
+        now = time.monotonic()
+        cache = getattr(self, "_shard_cache_val", None)
+        # Инвалидируем кеш раз в 2с ИЛИ при изменении набора сессий/коллекций
+        if cache and now - cache[2] < 2.0:
+            return cache[0], cache[1]
+        names = sorted(w.name for w in self.sessions.usable())
+        order = sorted(g for g in self.states if g not in self.skipped)
+        idxs = {gid: i for i, gid in enumerate(order)}
+        self._shard_cache_val = (names, idxs, now)
+        return names, idxs
+
     def shard_owner(self, gid: int) -> str | None:
         """За каждой коллекцией закреплена своя session (равномерно по кругу).
         Если она занята/недоступна — запрос берёт любая свободная, коллекция не простаивает."""
-        names = sorted(w.name for w in self.sessions.usable())
+        names, idxs = self._shard_cache()
         if not names:
             return None
-        order = sorted(g for g in self.states if g not in self.skipped)
         # коллекция могла только что стать «пропущенной» по флору — тогда просто любой аккаунт
-        idx = order.index(gid) if gid in order else gid
+        idx = idxs.get(gid, gid)
         return names[idx % len(names)]
 
     def shard_counts(self) -> dict[str, int]:
