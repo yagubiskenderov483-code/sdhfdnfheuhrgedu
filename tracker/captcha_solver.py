@@ -751,10 +751,19 @@ def ocr_words(photo: bytes) -> list[tuple[str, float]]:
     ]
     psms = (7, 8, 6, 13, 10)       # +10 — single char (на случай 1 буквы)
 
+    # base_image открываем ОДИН раз на все 17 вариантов — не 17 раз.
+    # _preprocess раньше дёргал _base_image внутри каждого цикла — экономим ~0.5-1с/капчу.
+    try:
+        base = _base_image(photo)
+    except Exception as e:                                             # noqa: BLE001
+        log.warning("OCR: cannot open image: %s", e)
+        return []
+    if base is None:
+        return []
     try:
         for threshold, scale, inv, shrp, ctr, ero in variants:
-            img = _preprocess(photo, threshold, scale, invert=inv, sharpen=shrp,
-                              contrast=ctr, erode=ero)
+            img = _preprocess_from_base(base, threshold, scale, invert=inv, sharpen=shrp,
+                                        contrast=ctr, erode=ero)
             if img is None:
                 continue        # один вариант не удался — пробуем остальные
             for psm in psms:
