@@ -957,25 +957,32 @@ class MarketplaceCoordinator:
 
         try:
             while not self._stop.is_set():
-                limit = 1 if len(self.sessions.usable()) < 4 else (2 if len(self.sessions.usable()) < 10 else 3)
+                n_usable = len(self.sessions.usable())
+                limit = 1 if n_usable < 4 else (2 if n_usable < 10 else 3)
+                # Шторм FloodWait → ограничиваем параллельность каталога до 1, чтобы не ел слоты
+                # у hot-polls (реально важных опросов коллекций с новыми лотами).
+                try:
+                    fpm = self.sessions.flood_rate_per_minute()
+                    if fpm >= 15:
+                        limit = 1
+                except Exception:
+                    fpm = 0
                 if not self.paused and len(inflight) < limit:
                     seq += 1
                     t = asyncio.create_task(once(seq), name=f"catalog-{seq}")
                     inflight.add(t)
                     t.add_done_callback(inflight.discard)
                 # Если идёт шторм FloodWait, разряжаем каталог тоже: не нужно долбить каждые 0.5с
-                # когда и так аккаунты падают. 10+/мин → x2, 30+/мин → x5.
+                # когда и так аккаунты падают. 10+/мин → x2, 30+/мин → x5, 40+/мин → x8.
                 sleep_time = max(0.2, settings.catalog_interval)
-                try:
-                    fpm = self.sessions.flood_rate_per_minute()
-                    if fpm >= 30:
-                        sleep_time *= 5
-                    elif fpm >= 20:
-                        sleep_time *= 3
-                    elif fpm >= 10:
-                        sleep_time *= 2
-                except Exception:
-                    pass
+                if fpm >= 40:
+                    sleep_time *= 8
+                elif fpm >= 30:
+                    sleep_time *= 5
+                elif fpm >= 20:
+                    sleep_time *= 3
+                elif fpm >= 10:
+                    sleep_time *= 2
                 await asyncio.sleep(sleep_time)
         finally:
             for t in list(inflight):
