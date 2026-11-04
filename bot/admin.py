@@ -701,7 +701,14 @@ def build_routers(app: "App") -> list[Router]:
             resolve_lim = lk_stats.get('resolve_limit', 0)
             skipped = lk_stats.get('skipped', 0)
             expired = lk_stats.get('expired', 0)
+            no_bot = lk_stats.get('no_bot_pool', 0)
+            no_sess = lk_stats.get('no_session', 0)
+            bypass = pipe.stats.get('owner_bot_dead_bypass', 0)
             extras = []
+            if no_bot:
+                extras.append(f"боты dead {no_bot}")
+            if no_sess:
+                extras.append(f"нет сессий {no_sess}")
             if no_answer:
                 extras.append(f"бот молчал {no_answer}")
             if unres:
@@ -714,6 +721,8 @@ def build_routers(app: "App") -> list[Router]:
                 extras.append(f"очередь полна {skipped}")
             if expired:
                 extras.append(f"устарело {expired}")
+            if bypass:
+                extras.append(f"bypass dead-bot {bypass}")
             if extras:
                 lines.append(f"   ⤷ {' · '.join(extras)}")
             # Капчи
