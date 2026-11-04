@@ -7,8 +7,10 @@ python-dotenv>=1.0
 cryptography>=42
 # часовые пояса на Windows
 tzdata>=2024.1
-# ускоряет шифрование MTProto (опционально, но рекомендуется при большом числе sessions)
-cryptg>=0.4; platform_python_implementation == "CPython"
+# ускоряет шифрование MTProto (опционально, но рекомендуется при большом числе sessions).
+# Отключено: некоторые бот-хосты не имеют Rust-компилятора и валят сборку. Telethon без него работает,
+# просто ~2-3x медленнее крипто. Если хочешь ускорение — поставь вручную на своём хосте.
+# cryptg>=0.4; platform_python_implementation == "CPython"
 # авто-решатель капчи funstat: OCR слова на картинке + матч к эмодзи-кнопке
 pytesseract>=0.3.10
 Pillow>=10.0
