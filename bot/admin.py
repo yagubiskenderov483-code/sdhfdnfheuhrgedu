@@ -611,7 +611,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1343,6 +1343,69 @@ def build_routers(app: "App") -> list[Router]:
                       "⚠️ OCR недоступен — проверьте, что в Docker-образе есть "
                       "<code>tesseract-ocr</code> и <code>pytesseract</code>. "
                       "В текущем Dockerfile они должны быть — пересоберите образ."]
+        await _answer_long(m, "\n".join(lines))
+
+    @admin.message(Command("bots"))
+    async def cmd_bots(m: Message) -> None:
+        """Диагностика lookup-ботов: кто настроен, кто жив, кто помечен dead.
+
+        При снесённом funstat сразу видно: 'основной @funstat 💀 dead еще 12 мин · fallback @infostat ✅'
+        """
+        import time as _t
+        lk = app.lookup
+        lines = ["🤖 <b>Lookup-боты</b>", ""]
+        primary = (settings.lookup_bot_username or "").strip()
+        extras = list(settings.lookup_bots or [])
+        if not primary and not extras:
+            lines.append("❌ Ни одного lookup-бота не настроено.")
+            lines.append("")
+            lines.append("Установи: <code>/set LOOKUP_BOT_USERNAME funstat</code>")
+            lines.append("И запасные: <code>/set LOOKUP_BOTS infostat,findtg</code>")
+            await _answer_long(m, "\n".join(lines))
+            return
+
+        dead_map = dict(getattr(lk, "_bot_dead_until", {}) or {})
+        unres_map = getattr(lk, "_bot_consec_unres", {}) or {}
+        pool = lk._bot_pool() if lk else []
+        now = _t.monotonic()
+
+        def _bot_line(b: str, role: str) -> str:
+            k = b.lower()
+            deadline = dead_map.get(k, 0.0)
+            is_dead = deadline > now
+            cmd_tpl = (settings.lookup_cmds or {}).get(k) or settings.lookup_cmd_template or "/human {name}"
+            if is_dead:
+                left = int(deadline - now)
+                left_h = left // 60
+                status = f"💀 <b>dead</b> ещё {left_h} мин"
+            elif unres_map.get(k, 0):
+                status = f"⚠️ unresolvable {unres_map[k]} подряд"
+            elif b in pool:
+                status = "✅ готов"
+            else:
+                status = "⬜ не в пуле"
+            return f"{role} @{html.escape(b)} — {status} · <code>{html.escape(cmd_tpl)}</code>"
+
+        if primary:
+            lines.append(_bot_line(primary, "<b>Основной:</b>"))
+        for i, b in enumerate(extras):
+            if b.lower() == primary.lower():
+                continue
+            lines.append(_bot_line(b, f"<b>Запас #{i+1}:</b>"))
+
+        lines.append("")
+        lines.append(f"Активных в пуле: <b>{len(pool)}</b> из {len([p for p in [primary] + extras if p])}")
+        if lk and lk.all_bots_dead():
+            lines.append("⚠️ <b>Все боты dead</b> — hidden-owner лоты идут с пометкой без фильтра.")
+
+        st = lk.stats if lk else {}
+        if st.get("bot_unresolved") or st.get("bot_dead_marked"):
+            lines += ["", "<b>Диагностика за запуск</b>"]
+            lines.append(f"unresolvable фейлов: {st.get('bot_unresolved', 0)}")
+            lines.append(f"пометок dead: {st.get('bot_dead_marked', 0)}")
+        lines += ["", "Сменить основной: <code>/set LOOKUP_BOT_USERNAME &lt;@username&gt;</code>",
+                  "Список запасных: <code>/set LOOKUP_BOTS bot1,bot2,bot3</code>",
+                  "Команды per-bot: <code>/set LOOKUP_CMDS funstat:/human,infostat:/find</code>"]
         await _answer_long(m, "\n".join(lines))
 
     @admin.message(Command("reset_speeds"))
