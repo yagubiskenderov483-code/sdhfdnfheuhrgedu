@@ -466,29 +466,48 @@ class OwnerLookup:
 
     # ------------------------------------------------------------------ internals
     def _pick_sessions(self) -> list[str]:
-        """Аккаунты для бота поиска: выделенные (LOOKUP_SESSIONS) по кругу, иначе первый рабочий."""
+        """Аккаунты для бота поиска: выделенные (LOOKUP_SESSIONS) по кругу, иначе первый рабочий.
+
+        FALLBACK: если выделенный пул LOOKUP_SESSIONS весь мёртвый (FloodWait /
+        unresolvable блеклист), берём любые is_usable() сессии трекера — иначе
+        hidden-owner лоты отсеиваются глухо, пока пул не отойдёт (минуты-часы)."""
         want = [n for n in settings.lookup_sessions if n]
         bot = settings.lookup_bot_username.lstrip("@")
         now = time.monotonic()
+        # Окно блеклиста unresolvable уменьшено с 600s до 120s: funstat мог просто
+        # не ответить на одно сообщение (сеть, редкий glitch) — незачем выводить
+        # аккаунт из пула на 10 минут, полминуты-две хватит.
+        _UNRES_COOLDOWN = 120
+        def _ok(n):
+            w = self.sessions.get(n)
+            if w is None or not w.is_usable():
+                return False
+            unres = self._bot_unresolvable.get((n, bot))
+            if unres and now - unres < _UNRES_COOLDOWN:
+                return False
+            return True
+
+        def _rank(n):
+            w = self.sessions.get(n)
+            speed = getattr(w, "speed", 1.0) if w is not None else 0.0
+            return (n in self._captcha_by_session, self._slock(n).locked(), -speed)
+
         if want:
-            def _ok(n):
-                w = self.sessions.get(n)
-                if w is None or not w.is_usable():
-                    return False
-                # Пропускаем сессии где funstat недавно (<10 мин) не резолвился
-                unres = self._bot_unresolvable.get((n, bot))
-                if unres and now - unres < 600:
-                    return False
-                return True
             ok = [n for n in want if _ok(n)]
             if ok:
                 self._rr = (getattr(self, "_rr", -1) + 1) % len(ok)
                 order = ok[self._rr:] + ok[:self._rr]
-                # приоритет: не в капче → свободная (lock не держится) → быстрая (speed выше)
-                def _rank(n):
-                    w = self.sessions.get(n)
-                    speed = getattr(w, "speed", 1.0) if w is not None else 0.0
-                    return (n in self._captcha_by_session, self._slock(n).locked(), -speed)
+                return sorted(order, key=_rank)
+            # Выделенный пул мёртвый — fallback на любые рабочие сессии трекера.
+            # Лучше временно долбить funstat с «мониторинговых» аккаунтов, чем
+            # отсеивать все hidden-owner лоты.
+            fallback = [x.name for x in self.sessions.usable(include_reserved=True)
+                        if _ok(x.name)]
+            if fallback:
+                log.warning("Lookup: выделенный пул LOOKUP_SESSIONS (%d) весь недоступен — "
+                            "fallback на %d обычных сессий", len(want), len(fallback))
+                self._rr = (getattr(self, "_rr", -1) + 1) % len(fallback)
+                order = fallback[self._rr:] + fallback[:self._rr]
                 return sorted(order, key=_rank)
             return []
         # Отдельные аккаунты не выбраны → ищем с ОДНОГО аккаунта трекера. Если он во FloodWait —
