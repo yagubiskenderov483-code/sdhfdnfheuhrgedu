@@ -752,8 +752,14 @@ class MarketplaceCoordinator:
         n = len(self.sessions.usable())
         if settings.sync_mode == "fast":
             # быстрая база — 2 запроса на коллекцию; пока её нет, лоты коллекции не ловятся вообще,
-            # поэтому после запуска синхронизация идёт всеми аккаунтами
-            return max(1, min(settings.max_concurrent_sessions, n))
+            # поэтому после запуска синхронизация идёт всеми аккаунтами.
+            # НО: если фолт на одном IP (нет прокси) — бурст в 20+ одновременных запросов
+            # гарантированно ловит FloodWait на ВСЕХ. Ограничиваем до n//2 без прокси, иначе
+            # первый же initial-sync валит флот. С прокси можно всеми — риск размазан по IP.
+            import os as _os
+            use_proxies = _os.environ.get("USE_PROXIES", "0").strip().lower() in ("1", "true", "yes", "on")
+            cap = n if use_proxies else max(1, n // 2)
+            return max(1, min(settings.max_concurrent_sessions, cap))
         return max(1, min(settings.max_concurrent_sessions, n // 2))
 
     async def _sync_loop(self) -> None:
