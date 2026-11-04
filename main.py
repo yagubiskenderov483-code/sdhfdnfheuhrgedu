@@ -312,6 +312,16 @@ class App:
         if run_bot:
             self._spawn(asyncio.create_task(self._backup_loop(), name="backup-loop"))
         self.pipeline.start()
+        # Восстанавливаем из БД блокировки lookup-ботов, которые не истекли с прошлого запуска.
+        # Иначе после деплоя 15-мин блокировка снесённого бота сбрасывалась, и трекер снова
+        # долбился в мёртвого funstat'а первые минуты работы.
+        if hasattr(self.lookup, "load_persisted_bot_deads"):
+            try:
+                restored = await self.lookup.load_persisted_bot_deads()
+                if restored:
+                    log.info("Lookup: restored %d bot(s) with persistent dead-mark", restored)
+            except Exception as e:
+                log.warning("Could not restore bot dead-marks: %s", e)
         await step("tracker", self.coordinator.start())
         # Проактивная liveness-проверка lookup-ботов при запуске:
         # если funstat снесён, узнаём об этом сразу, а не после десятка впустую отсеянных лотов.

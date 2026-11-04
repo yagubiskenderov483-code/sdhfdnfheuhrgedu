@@ -476,8 +476,12 @@ class OwnerLookup:
         now = time.monotonic()
         prev_until = self._bot_dead_until.get(k, 0.0)
         # 15 минут dead, но не продлеваем бесконечно если уже помечен (чтобы периодически пробовать)
-        self._bot_dead_until[k] = max(prev_until, now + 900)
+        new_until = max(prev_until, now + 900)
+        self._bot_dead_until[k] = new_until
         self.stats["bot_dead_marked"] = self.stats.get("bot_dead_marked", 0) + 1
+        # Persistent: сохраняем в БД, чтобы после рестарта (деплой на Render) не терять
+        # 15-минутную блокировку и не долбить снесённого бота снова
+        self._persist_bot_dead(k, new_until)
         if k in self._bot_dead_notified:
             return
         self._bot_dead_notified.add(k)
@@ -501,7 +505,58 @@ class OwnerLookup:
         if k in self._bot_dead_until:
             self._bot_dead_until.pop(k, None)
             self._bot_dead_notified.discard(k)
+            self._persist_bot_dead(k, None)  # удаляем из БД
             log.info("Lookup: бот @%s снова отвечает — снимаю dead-mark", bot)
+
+    def _persist_bot_dead(self, bot_key: str, until_monotonic: float | None) -> None:
+        """Запишем dead-until в БД как wall-clock (time.time() + остаток). None = удалить.
+        Используется для переживания рестарта: при старте load_persisted_bot_deads()
+        восстанавливает актуальные блокировки."""
+        if self.db is None:
+            return
+        try:
+            key = f"bot_dead:{bot_key}"
+            if until_monotonic is None:
+                asyncio.get_running_loop().create_task(self.db.kv_set(key, None))
+                return
+            # monotonic → walltime: прибавляем остаток к time.time()
+            remaining = until_monotonic - time.monotonic()
+            if remaining <= 0:
+                return
+            wall_until = int(time.time() + remaining)
+            asyncio.get_running_loop().create_task(self.db.kv_set(key, str(wall_until)))
+        except Exception as e:
+            log.debug("persist bot_dead failed: %s", e)
+
+    async def load_persisted_bot_deads(self) -> int:
+        """При старте — восстанавливаем 15-мин блокировки ботов из БД.
+        Иначе каждый деплой на Render сбрасывал dead-marks и трекер снова долбился
+        в снесённые боты до реактивной детекции."""
+        if self.db is None:
+            return 0
+        count = 0
+        try:
+            # нет pattern-поиска, но ботов максимум ~10 — проходимся по всем настроенным
+            primary = (settings.lookup_bot_username or "").lstrip("@").strip()
+            extras = [b.lstrip("@").strip() for b in (settings.lookup_bots or [])]
+            all_bots = {b.lower() for b in ([primary] if primary else []) + extras if b}
+            now_t = time.time()
+            for k in all_bots:
+                raw = await self.db.kv_get(f"bot_dead:{k}")
+                if not raw or not raw.isdigit():
+                    continue
+                wall_until = int(raw)
+                remaining = wall_until - now_t
+                if remaining <= 0:
+                    await self.db.kv_set(f"bot_dead:{k}", None)
+                    continue
+                self._bot_dead_until[k] = time.monotonic() + remaining
+                self._bot_dead_notified.add(k)   # не уведомлять повторно о том что уже алертилось до рестарта
+                count += 1
+                log.info("Lookup: восстановлена блокировка @%s dead ещё %.0f мин", k, remaining / 60)
+        except Exception as e:
+            log.warning("load_persisted_bot_deads failed: %s", e)
+        return count
 
     async def check_bots_liveness(self) -> dict[str, bool]:
         """Проактивная проверка настроенных lookup-ботов: пробуем get_input_entity для каждого
