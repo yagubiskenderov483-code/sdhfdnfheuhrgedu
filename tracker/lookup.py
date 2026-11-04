@@ -522,21 +522,32 @@ class OwnerLookup:
 
     def _persist_bot_dead(self, bot_key: str, until_monotonic: float | None) -> None:
         """Запишем dead-until в БД как wall-clock (time.time() + остаток). None = удалить.
-        Используется для переживания рестарта: при старте load_persisted_bot_deads()
-        восстанавливает актуальные блокировки."""
+        Fire-and-forget с strong-ref в self._persist_tasks (иначе GC может съесть
+        pending-таск). Безопасно в контексте без running loop (RuntimeError игнорируется:
+        при тестах или offline-коде это норма)."""
         if self.db is None:
             return
         try:
-            key = f"bot_dead:{bot_key}"
-            if until_monotonic is None:
-                asyncio.get_running_loop().create_task(self.db.kv_set(key, None))
-                return
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return      # не в loop — не можем создать task (тесты / offline)
+        key = f"bot_dead:{bot_key}"
+        if until_monotonic is None:
+            coro = self.db.kv_set(key, None)
+        else:
             # monotonic → walltime: прибавляем остаток к time.time()
             remaining = until_monotonic - time.monotonic()
             if remaining <= 0:
                 return
             wall_until = int(time.time() + remaining)
-            asyncio.get_running_loop().create_task(self.db.kv_set(key, str(wall_until)))
+            coro = self.db.kv_set(key, str(wall_until))
+        try:
+            t = loop.create_task(coro)
+            # strong-ref: иначе Python 3.11 GC может собрать задачу до завершения
+            if not hasattr(self, "_persist_tasks"):
+                self._persist_tasks: set = set()
+            self._persist_tasks.add(t)
+            t.add_done_callback(self._persist_tasks.discard)
         except Exception as e:
             log.debug("persist bot_dead failed: %s", e)
 
