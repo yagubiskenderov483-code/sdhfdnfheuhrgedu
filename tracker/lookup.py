@@ -784,12 +784,20 @@ class OwnerLookup:
         if not bots:
             # Все боты в блеклисте (dead) или не настроены — не долбимся вхолостую.
             log.debug("Lookup: пул ботов пуст (все dead или не настроены) — пропускаем %r", seller_name)
+            self.stats["no_bot_pool"] = self.stats.get("no_bot_pool", 0) + 1
             return None
         bot = bots[0]       # основной, используется для логов/метрик; fallback-боты пробуются в цикле ниже
         order = self._pick_sessions()
         if not order:
-            log.warning("Lookup: нет рабочего аккаунта для бота поиска%s",
-                        f" ({', '.join(settings.lookup_sessions)})" if settings.lookup_sessions else "")
+            # Было WARNING на каждый лот — засирало логи при шторме FloodWait.
+            # Понижено до INFO с rate-limit: пишем раз в минуту, не чаще.
+            now_t = time.monotonic()
+            if now_t - getattr(self, "_last_no_session_log", 0.0) > 60:
+                self._last_no_session_log = now_t
+                log.info("Lookup: нет рабочего аккаунта для бота поиска%s "
+                         "(пишется не чаще раза в минуту)",
+                         f" ({', '.join(settings.lookup_sessions)})" if settings.lookup_sessions else "")
+            self.stats["no_session"] = self.stats.get("no_session", 0) + 1
             return None
         session = order[0]
         self.stats["lookups"] += 1
