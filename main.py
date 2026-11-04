@@ -138,6 +138,7 @@ class App:
         self.pipeline.owner_lookup = self.lookup
         self.lookup.on_captcha = self._send_lookup_captcha  # капчу бота поиска решает админ
         self.lookup.on_bot_blocked = self._notify_bot_blocked  # 'You blocked this user' — просим админа разблокировать
+        self.lookup.on_bot_dead = self._notify_bot_dead      # бот снесли / не отвечает ни на одной сессии
         self.pipeline.paused_getter = lambda: self.coordinator.paused
         self.pipeline.floor_getter = lambda gid: getattr(self.coordinator.states.get(gid), "floor_stars", None)
         # коллекции, выключенные админом через /mute (хранятся в резервной копии)
@@ -368,6 +369,33 @@ class App:
                 await self.bot.send_message(chat, text)
             except Exception:
                 pass
+
+    async def _notify_bot_dead(self, bot: str, next_bot: str | None) -> None:
+        """Lookup-бот @bot недоступен (помечен dead на 15 мин). Один раз на дохлого бота
+        шлём админу: 'funstat снесли, переключились на infostat'. Если запасных нет —
+        просим прописать LOOKUP_BOTS."""
+        targets = set(settings.admin_ids or set()) | set(all_admins())
+        if next_bot:
+            text = (f"⚠️ Lookup-бот @{html.escape(bot)} <b>не отвечает</b> ни на одной сессии "
+                    "(возможно снесли / переименовали / Telegram пока не отдаёт).\n\n"
+                    f"Автоматически переключился на запасной: @{html.escape(next_bot)}.\n\n"
+                    "Через 15 мин сам попробует снова оригинальный бот. Если @"
+                    f"{html.escape(bot)} реально мёртв — смени <code>LOOKUP_BOT_USERNAME</code> "
+                    f"на @{html.escape(next_bot)} (или другой рабочий) через /set.")
+        else:
+            text = (f"🚨 Lookup-бот @{html.escape(bot)} <b>не отвечает</b> ни на одной сессии, "
+                    "а запасных в <code>LOOKUP_BOTS</code> нет.\n\n"
+                    "<b>Все лоты со скрытым владельцем отсеиваются</b> пока бот не вернётся / "
+                    "пока не укажешь запасного:\n"
+                    "<code>/set LOOKUP_BOTS infostat,findtg,otherbot</code>\n\n"
+                    "Через 15 мин сам попробует снова. Если бот @"
+                    f"{html.escape(bot)} реально снесён — замени его через "
+                    "<code>/set LOOKUP_BOT_USERNAME &lt;новый&gt;</code>.")
+        for chat in sorted(targets):
+            try:
+                await self.bot.send_message(chat, text)
+            except Exception as e:
+                log.debug("notify_bot_dead to %s failed: %s", chat, e)
 
     async def _notify_auth_error(self, w) -> None:
         """Telegram снёс сессию (выкинули из «Устройств», две копии бота, бан) — она уже не оживёт.
