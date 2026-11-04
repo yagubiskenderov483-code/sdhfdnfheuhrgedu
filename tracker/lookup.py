@@ -50,6 +50,13 @@ _RATE_LIMIT_WORDS = ("слишком часто", "too fast", "slow down", "rate
 _MAX_PENDING = int(os.environ.get("LOOKUP_MAX_PENDING") or "5000")   # не больше N лотов в очереди на поиск
 _CACHE_TTL = 3600.0               # кандидаты по одному имени — час
 _NEG_CACHE_TTL = 3600.0           # «не найдено» по имени — час (не долбим funstat повторно)
+# Как долго (seconds) сессия помечена "не может писать боту" после "No user has / USERNAME_INVALID"
+# и т.п. ответов, прежде чем попробовать снова. Раньше было 600s — слишком жёстко: funstat мог
+# просто пропустить одно сообщение (сетевой glitch), а мы выводили аккаунт из пула на 10 минут.
+# Для кейса YOU_BLOCKED_USER используется отдельный таймер 6 часов — пользователь должен
+# разблокировать бота вручную в этом аккаунте.
+_UNRESOLVABLE_COOLDOWN = 120.0
+_YOU_BLOCKED_COOLDOWN = 6 * 3600.0
 _LINE_RE = re.compile(r"\((?:@([A-Za-z][A-Za-z0-9_]{3,31})|id\s*(\d{3,12}))\)", re.I)
 _LINE_PREFIX_RE = re.compile(r"^[\s\d.)\-#№]*(?:[^\w\s]+\s*)*")
 _CAPTCHA_WORDS = ("captcha", "kapch", "капч", "rasmga", "click the button", "looks like the picture")
@@ -474,16 +481,16 @@ class OwnerLookup:
         want = [n for n in settings.lookup_sessions if n]
         bot = settings.lookup_bot_username.lstrip("@")
         now = time.monotonic()
-        # Окно блеклиста unresolvable уменьшено с 600s до 120s: funstat мог просто
-        # не ответить на одно сообщение (сеть, редкий glitch) — незачем выводить
-        # аккаунт из пула на 10 минут, полминуты-две хватит.
-        _UNRES_COOLDOWN = 120
+        # Окно блеклиста unresolvable уменьшено с 600s до 120s (константа модуля) — funstat мог
+        # просто не ответить на одно сообщение (сеть, редкий glitch); незачем выводить аккаунт
+        # из пула на 10 минут. YOU_BLOCKED_USER сохраняет свою отдельную 6-часовую блокировку
+        # — туда сохраняется absolute-time + offset, см. _ask_bot_locked.
         def _ok(n):
             w = self.sessions.get(n)
             if w is None or not w.is_usable():
                 return False
             unres = self._bot_unresolvable.get((n, bot))
-            if unres and now - unres < _UNRES_COOLDOWN:
+            if unres and now - unres < _UNRESOLVABLE_COOLDOWN:
                 return False
             return True
 
@@ -737,24 +744,32 @@ class OwnerLookup:
             return await client.send_message(ent, cmd)
 
         unresolvable_since = self._bot_unresolvable.get((session, bot))
-        if unresolvable_since and time.monotonic() - unresolvable_since < 600:
-            log.debug("Lookup: пропускаю %s — ранее не смогла резолвить @%s (<10 мин назад)", session, bot)
+        if unresolvable_since and time.monotonic() - unresolvable_since < _UNRESOLVABLE_COOLDOWN:
+            log.debug("Lookup: пропускаю %s — ранее не смогла резолвить @%s (<%.0f c назад)",
+                      session, bot, _UNRESOLVABLE_COOLDOWN)
             return None
         try:
             sent = await self._run(session, _send)
         except Exception as e:
             s = str(e)
-            # "No user has X as username" / "USERNAME_INVALID" / "USERNAME_NOT_OCCUPIED" — через 10 мин попробуем снова
+            # "No user has X as username" / "USERNAME_INVALID" / "USERNAME_NOT_OCCUPIED":
+            # либо бот действительно удалён/переименован, либо кэш Telegram устарел — короткий cooldown
             if "No user has" in s or "USERNAME" in s.upper():
                 self._bot_unresolvable[(session, bot)] = time.monotonic()
-                log.warning("Lookup: @%s не резолвится с %s — на 10 мин не пробуем", bot, session)
-            # Аккаунт заблокировал бота (владелец ЛИЧНО нажал /block в чате с funstat на этом
-            # аккаунте). Пока не разблокирует — писать невозможно. Блочим на 6 часов, чтобы не
-            # тратить попытки на мёртвую пару (session, bot) снова и снова. Уведомим админа раз в сутки.
+                log.warning("Lookup: @%s не резолвится с %s — на %.0f c не пробуем",
+                            bot, session, _UNRESOLVABLE_COOLDOWN)
+                # Глобальный счётчик "бот недоступен". Если ВСЕ lookup-сессии подряд получают эту
+                # ошибку, бот скорее всего снесли — пишем админу один раз и ставим флаг (см. _find).
+                self.stats["bot_unresolved"] = self.stats.get("bot_unresolved", 0) + 1
+            # Аккаунт заблокировал бота (владелец ЛИЧНО нажал /block в чате с ботом на этом
+            # аккаунте). Пока не разблокирует — писать невозможно. Блочим на 6 часов (хранится
+            # как absolute-time + смещение, cooldown-chek всегда "сейчас - stored < cooldown"
+            # даст True пока not expired).
             elif "YOU_BLOCKED_USER" in s.upper() or "you blocked this user" in s.lower():
-                self._bot_unresolvable[(session, bot)] = time.monotonic() + 6 * 3600 - 600
-                log.error("Lookup: аккаунт %s заблокировал @%s — не пробуем 6 часов. "
-                          "Разблокируйте бота в этом аккаунте вручную.", session, bot)
+                self._bot_unresolvable[(session, bot)] = time.monotonic() + _YOU_BLOCKED_COOLDOWN - _UNRESOLVABLE_COOLDOWN
+                log.error("Lookup: аккаунт %s заблокировал @%s — не пробуем %.0f ч. "
+                          "Разблокируйте бота в этом аккаунте вручную.",
+                          session, bot, _YOU_BLOCKED_COOLDOWN / 3600)
                 now_t = time.time()
                 last = self._blocked_notified.get((session, bot), 0)
                 if self.on_bot_blocked and now_t - last > 86400:
