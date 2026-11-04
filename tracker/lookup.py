@@ -914,6 +914,7 @@ class OwnerLookup:
             # уважаем выбор — рандом тоже не запускаем. Отключение через CAPTCHA_RANDOM_FALLBACK=false.
             random_enabled = (self._auto is not None and getattr(self._auto, "enabled", False)
                               and self._random_fallback)
+            captcha_stale = False       # funstat уже сказал «эта капча неактуальна» — админу не нужно
             if photo and buttons and random_enabled:
                 import random as _r
                 remaining = [i for i in range(len(buttons)) if i not in tried]
@@ -934,6 +935,7 @@ class OwnerLookup:
                     # Капча «неактуальна» → funstat её сменил ИЛИ прислал новую (мы её увидим в
                     # следующем _ask_bot_locked poll). Если «Неизвестная кнопка» — больше нечего пробовать.
                     if "неактуальна" in res or "Неизвестная кнопка" in res:
+                        captcha_stale = True
                         break
                     await asyncio.sleep(1.5)
                     c_now = self._captcha.get(token)
@@ -964,6 +966,14 @@ class OwnerLookup:
             if buttons and len(tried) >= len(buttons):
                 log.warning("Lookup: @%s на %s — все %d кнопок перепробованы, funstat не принял — "
                             "выходим, ждём новую капчу", bot, session, len(buttons))
+                self._captcha.pop(token, None)
+                if self._captcha_by_session.get(session) == token:
+                    self._captcha_by_session.pop(session, None)
+                return False
+            # 2c-bis) funstat явно сказал «капча неактуальна» (она сменилась или закрылась) —
+            # ни ждать админа, ни пробовать ту же капчу бессмысленно.
+            if captcha_stale:
+                log.info("Lookup: @%s на %s — funstat сказал капча неактуальна, не шлём админу", bot, session)
                 self._captcha.pop(token, None)
                 if self._captcha_by_session.get(session) == token:
                     self._captcha_by_session.pop(session, None)
