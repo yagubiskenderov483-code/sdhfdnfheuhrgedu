@@ -80,6 +80,38 @@ def _str_list(v: str | None) -> list[str]:
     return [p.strip() for p in (v or "").replace(";", ",").split(",") if p.strip()]
 
 
+def _bot_list(v: str | None) -> list[str]:
+    """Как _str_list, но убирает @ и дубликаты, сохраняя порядок (первый задан = первым пробуется)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for p in _str_list(v):
+        name = p.lstrip("@").strip()
+        key = name.lower()
+        if name and key not in seen:
+            seen.add(key)
+            out.append(name)
+    return out
+
+
+def _bot_cmds(v: str | None) -> dict[str, str]:
+    """Разбор LOOKUP_CMDS: 'funstat:/human,infostat:/find' → {'funstat': '/human {name}'}.
+    Если шаблон не содержит '{name}', подставляется автоматически через пробел."""
+    out: dict[str, str] = {}
+    for part in (v or "").replace(";", ",").split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        bot, _, cmd = part.partition(":")
+        bot = bot.strip().lstrip("@").lower()
+        cmd = cmd.strip()
+        if not bot or not cmd:
+            continue
+        if "{name}" not in cmd:
+            cmd = f"{cmd} {{name}}"
+        out[bot] = cmd
+    return out
+
+
 def _chat_thread(s: str) -> tuple[int, int | None]:
     """'-1004297759767' или '-1004297759767/67' → (chat_id, thread_id|None).
     Тема (topic) форум-группы: число после / — это ID темы из ссылки t.me/c/<...>/<thread>."""
@@ -174,6 +206,19 @@ class Settings:
     lookup_bot_username: str = ""             # @username бота ручного поиска (напр. "funstat") —
                                               # для лотов со скрытым владельцем в пост добавится
                                               # кнопка «🔍 Найти в @<бот>». Пусто = кнопки нет.
+                                              # Для множественного поиска используется LOOKUP_BOTS.
+    lookup_bots: list[str] = field(default_factory=list)  # @username'ы запасных ботов поиска
+                                              # (funstat снесли → автоматический fallback на infostat).
+                                              # Формат: 'funstat,infostat,otherbot'. Первым пробуется
+                                              # LOOKUP_BOT_USERNAME, затем эти по порядку. Пустой список
+                                              # = только LOOKUP_BOT_USERNAME.
+    lookup_cmd_template: str = "/human {name}"  # команда боту поиска, {name} = имя продавца.
+                                              # Разные боты могут требовать своего синтаксиса:
+                                              # funstat — '/human', infostat — '/find', и т.д.
+                                              # Для per-bot шаблонов используется LOOKUP_CMDS.
+    lookup_cmds: dict = field(default_factory=dict)  # {bot_username: cmd_template} per-bot шаблоны.
+                                              # Формат env: 'LOOKUP_CMDS=funstat:/human,infostat:/find'.
+                                              # Отсутствующий бот → используется lookup_cmd_template.
     auto_lookup: bool = True                  # трекер сам пишет боту поиска «/human <имя>», проверяет
                                               # кандидатов (открыт ли у них этот NFT) и дописывает
                                               # найденного владельца в пост
@@ -340,6 +385,11 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "PHONE_MISMATCH_BLOCKS": ("phone_mismatch_blocks", _bool_strict),
     "ALLOW_HIDDEN_OWNER": ("allow_hidden_owner", _bool_strict),
     "LOOKUP_BOT_USERNAME": ("lookup_bot_username", lambda v: v.strip().lstrip("@")),
+    "LOOKUP_BOTS": ("lookup_bots", _bot_list),
+    "LOOKUP_CMD_TEMPLATE": ("lookup_cmd_template",
+                            lambda v: (v.strip() if "{name}" in v else f"{v.strip()} {{name}}")
+                                       if v.strip() else "/human {name}"),
+    "LOOKUP_CMDS": ("lookup_cmds", _bot_cmds),
     "AUTO_LOOKUP": ("auto_lookup", _bool_strict),
     "LOOKUP_SESSIONS": ("lookup_sessions", lambda v: [] if v.strip() in ("", "-") else _str_list(v)),
     "LOOKUP_DEDICATED": ("lookup_dedicated", _bool_strict),
@@ -423,6 +473,9 @@ def _from_env() -> Settings:
         phone_mismatch_blocks=_bool(e("PHONE_MISMATCH_BLOCKS"), True),
         allow_hidden_owner=_bool(e("ALLOW_HIDDEN_OWNER"), False),
         lookup_bot_username=(e("LOOKUP_BOT_USERNAME") or "").strip().lstrip("@"),
+        lookup_bots=_bot_list(e("LOOKUP_BOTS")),
+        lookup_cmd_template=((e("LOOKUP_CMD_TEMPLATE") or "/human {name}").strip() or "/human {name}"),
+        lookup_cmds=_bot_cmds(e("LOOKUP_CMDS")),
         auto_lookup=_bool(e("AUTO_LOOKUP"), True),
         lookup_sessions=_str_list(e("LOOKUP_SESSIONS") or e("LOOKUP_SESSION") or ""),
         lookup_dedicated=_bool(e("LOOKUP_DEDICATED"), True),

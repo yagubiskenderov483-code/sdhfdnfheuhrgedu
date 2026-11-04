@@ -347,9 +347,20 @@ class OwnerLookup:
         # Экономит квоту и капчи: 'Maria' на разных лотах не долбим в funstat.
         self._neg_cache: dict[str, float] = {}
         self._started: set[tuple[str, str]] = set()      # (session, bot) — /start уже отправляли
-        # (session, bot) → когда отметили как unresolvable. Через 10 мин пробуем снова
-        # (сессия могла переподключиться, кеш Telegram мог обновиться).
+        # (session, bot) → когда отметили как unresolvable. Через _UNRESOLVABLE_COOLDOWN
+        # пробуем снова (сессия могла переподключиться, кеш Telegram мог обновиться).
         self._bot_unresolvable: dict[tuple[str, str], float] = {}
+        # Глобальный блэклист ботов (bot_lowercase → monotonic_deadline). Используется когда ВСЕ
+        # lookup-сессии подряд получают 'No user has' на этом боте — скорее всего бот снесли,
+        # не долбимся в него минут 10, чтобы не тратить попытки, и сразу ротируем на следующего
+        # бота из LOOKUP_BOTS. См. _ask_bot_locked и _bot_pool.
+        self._bot_dead_until: dict[str, float] = {}
+        # Счётчик подряд идущих unresolvable-фейлов на одного бота по РАЗНЫМ сессиям.
+        # Когда достигает ~половины LOOKUP_SESSIONS или 3 (меньшее) — помечаем бота как dead.
+        self._bot_consec_unres: dict[str, int] = {}
+        # on_bot_dead(bot, next_bot) — уведомить админа что lookup-бот недоступен и мы переключились
+        self.on_bot_dead = None
+        self._bot_dead_notified: set[str] = set()
         self._last_response_text: dict[str, str] = {}       # session → последний текст от funstat (для rate-limit детекта)
         self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0,
                       "captcha": 0, "captcha_auto": 0, "too_many": 0, "from_memory": 0,
@@ -385,7 +396,79 @@ class OwnerLookup:
 
     # ------------------------------------------------------------------ public
     def enabled(self) -> bool:
-        return bool(settings.auto_lookup and settings.lookup_bot_username)
+        return bool(settings.auto_lookup and self._bot_pool())
+
+    def _bot_pool(self) -> list[str]:
+        """Порядок попыток lookup-ботов: сначала основной (LOOKUP_BOT_USERNAME), затем
+        запасные из LOOKUP_BOTS. Дубликаты убираются, @ удаляется. Пустой список = отключено.
+        Если бот находится в глобальном блеклисте _bot_dead_until — пропускается до истечения."""
+        now = time.monotonic()
+        primary = (settings.lookup_bot_username or "").lstrip("@").strip()
+        extras = [b.lstrip("@").strip() for b in (settings.lookup_bots or [])]
+        order: list[str] = []
+        seen: set[str] = set()
+        for b in ([primary] if primary else []) + extras:
+            if not b:
+                continue
+            k = b.lower()
+            if k in seen:
+                continue
+            seen.add(k)
+            dead = self._bot_dead_until.get(k, 0.0)
+            if dead and now < dead:
+                continue
+            order.append(b)
+        return order
+
+    def _bot_cmd(self, bot: str, seller_name: str) -> str:
+        """Команда для конкретного бота. Берёт per-bot из LOOKUP_CMDS, иначе общий
+        шаблон lookup_cmd_template. '{name}' в шаблоне заменяется на имя."""
+        tpl = (settings.lookup_cmds or {}).get(bot.lower()) or settings.lookup_cmd_template or "/human {name}"
+        if "{name}" not in tpl:
+            tpl = f"{tpl} {{name}}"
+        return tpl.format(name=seller_name)
+
+    def _register_bot_unresolved(self, bot: str) -> None:
+        """Инкрементирует подряд идущий счётчик unresolved на бота. При достижении порога
+        (≥3 разных сессии подряд, или ≥половины LOOKUP_SESSIONS если он настроен) —
+        помечаем бота как dead глобально на 15 минут и уведомляем админа. На успешный
+        ответ счётчик сбрасывается (см. _ask_bot_locked после успешного _send)."""
+        k = bot.lower()
+        self._bot_consec_unres[k] = self._bot_consec_unres.get(k, 0) + 1
+        n = self._bot_consec_unres[k]
+        pool_size = max(1, len(settings.lookup_sessions or []))
+        threshold = min(3, max(2, pool_size // 2))
+        if n < threshold:
+            return
+        now = time.monotonic()
+        prev_until = self._bot_dead_until.get(k, 0.0)
+        # 15 минут dead, но не продлеваем бесконечно если уже помечен (чтобы периодически пробовать)
+        self._bot_dead_until[k] = max(prev_until, now + 900)
+        self.stats["bot_dead_marked"] = self.stats.get("bot_dead_marked", 0) + 1
+        if k in self._bot_dead_notified:
+            return
+        self._bot_dead_notified.add(k)
+        # Следующий бот из пула (кроме помеченного этого)
+        next_bot = next((b for b in self._bot_pool() if b.lower() != k), None)
+        log.error("Lookup: бот @%s недоступен (%d подряд unresolvable на разных сессиях). "
+                  "Помечен dead на 15 мин. Fallback → @%s",
+                  bot, n, next_bot or "— запасных нет, настрой LOOKUP_BOTS")
+        if self.on_bot_dead:
+            try:
+                import asyncio as _a
+                _a.get_running_loop().create_task(self.on_bot_dead(bot, next_bot))
+            except Exception as e:
+                log.debug("on_bot_dead notify failed: %s", e)
+
+    def _clear_bot_unresolved(self, bot: str) -> None:
+        """После успешного ответа от бота — сбрасываем счётчик подряд и снимаем dead-mark."""
+        k = bot.lower()
+        if k in self._bot_consec_unres:
+            self._bot_consec_unres.pop(k, None)
+        if k in self._bot_dead_until:
+            self._bot_dead_until.pop(k, None)
+            self._bot_dead_notified.discard(k)
+            log.info("Lookup: бот @%s снова отвечает — снимаю dead-mark", bot)
 
     async def find_owner(self, seller_name: str, slug: str | None, unique_id: int | None,
                          prio: float = 0.0, deadline: float | None = None) -> FoundOwner | None:
@@ -570,17 +653,20 @@ class OwnerLookup:
 
     async def debug(self, name: str) -> tuple[str | None, list[Candidate], str]:
         """Для /lookup: спросить бота поиска «как есть» → (аккаунт, кандидаты, текст ошибки)."""
-        if not settings.lookup_bot_username:
-            return None, [], "бот поиска не задан"
+        bots = self._bot_pool()
+        if not bots:
+            return None, [], "бот поиска не задан (LOOKUP_BOT_USERNAME пуст)"
         order = self._pick_sessions()
         if not order:
             return None, [], "нет рабочего аккаунта для поиска"
-        bot = settings.lookup_bot_username.lstrip("@")
-        for session in order:
-            cands = await self._ask_bot(session, bot, name, prio=-1e12)
-            if cands is not None:
-                return session, cands, ""
-        return order[0], [], "бот поиска не ответил (или капча не пройдена)"
+        last_err = ""
+        for bot in bots:
+            for session in order:
+                cands = await self._ask_bot(session, bot, name, prio=-1e12)
+                if cands is not None:
+                    return session, cands, ""
+            last_err = f"бот @{bot} не ответил ни на одной сессии"
+        return order[0], [], last_err or "бот поиска не ответил (или капча не пройдена)"
 
     async def _run(self, session: str, fn, timeout: float = 30):
         res, _ = await self.sessions.run(fn, only=session, attempts=1, timeout=timeout)
@@ -588,7 +674,12 @@ class OwnerLookup:
 
     async def _find(self, seller_name: str, slug: str | None, unique_id: int | None,
                     prio: float = 0.0, deadline: float | None = None) -> FoundOwner | None:
-        bot = settings.lookup_bot_username.lstrip("@")
+        bots = self._bot_pool()
+        if not bots:
+            # Все боты в блеклисте (dead) или не настроены — не долбимся вхолостую.
+            log.debug("Lookup: пул ботов пуст (все dead или не настроены) — пропускаем %r", seller_name)
+            return None
+        bot = bots[0]       # основной, используется для логов/метрик; fallback-боты пробуются в цикле ниже
         order = self._pick_sessions()
         if not order:
             log.warning("Lookup: нет рабочего аккаунта для бота поиска%s",
@@ -637,11 +728,23 @@ class OwnerLookup:
             fut = asyncio.get_running_loop().create_future()
             self._inflight[key] = fut
             cands = None
+            used_bot = bot                 # для логов — какой бот в итоге ответил (default = primary)
             try:
-                for session in order:      # аккаунт не смог (лимит бота, FloodWait) — пробуем следующий
-                    cands = await self._ask_bot(session, bot, seller_name, prio=prio, deadline=deadline)
+                # Мульти-бот fallback: сначала primary (funstat), затем запасные из LOOKUP_BOTS.
+                # Если бот снесён и попал в _bot_dead_until, он выпадает из _bot_pool и мы его
+                # не пробуем — сразу идём на следующего. Пробуем каждую сессию на каждом боте.
+                for b in bots:
+                    for session in order:
+                        cands = await self._ask_bot(session, b, seller_name, prio=prio, deadline=deadline)
+                        if cands is not None:
+                            used_bot = b
+                            break
                     if cands is not None:
                         break
+                    # Все сессии провалились на этом боте — если он теперь в блеклисте, пишем лог
+                    if b.lower() in self._bot_dead_until:
+                        log.warning("Lookup: бот @%s помечен как недоступный — fallback на следующий", b)
+                bot = used_bot
             finally:
                 self._inflight.pop(key, None)
                 if not fut.done():
@@ -727,7 +830,7 @@ class OwnerLookup:
 
     async def _ask_bot_locked(self, session: str, bot: str, seller_name: str,
                               _retry: bool = True) -> list[Candidate] | None:
-        cmd = f"/human {seller_name}"
+        cmd = self._bot_cmd(bot, seller_name)
         # пауза между запросами с одного аккаунта: частые запросы → бот поиска выдаёт капчу
         gap = settings.lookup_interval - (time.monotonic() - self._last_ask.get(session, 0.0))
         if gap > 0:
@@ -758,9 +861,11 @@ class OwnerLookup:
                 self._bot_unresolvable[(session, bot)] = time.monotonic()
                 log.warning("Lookup: @%s не резолвится с %s — на %.0f c не пробуем",
                             bot, session, _UNRESOLVABLE_COOLDOWN)
-                # Глобальный счётчик "бот недоступен". Если ВСЕ lookup-сессии подряд получают эту
-                # ошибку, бот скорее всего снесли — пишем админу один раз и ставим флаг (см. _find).
+                # Глобальный счётчик "бот недоступен". Если N разных сессий подряд получают эту
+                # ошибку на одном боте — бот скорее всего снесли. Помечаем его как dead глобально,
+                # fallback на следующего из LOOKUP_BOTS автоматически (см. _bot_pool).
                 self.stats["bot_unresolved"] = self.stats.get("bot_unresolved", 0) + 1
+                self._register_bot_unresolved(bot)
             # Аккаунт заблокировал бота (владелец ЛИЧНО нажал /block в чате с ботом на этом
             # аккаунте). Пока не разблокирует — писать невозможно. Блочим на 6 часов (хранится
             # как absolute-time + смещение, cooldown-chek всегда "сейчас - stored < cooldown"
@@ -785,6 +890,8 @@ class OwnerLookup:
         self._last_response_text.pop(session, None)      # очистим перед новым запросом
         # резолв прошёл — чистим флаг «unresolvable», иначе 10мин блок висел бы даже после восстановления
         self._bot_unresolvable.pop((session, bot), None)
+        # Бот ответил хотя бы одной сессии — снимаем глобальный dead-mark, если был
+        self._clear_bot_unresolved(bot)
         sent_id = sent.id
 
         async def _poll(client, min_id_arg):
