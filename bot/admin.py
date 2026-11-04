@@ -609,7 +609,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1249,6 +1249,39 @@ def build_routers(app: "App") -> list[Router]:
                        (f" ({', '.join(wait)})" if wait else "") +
                        f"\n❌ Действительно мёртвые (удалятся снова): {len(dead)}" +
                        (f" ({', '.join(dead)})" if dead else ""))
+
+    @admin.message(Command("captcha_status"))
+    async def cmd_captcha_status(m: Message) -> None:
+        """Диагностика решателя капч: включён ли OCR, Vision API, сколько решено авто/рандомом.
+        Помогает понять, почему `авто-решено 0` — либо tesseract не поставлен, либо капчи не идут."""
+        lk = app.lookup
+        auto = getattr(lk, "_auto", None)
+        lines = ["🧩 <b>Статус решателя капч</b>", ""]
+        if auto is None:
+            lines.append("❌ Решатель не инициализирован.")
+        else:
+            lines.append(f"• Включён: {'✅ да' if auto.enabled else '⬜ нет (CAPTCHA_AUTO_SOLVE=false)'}")
+            lines.append(f"• OCR (tesseract + Pillow): {'✅ есть' if auto._ocr_available else '❌ нет'}")
+            lines.append(f"• Vision API: {'✅ есть' if auto._vision.enabled else '⬜ нет'}")
+            lines.append(f"• Рандом-фоллбек: {'✅ да' if getattr(lk, '_random_fallback', False) else '⬜ нет'}")
+            try:
+                from tracker.captcha_solver import captcha_cache_stats
+                cs = captcha_cache_stats()
+                lines.append(f"• Кеш решённых: {cs['size']} / {cs['max']}")
+            except Exception:
+                pass
+        st = lk.stats if lk else {}
+        lines += ["", "<b>Статистика за запуск</b>"]
+        lines.append(f"Капч всего: {st.get('captcha', 0)}")
+        lines.append(f"✅ Авто-решено (OCR/Vision): {st.get('captcha_auto', 0)}")
+        lines.append(f"🎲 Рандом-решено: {st.get('captcha_random', 0)}")
+        lines.append(f"❌ Не смог (ушло админу): {st.get('captcha_auto_fail', 0)}")
+        if auto and not auto._ocr_available:
+            lines += ["",
+                      "⚠️ OCR недоступен — проверьте, что в Docker-образе есть "
+                      "<code>tesseract-ocr</code> и <code>pytesseract</code>. "
+                      "В текущем Dockerfile они должны быть — пересоберите образ."]
+        await _answer_long(m, "\n".join(lines))
 
     @admin.message(Command("reset_speeds"))
     async def cmd_reset_speeds(m: Message) -> None:
