@@ -894,7 +894,14 @@ class ListingPipeline:
                 await self.db.update_listing(l)
                 return
         if not found:
-            if settings.lookup_required:
+            # Если все lookup-боты глобально dead (бот снесли, запасных нет / тоже dead) — не
+            # отсеиваем hidden-owner лоты как «владелец не найден», а шлём с пометкой. Иначе,
+            # пока админ меняет LOOKUP_BOT_USERNAME, трекер молча глушит ВСЕ скрытые — а это
+            # большая часть дорогих лотов. С пометкой лот доходит до пользователя, и он сам
+            # принимает решение по купле.
+            all_dead = (self.owner_lookup is not None and hasattr(self.owner_lookup, "all_bots_dead")
+                        and self.owner_lookup.all_bots_dead())
+            if settings.lookup_required and not all_dead:
                 l.status, l.reason = ListingStatus.FILTERED_SELLER, "владелец не найден ботом поиска"
                 l.seller_filter_result = "OWNER_NOT_FOUND"
                 self.stats["filtered_seller"] += 1
@@ -902,6 +909,10 @@ class ListingPipeline:
                 llog("FILTER", f"#{l.listing_id} hidden owner not found via lookup bot — skipped")
                 await self.db.update_listing(l)
                 return
+            if all_dead:
+                self.stats["owner_bot_dead_bypass"] = self.stats.get("owner_bot_dead_bypass", 0) + 1
+                llog("FILTER", f"#{l.listing_id} hidden owner — все lookup-боты dead, "
+                               "шлём с пометкой без фильтра")
             l.owner_not_found = True               # шлём с пометкой «владелец не найден»
         # пока ждали бота поиска, лот могли купить или снять — проверяем, что он ещё продаётся
         if settings.lookup_check_onsale and l.gift_slug:

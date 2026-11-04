@@ -398,6 +398,19 @@ class OwnerLookup:
     def enabled(self) -> bool:
         return bool(settings.auto_lookup and self._bot_pool())
 
+    def any_bot_configured(self) -> bool:
+        """Задан ли хоть один lookup-бот (primary или в LOOKUP_BOTS) — даже если сейчас dead.
+        Нужно для queue.py: при пустом пуле dead≠'не задано', политики разные."""
+        if (settings.lookup_bot_username or "").strip():
+            return True
+        return any(b.strip() for b in (settings.lookup_bots or []))
+
+    def all_bots_dead(self) -> bool:
+        """Все настроенные lookup-боты в глобальном блэклисте dead → lookup физически невозможен
+        на этот момент. Используется в queue.py: если lookup_required=true + все боты dead,
+        не отсеиваем hidden-owner лоты, а шлём с пометкой owner_not_found."""
+        return self.any_bot_configured() and not self._bot_pool()
+
     def _bot_pool(self) -> list[str]:
         """Порядок попыток lookup-ботов: сначала основной (LOOKUP_BOT_USERNAME), затем
         запасные из LOOKUP_BOTS. Дубликаты убираются, @ удаляется. Пустой список = отключено.
