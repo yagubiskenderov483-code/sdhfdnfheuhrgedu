@@ -903,30 +903,33 @@ class OwnerLookup:
                     log.warning("Lookup: все %d авто-кандидатов не прошли — передаю админам", len(idxs))
                     self.stats["captcha_auto_fail"] = self.stats.get("captcha_auto_fail", 0) + 1
 
-            # 2a) OCR не распознал (idxs пусто) → РАНДОМ-фоллбек.
-            # user: «если не распознает какая капча, пусть рандом кликает, а в конце кидает админу».
-            # Пробуем до 2 случайных кнопок из ещё не пробованных — при 4-6 кнопках ≈20-33% решим сами.
-            # Не прошло — упадём ниже в админ-фоллбек.
+            # 2a) РАНДОМ-фоллбек. user: «если не прошёл с 1 раза, тыкает по рандомному и всё».
+            # Запускается ВСЕГДА когда есть ещё не пробованные кнопки (не только при пустых idxs!).
+            # Т.е. OCR мог угадать 2 кандидата, оба оказались «wrong» от funstat — мы продолжаем
+            # добивать капчу рандомом, НЕ сдаваясь. Идём по всем оставшимся, не только 2.
             # Условие `self._auto`: если авто-решатель отключён config'ом (CAPTCHA_AUTO_SOLVE=false),
             # уважаем выбор — рандом тоже не запускаем. Отключение через CAPTCHA_RANDOM_FALLBACK=false.
             random_enabled = (self._auto is not None and getattr(self._auto, "enabled", False)
                               and self._random_fallback)
-            if photo and buttons and not idxs and random_enabled:
+            if photo and buttons and random_enabled:
                 import random as _r
                 remaining = [i for i in range(len(buttons)) if i not in tried]
                 _r.shuffle(remaining)
-                for idx in remaining[:2]:
+                for idx in remaining:
                     tried.add(idx)
                     res = await self.solve_captcha(token, idx)
                     if res.startswith("Нажал") and "funstat сказал" not in res:
                         self.stats["captcha_random"] = self.stats.get("captcha_random", 0) + 1
-                        llog("LOOKUP", f"@{bot} на {session}: капчу решил РАНДОМ → кнопка {idx + 1}")
+                        llog("LOOKUP", f"@{bot} на {session}: капчу решил РАНДОМ → кнопка {idx + 1} "
+                                       f"(после {len(tried)} попыток)")
                         self._captcha.pop(token, None)
                         if self._captcha_by_session.get(session) == token:
                             self._captcha_by_session.pop(session, None)
                         await asyncio.sleep(2.0)
                         return True
                     log.info("Lookup: рандом-клик %d не прошёл (%s)", idx + 1, res)
+                    # Капча «неактуальна» → funstat её сменил ИЛИ прислал новую (мы её увидим в
+                    # следующем _ask_bot_locked poll). Если «Неизвестная кнопка» — больше нечего пробовать.
                     if "неактуальна" in res or "Неизвестная кнопка" in res:
                         break
                     await asyncio.sleep(1.5)
