@@ -955,6 +955,16 @@ class OwnerLookup:
                 if self._captcha_by_session.get(session) == token:
                     self._captcha_by_session.pop(session, None)
                 return False
+            # 2c) мы перепробовали ВСЕ кнопки (OCR + рандом), funstat сказал «wrong» на каждую.
+            # Админ ничего нового не нажмёт (все кнопки «wrong»), только бессмысленно ждать 90с.
+            # Выходим — funstat пришлёт новую капчу в следующей итерации _ask_bot_locked.
+            if buttons and len(tried) >= len(buttons):
+                log.warning("Lookup: @%s на %s — все %d кнопок перепробованы, funstat не принял — "
+                            "выходим, ждём новую капчу", bot, session, len(buttons))
+                self._captcha.pop(token, None)
+                if self._captcha_by_session.get(session) == token:
+                    self._captcha_by_session.pop(session, None)
+                return False
             # 3) fallback — админ
             if self.on_captcha is None:
                 log.warning("Lookup: @%s просит капчу на %s — пройдите её вручную в этом аккаунте", bot, session)
