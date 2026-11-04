@@ -604,7 +604,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1244,6 +1244,22 @@ def build_routers(app: "App") -> list[Router]:
                        (f" ({', '.join(wait)})" if wait else "") +
                        f"\n❌ Действительно мёртвые (удалятся снова): {len(dead)}" +
                        (f" ({', '.join(dead)})" if dead else ""))
+
+    @admin.message(Command("reset_speeds"))
+    async def cmd_reset_speeds(m: Message) -> None:
+        """Сброс всех замедлений аккаунтов обратно до 1.0 (как после деплоя). Используй только
+        когда уверен что шторм FloodWait закончился и можно разогнать. Иначе снова словишь."""
+        reset = 0
+        for w in app.sessions.workers.values():
+            if getattr(w, "speed", 1.0) < 1.0:
+                w.speed = 1.0
+                w.recent_floods = []
+                reset += 1
+        # также снять адаптивный throttle на limiter
+        app.sessions.limiter.set_rate(app.sessions._base_rps)
+        app.sessions._throttle_until = 0.0
+        await m.answer(f"⚡ Сброшено замедление у {reset} аккаунтов. GLOBAL_RPS → {app.sessions._base_rps:.1f}.\n"
+                       "⚠️ Если шторм FloodWait ещё идёт — снова поймаешь.")
 
     @admin.message(Command("routes"))
     async def cmd_routes(m: Message, command: CommandObject) -> None:
