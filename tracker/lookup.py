@@ -269,14 +269,34 @@ def _gift_matches(saved: Any, slug: str | None, unique_id: int | None) -> bool:
     return bool(unique_id) and getattr(g, "id", None) == unique_id
 
 
+class ProfilePrivate(Exception):
+    """Пользователь скрыл список подарков (privacy settings) — проверить нельзя.
+    Это НЕ 'нет NFT' — вызывающий код должен считать это 'неопределённо'."""
+
+
 async def profile_has_gift(client, entity, slug: str | None, unique_id: int | None,
                            max_pages: int = 3) -> bool:
-    """Виден ли этот NFT в профиле пользователя (скрытые подарки Telegram не отдаёт)."""
+    """Виден ли этот NFT в профиле пользователя (скрытые подарки Telegram не отдаёт).
+
+    Возвращает:
+      True  — NFT найден в профиле (точно он)
+      False — прочитали все видимые подарки, этого нет
+      raise ProfilePrivate — пользователь закрыл профиль/подарки, неопределённость
+                             (вызывающий код решает — верить ли funstat по trust-fallback)
+    """
     offset = ""
     for _ in range(max_pages):
-        res = await client(GetSavedStarGiftsRequest(peer=entity, offset=offset, limit=100,
-                                                    exclude_unlimited=True, exclude_upgradable=True,
-                                                    exclude_unupgradable=True))
+        try:
+            res = await client(GetSavedStarGiftsRequest(peer=entity, offset=offset, limit=100,
+                                                        exclude_unlimited=True, exclude_upgradable=True,
+                                                        exclude_unupgradable=True))
+        except Exception as e:
+            s = str(e).upper()
+            # Ошибки приватности = "не можем прочесть", не "нет"
+            if ("USER_PRIVACY" in s or "CHAT_PRIVATE" in s or "PEER_ID_INVALID" in s
+                    or "PRIVATE" in s or "NOT_PARTICIPANT" in s):
+                raise ProfilePrivate(str(e)) from e
+            raise
         if any(_gift_matches(s, slug, unique_id) for s in getattr(res, "gifts", None) or []):
             return True
         offset = getattr(res, "next_offset", None) or ""
@@ -1295,6 +1315,16 @@ class OwnerLookup:
                     return await profile_has_gift(client, peer, slug, unique_id)
                 try:
                     ok = await self._run(session, _check, timeout=30)
+                except ProfilePrivate as e:
+                    # Профиль закрыт (USER_PRIVACY_RESTRICTED) — мы НЕ ЗНАЕМ есть у него NFT.
+                    # НЕ добавляем в verified_rejected: trust-fallback снизу может решить
+                    # доверять ему по совпадению имени (это основной кейс для приватных).
+                    self.stats["nft_private"] = self.stats.get("nft_private", 0) + 1
+                    log.info("Lookup: %s профиль закрыт (%s) — считаем неопределённо", c.key(), e)
+                    # Если именно он единственный matched — доверяем сразу (аналог trust_without_nft)
+                    if c in matched and resolve_blocked_matched is None:
+                        resolve_blocked_matched = c
+                    continue
                 except Exception as e:
                     log.debug("Lookup: подарки %s не прочитались: %s", c.key(), e)
                     continue
