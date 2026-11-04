@@ -52,6 +52,11 @@ class SessionStorage:
             pass
         self.default_api_id = default_api_id
         self.default_api_hash = default_api_hash
+        # Кеш list_sessions на 5с — админ-команды часто его дёргают (/sessions, /flood, /lookup_panel...),
+        # а glob+json.loads на N файлов — лишний диск при каждом нажатии кнопки. 5с достаточно,
+        # чтобы /reload, /add_session, /remove_session увидели изменения быстро.
+        self._list_cache: list[SessionRecord] | None = None
+        self._list_cache_at = 0.0
 
     def wipe_proxies(self) -> int:
         """Полностью убрать прокси: очистить пул и снять прокси со всех аккаунтов."""
@@ -70,9 +75,19 @@ class SessionStorage:
                 meta.write_text(json.dumps(data), encoding="utf-8")
                 _secure(meta)
                 n += 1
+        if n:
+            self._invalidate_list_cache()
         return n
 
     def list_sessions(self) -> list[SessionRecord]:
+        import time as _t
+        now = _t.monotonic()
+        # Кеш учитывает USE_PROXIES: при переключении (например, в тестах) содержимое SessionRecord.proxy
+        # меняется, но файлы те же — поэтому в ключ кеша входит и флаг прокси.
+        sig = _proxies_enabled()
+        if (self._list_cache is not None and now - self._list_cache_at < 5.0
+                and getattr(self, "_list_cache_sig", None) == sig):
+            return self._list_cache
         out = []
         for p in sorted(self.dir.glob("*.session")):
             name = p.stem
@@ -90,7 +105,15 @@ class SessionStorage:
                 except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
                     pass
             out.append(SessionRecord(name, p, api_id, api_hash, owner, proxy))
+        self._list_cache = out
+        self._list_cache_at = now
+        self._list_cache_sig = sig
         return out
+
+    def _invalidate_list_cache(self) -> None:
+        """Явно сбросить кеш после /reload, /add_session, /remove_session."""
+        self._list_cache = None
+        self._list_cache_at = 0.0
 
     def next_name(self) -> str:
         used = [int(m.group(1)) for p in self.dir.glob("session_*")
@@ -125,6 +148,7 @@ class SessionStorage:
         sp = self.session_path(name)
         if sp.exists():
             _secure(sp)
+        self._invalidate_list_cache()
 
     def set_proxy(self, name: str, proxy: str | None) -> None:
         data = self._read_meta(name)
@@ -132,6 +156,7 @@ class SessionStorage:
         meta = self.dir / f"{name}.json"
         meta.write_text(json.dumps(data), encoding="utf-8")
         _secure(meta)
+        self._invalidate_list_cache()
 
     # ------------------------------------------------------------------ пул прокси
     @property
@@ -172,10 +197,13 @@ class SessionStorage:
             if p.exists():
                 shutil.move(str(p), str(target / p.name))
                 moved = True
+        if moved:
+            self._invalidate_list_cache()
         return moved
 
     def discard(self, name: str) -> None:
         """Удалить недоделанную (неавторизованную) session после неудачного /add_session."""
+        self._invalidate_list_cache()
         for suffix in (".session", ".json", ".session-journal"):
             p = self.dir / f"{name}{suffix}"
             try:
