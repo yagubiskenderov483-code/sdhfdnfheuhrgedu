@@ -677,8 +677,46 @@ def build_routers(app: "App") -> list[Router]:
             f"Последний найден: {_ago(pipe.last_new_at)} · отправлен: {_ago(pipe.last_sent_at)}",
         ]
         if lk_stats:
-            lines.append(f"🔍 funstat: найдено {lk_stats.get('found', 0)} · не найдено {lk_stats.get('not_found', 0)} "
-                         f"· из памяти {lk_stats.get('from_memory', 0)} · в очереди на поиск {app.lookup.queue_size()}")
+            # Основная строка: что lookup нашёл
+            lookups_tot = lk_stats.get('lookups', 0)
+            lookups_part = f" · попыток {lookups_tot}" if lookups_tot else " · <b>попыток 0</b> ⚠️"
+            lines.append(f"🔍 lookup: найдено {lk_stats.get('found', 0)} · не найдено {lk_stats.get('not_found', 0)} "
+                         f"· из памяти {lk_stats.get('from_memory', 0)} · в очереди {app.lookup.queue_size()}"
+                         f"{lookups_part}")
+            # Диагностика пула ботов и сессий
+            try:
+                bot_pool = app.lookup._bot_pool()
+                dead = {b for b in (app.lookup._bot_dead_until or {}) if
+                        app.lookup._bot_dead_until[b] > __import__("time").monotonic()}
+            except Exception:
+                bot_pool, dead = [], set()
+            if bot_pool or dead:
+                live_str = ", ".join(f"@{b}" for b in bot_pool) or "— нет"
+                dead_str = f" · 💀 dead: {', '.join('@' + b for b in sorted(dead))}" if dead else ""
+                lines.append(f"🤖 боты поиска: {live_str}{dead_str}")
+            # Расширенная диагностика "почему не ищет"
+            no_answer = lk_stats.get('no_answer', 0)
+            unres = lk_stats.get('bot_unresolved', 0)
+            rate_lim = lk_stats.get('rate_limited', 0)
+            resolve_lim = lk_stats.get('resolve_limit', 0)
+            skipped = lk_stats.get('skipped', 0)
+            expired = lk_stats.get('expired', 0)
+            extras = []
+            if no_answer:
+                extras.append(f"бот молчал {no_answer}")
+            if unres:
+                extras.append(f"username не найден {unres}")
+            if rate_lim:
+                extras.append(f"rate-limit {rate_lim}")
+            if resolve_lim:
+                extras.append(f"resolve-limit {resolve_lim}")
+            if skipped:
+                extras.append(f"очередь полна {skipped}")
+            if expired:
+                extras.append(f"устарело {expired}")
+            if extras:
+                lines.append(f"   ⤷ {' · '.join(extras)}")
+            # Капчи
             cap_rand = lk_stats.get("captcha_random", 0)
             rand_part = f" · рандом-решено {cap_rand}" if cap_rand else ""
             active_part = f" · активных сейчас {pend_cap}" if pend_cap else ""
