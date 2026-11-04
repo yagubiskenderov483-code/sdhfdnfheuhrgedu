@@ -909,15 +909,13 @@ class OwnerLookup:
                     self.stats["captcha_auto_fail"] = self.stats.get("captcha_auto_fail", 0) + 1
 
             # 2a) РАНДОМ-фоллбек. user: «если не прошёл с 1 раза, тыкает по рандомному и всё».
-            # Запускается ВСЕГДА когда есть ещё не пробованные кнопки (не только при пустых idxs!).
-            # Т.е. OCR мог угадать 2 кандидата, оба оказались «wrong» от funstat — мы продолжаем
-            # добивать капчу рандомом, НЕ сдаваясь. Идём по всем оставшимся, не только 2.
-            # Условие `self._auto`: если авто-решатель отключён config'ом (CAPTCHA_AUTO_SOLVE=false),
-            # уважаем выбор — рандом тоже не запускаем. Отключение через CAPTCHA_RANDOM_FALLBACK=false.
-            random_enabled = (self._auto is not None and getattr(self._auto, "enabled", False)
-                              and self._random_fallback)
+            # ПОСЛЕДНИЙ ЭШЕЛОН: независим от OCR/vision — работает даже если солвер упал
+            # при инициализации (self._auto = None), или отключён (CAPTCHA_AUTO_SOLVE=false),
+            # или картинка не скачалась (photo = None — для ТЫКА картинка не нужна).
+            # Отключается ТОЛЬКО через CAPTCHA_RANDOM_FALLBACK=false.
+            random_enabled = self._random_fallback
             captcha_stale = ocr_stale   # унаследуем от OCR-цикла — не перезапускать рандом по мёртвой капче
-            if photo and buttons and random_enabled and not captcha_stale:
+            if buttons and random_enabled and not captcha_stale:
                 import random as _r
                 remaining = [i for i in range(len(buttons)) if i not in tried]
                 _r.shuffle(remaining)
