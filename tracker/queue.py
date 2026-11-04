@@ -863,7 +863,8 @@ class ListingPipeline:
         # До 3 капч подряд × (captcha_wait + lookup_timeout) + подстраховка 30с.
         # Для 90с capchta_wait и 15с lookup_timeout → ~345s. Иначе лоты с несколькими капчами
         # тонут в 150с таймауте и теряются до admin fallback'а.
-        timeout = max(60.0, min(600.0, (settings.lookup_captcha_wait + settings.lookup_timeout) * 3 + 30))
+        # ×5 после увеличения captcha_rounds до 5 (было 3), но capped 600с.
+        timeout = max(60.0, min(600.0, (settings.lookup_captcha_wait + settings.lookup_timeout) * 5 + 30))
         try:
             found = await asyncio.wait_for(self._lookup_owner(l), timeout=timeout)
         except asyncio.TimeoutError:
