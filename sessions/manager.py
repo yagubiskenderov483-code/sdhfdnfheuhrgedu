@@ -110,6 +110,9 @@ class SessionManager:
 
     async def rescan(self) -> list[str]:
         """Подхватить новые *.session, появившиеся в папке (команда /reload)."""
+        # Явно сбрасываем кеш list_sessions — /reload может быть вызвана после ручного копирования
+        # .session файлов, кеш (5с) не узнает о них вовремя.
+        self.storage._invalidate_list_cache()
         added = []
         for rec in self.storage.list_sessions():
             if rec.name not in self.workers:
