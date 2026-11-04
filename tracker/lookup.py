@@ -384,7 +384,19 @@ class OwnerLookup:
         self._last_response_text: dict[str, str] = {}       # session → последний текст от funstat (для rate-limit детекта)
         self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0,
                       "captcha": 0, "captcha_auto": 0, "too_many": 0, "from_memory": 0,
-                      "no_candidates": 0, "nft_hidden": 0, "name_mismatch": 0, "trusted_match": 0}
+                      "no_candidates": 0, "nft_hidden": 0, "name_mismatch": 0, "trusted_match": 0,
+                      # Новые поля из fallback / multi-bot / диагностики:
+                      "no_bot_pool": 0,          # лотов отброшено — пул ботов пуст (все dead)
+                      "no_session": 0,           # лотов отброшено — нет рабочих сессий
+                      "bot_unresolved": 0,       # кол-во 'No user has' / USERNAME_INVALID по всем ботам
+                      "bot_dead_marked": 0,      # сколько раз помечали бота dead глобально
+                      "captcha_random": 0,       # сколько капч решили случайной кнопкой
+                      "captcha_auto_fail": 0,    # сколько капч OCR+random не решили
+                      "nft_private": 0,          # сколько раз профиль был закрыт (не 'нет NFT')
+                      "rate_limited": 0,         # funstat вернул 'слишком часто'
+                      "resolve_limit": 0,        # лимит ресолвов в час на сессию
+                      "expired": 0,              # лот устарел пока ждал
+                      "neg_cached": 0}           # не ходили к боту — имя в негативном кеше
         # капча: сначала пробуем решить сами (vision-API), если не вышло — отдаём админу.
         # on_captcha(token, session, photo_bytes, button_texts) — задаёт App
         # (шлёт админам картинку и кнопки); нажатие админа → solve_captcha(token, index).
