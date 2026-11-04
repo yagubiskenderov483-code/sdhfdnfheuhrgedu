@@ -434,7 +434,7 @@ class App:
                 cur = (sum(w.requests for w in ws), sum(w.floods for w in ws), sum(w.errors for w in ws),
                        self.pipeline.stats.get("new", 0), self.pipeline.stats.get("sent", 0),
                        lk_stats.get("captcha", 0), lk_stats.get("captcha_auto", 0),
-                       lk_stats.get("found", 0))
+                       lk_stats.get("found", 0), lk_stats.get("captcha_random", 0))
                 if prev is not None:
                     d = [a - b for a, b in zip(cur, prev)]
                     pings = [w.ping_ms for w in ws if getattr(w, "ping_ms", None)]
@@ -443,8 +443,9 @@ class App:
                     self.bench = {"req": d[0], "flood": d[1], "err": d[2], "new": d[3], "sent": d[4],
                                   "ping": (sum(pings) / len(pings)) if pings else None, "slow": slow}
                     extra = ""
-                    if d[5] or d[6] or d[7]:
-                        extra = f" | funstat: found={d[7]} captcha={d[5]} (авто={d[6]})"
+                    if d[5] or d[6] or d[7] or (len(d) > 8 and d[8]):
+                        rand_part = f" рандом={d[8]}" if len(d) > 8 and d[8] else ""
+                        extra = f" | funstat: found={d[7]} captcha={d[5]} (авто={d[6]}{rand_part})"
                     log.info("BENCH 60s: requests=%s (%.1f/s) floods=%s errors=%s new=%s sent=%s ping=%s "
                              "slowed_sessions=%s | lot: request=%s queue=%s check=%s send=%s total=%s%s",
                              d[0], d[0] / 60, d[1], d[2], d[3], d[4],

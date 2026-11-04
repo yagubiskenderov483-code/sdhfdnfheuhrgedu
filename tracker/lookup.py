@@ -242,7 +242,8 @@ def is_captcha(msg: Any) -> bool:
     """
     btns = _buttons(msg)
     cb = [t for t, d in btns if d]
-    if not cb or not (2 <= len(cb) <= 8):
+    # funstat чаще всего показывает 4-6 кнопок, но иногда 8-10. Верхний предел 12 (разумно для эмодзи-капчи)
+    if not cb or not (2 <= len(cb) <= 12):
         return False
     has_media = getattr(msg, "media", None) is not None or getattr(msg, "photo", None) is not None
     if not has_media:
