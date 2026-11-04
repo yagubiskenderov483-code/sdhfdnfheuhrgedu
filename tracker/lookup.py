@@ -864,6 +864,7 @@ class OwnerLookup:
             # первую кнопку неверной, пробуем вторую-третью без прохода через админа.
             idxs: list[int] = []
             tried: set[int] = set()
+            ocr_stale = False
             if self._auto is not None and getattr(self._auto, "enabled", False) and photo and buttons:
                 t_start = time.monotonic()
                 try:
@@ -894,6 +895,7 @@ class OwnerLookup:
                     # Капча стала «неактуальной» — funstat её сменил. Остальные idxs шлют в молоко,
                     # лучше дать боту прислать новую (следующая итерация _ask_bot_locked её прочтёт).
                     if "неактуальна" in res or "Неизвестная кнопка" in res:
+                        ocr_stale = True
                         break
                     # funstat мог заменить капчу новой — пауза даёт боту время
                     await asyncio.sleep(1.5)
@@ -914,8 +916,8 @@ class OwnerLookup:
             # уважаем выбор — рандом тоже не запускаем. Отключение через CAPTCHA_RANDOM_FALLBACK=false.
             random_enabled = (self._auto is not None and getattr(self._auto, "enabled", False)
                               and self._random_fallback)
-            captcha_stale = False       # funstat уже сказал «эта капча неактуальна» — админу не нужно
-            if photo and buttons and random_enabled:
+            captcha_stale = ocr_stale   # унаследуем от OCR-цикла — не перезапускать рандом по мёртвой капче
+            if photo and buttons and random_enabled and not captcha_stale:
                 import random as _r
                 remaining = [i for i in range(len(buttons)) if i not in tried]
                 _r.shuffle(remaining)
