@@ -714,6 +714,17 @@ class App:
                     "🚨 <b>В трекере не осталось ни одного аккаунта</b> — лоты не ищутся.\n"
                     "Добавьте аккаунт: /add_session")
             await self._alert("no_accounts", text, 1800)
+        # Шторм FloodWait: 15+/мин 5 минут подряд — это уже не кратковременное, а фон. Сигнал раз в час.
+        elif lasting("flood_storm",
+                     getattr(self.sessions, "flood_rate_per_minute", lambda: 0)() >= 15, 300):
+            n_min = getattr(self.sessions, "flood_rate_per_minute", lambda: 0)()
+            slow = sum(1 for w in self.sessions.workers.values() if getattr(w, "speed", 1.0) < 0.5)
+            hint = ("" if os.getenv("USE_PROXIES", "0").strip().lower() in ("1", "true", "yes", "on") else
+                    "\n\n💡 Сильнее всего поможет прокси: USE_PROXIES=1 + /proxies")
+            await self._alert("flood_storm",
+                              f"🌩 <b>Шторм FloodWait</b>: {n_min}/мин уже 5+ минут.\n"
+                              f"Замедлено {slow} из {total} аккаунтов. Трекер сам снизил скорость.\n"
+                              "Деталь: /flood" + hint, 3600)
         elif lasting("few_accounts", total >= 4 and usable < total * 0.4, 600):
             hint = ("" if os.getenv("USE_PROXIES", "0").strip().lower() in ("1", "true", "yes", "on") else
                     "\nСовет: все аккаунты на одном IP — подключите прокси (USE_PROXIES=1 и /proxies), "
