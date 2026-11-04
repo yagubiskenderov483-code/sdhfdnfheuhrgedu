@@ -764,7 +764,8 @@ class OwnerLookup:
         deadline = time.monotonic() + max(5.0, settings.lookup_timeout)
         prev_sig, stable, last_cands = None, 0, []
         got_answer = False
-        captcha_rounds = 0        # защита от бесконечного цикла капча→клик→новая капча
+        captcha_rounds = 0        # защита от бесконечного цикла капча→клик→новая капча. 5 капч подряд —
+                                  # уже явный бот-брутфорс, уходим. Обычно 1-2 капчи хватает.
         poll_min_id = sent_id     # после решения капчи ставим None (читаем всё — funstat может редактировать)
         while time.monotonic() < deadline:
             await asyncio.sleep(1.0)
@@ -777,10 +778,11 @@ class OwnerLookup:
                 continue
             cap = next((m for m in msgs if is_captcha(m)), None)
             if cap is not None:
-                if not _retry or captcha_rounds >= 3:
-                    # 3 капчи подряд на одном /human — больше не вяжемся, уходим
-                    if captcha_rounds >= 3:
-                        log.warning("Lookup: @%s зациклил капчу на %r (3-я подряд) — сдаёмся", bot, seller_name)
+                if not _retry or captcha_rounds >= 5:
+                    # 5 капч подряд на одном /human — больше не вяжемся, уходим
+                    # (user: 'если не прошел с 1 раза пусть дальше кидает' → даём больше попыток)
+                    if captcha_rounds >= 5:
+                        log.warning("Lookup: @%s зациклил капчу на %r (5-я подряд) — сдаёмся", bot, seller_name)
                         self.stats["captcha_loop_give_up"] = self.stats.get("captcha_loop_give_up", 0) + 1
                     return None
                 captcha_rounds += 1
