@@ -313,6 +313,10 @@ class App:
             self._spawn(asyncio.create_task(self._backup_loop(), name="backup-loop"))
         self.pipeline.start()
         await step("tracker", self.coordinator.start())
+        # Проактивная liveness-проверка lookup-ботов при запуске:
+        # если funstat снесён, узнаём об этом сразу, а не после десятка впустую отсеянных лотов.
+        if hasattr(self.lookup, "check_bots_liveness"):
+            self._spawn(asyncio.create_task(self._lookup_liveness_loop(), name="lookup-liveness"))
 
     async def _send_lookup_captcha(self, token: str, session: str, photo: bytes | None,
                                    buttons: list[str]) -> None:
@@ -369,6 +373,24 @@ class App:
                 await self.bot.send_message(chat, text)
             except Exception:
                 pass
+
+    async def _lookup_liveness_loop(self) -> None:
+        """Проактивная проверка lookup-ботов: сразу после старта (через 30с, чтобы сессии
+        успели подключиться) и далее раз в 10 минут. Если бот снесли — узнаём заранее,
+        а не после десятков впустую отсеянных hidden-owner лотов."""
+        await asyncio.sleep(30)        # ждём пока сессии поднимутся
+        while True:
+            try:
+                res = await self.lookup.check_bots_liveness()
+                if res:
+                    dead = [b for b, ok in res.items() if not ok]
+                    log.info("Lookup liveness check: %d бот(ов) живы, %d dead",
+                             sum(1 for v in res.values() if v), len(dead))
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("Lookup liveness loop: %s", e)
+            await asyncio.sleep(600)   # 10 минут между проверками
 
     async def _notify_bot_dead(self, bot: str, next_bot: str | None) -> None:
         """Lookup-бот @bot недоступен (помечен dead на 15 мин). Один раз на дохлого бота

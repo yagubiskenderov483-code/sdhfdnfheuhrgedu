@@ -483,6 +483,79 @@ class OwnerLookup:
             self._bot_dead_notified.discard(k)
             log.info("Lookup: бот @%s снова отвечает — снимаю dead-mark", bot)
 
+    async def check_bots_liveness(self) -> dict[str, bool]:
+        """Проактивная проверка настроенных lookup-ботов: пробуем get_input_entity для каждого
+        через любую рабочую сессию. Возвращает {bot: True/False}. При False бот сразу помечается
+        как dead (до первого реального успеха). Безопасно вызывать и из фонового loop, и однократно
+        при старте — resolve-ы недорогие (а при успехе кэшируются Telethon'ом).
+
+        Используется:
+          - при старте трекера: заранее узнать что funstat снесён, не ждать первого лота
+          - периодически (можно вешать на loop): раз в N минут обновлять статус"""
+        primary = (settings.lookup_bot_username or "").strip()
+        extras = list(settings.lookup_bots or [])
+        all_bots: list[str] = []
+        seen: set[str] = set()
+        for b in ([primary] if primary else []) + extras:
+            b = b.lstrip("@").strip()
+            if b and b.lower() not in seen:
+                seen.add(b.lower())
+                all_bots.append(b)
+        if not all_bots:
+            return {}
+
+        # Берём ЛЮБУЮ рабочую сессию (не привязываемся к LOOKUP_SESSIONS: liveness-check
+        # не ест лимитов funstat — это resolveUsername, который Telethon кэширует)
+        try:
+            session_candidates = [w.name for w in self.sessions.usable(include_reserved=True)
+                                  if w.is_usable()]
+        except Exception:
+            session_candidates = []
+        if not session_candidates:
+            log.debug("Lookup liveness: нет рабочих сессий — пропускаем")
+            return {}
+
+        results: dict[str, bool] = {}
+        for bot in all_bots:
+            alive = False
+            for sess in session_candidates[:3]:    # максимум 3 сессии на бота — достаточно
+                try:
+                    async def _probe(client, b=bot):
+                        return await client.get_input_entity(b)
+                    res = await asyncio.wait_for(self._run(sess, _probe, timeout=10), timeout=12)
+                    if res is not None:
+                        alive = True
+                        break
+                except Exception as e:
+                    s = str(e).lower()
+                    # Только username-ошибки означают "бота нет". Flood / net / timeout — не повод.
+                    if ("no user has" in s or "username_invalid" in s or "username_not_occupied" in s
+                            or "cannot find any entity" in s):
+                        continue       # пробуем следующую сессию (вдруг у неё кэш свежее)
+                    # Любая другая ошибка — не выносим приговор боту, пропускаем
+                    log.debug("Lookup liveness: probe %s on %s: %s — inconclusive", bot, sess, e)
+                    alive = True       # не можем сказать что мёртв → считаем живым
+                    break
+            results[bot] = alive
+            if alive:
+                self._clear_bot_unresolved(bot)
+                log.info("Lookup liveness: @%s — alive", bot)
+            else:
+                # mark dead immediately: liveness подтвердил что все наши сессии не видят бота
+                k = bot.lower()
+                self._bot_dead_until[k] = time.monotonic() + 900
+                self.stats["bot_dead_marked"] = self.stats.get("bot_dead_marked", 0) + 1
+                log.error("Lookup liveness: @%s — DEAD (не резолвится ни на одной из %d сессий)",
+                          bot, min(3, len(session_candidates)))
+                if k not in self._bot_dead_notified and self.on_bot_dead:
+                    self._bot_dead_notified.add(k)
+                    next_bot = next((b for b in all_bots if b.lower() != k and results.get(b, True)), None)
+                    try:
+                        asyncio.get_running_loop().create_task(self.on_bot_dead(bot, next_bot))
+                    except Exception:
+                        pass
+        return results
+
     async def find_owner(self, seller_name: str, slug: str | None, unique_id: int | None,
                          prio: float = 0.0, deadline: float | None = None) -> FoundOwner | None:
         """prio — чем меньше, тем раньше в очереди к боту поиска (передаём −цена: дорогие первыми)."""
