@@ -604,7 +604,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1244,6 +1244,73 @@ def build_routers(app: "App") -> list[Router]:
                        (f" ({', '.join(wait)})" if wait else "") +
                        f"\n❌ Действительно мёртвые (удалятся снова): {len(dead)}" +
                        (f" ({', '.join(dead)})" if dead else ""))
+
+    @admin.message(Command("routes"))
+    async def cmd_routes(m: Message, command: CommandObject) -> None:
+        """Показать текущие маршруты по цене (PRICE_ROUTES) и фонам (BACKDROP_ROUTES) в удобной форме.
+        Меняется через /set PRICE_ROUTES 200-1000:chat_id/topic_id,1001-2500:chat_id/topic_id,..."""
+        lines = ["<b>💰 Маршруты по цене (PRICE_ROUTES)</b>"]
+        pr = settings.price_routes or []
+        if not pr:
+            lines.append("<i>не заданы — все лоты идут в TARGET_CHAT_ID</i>")
+        else:
+            for lo, hi, chat, thread in sorted(pr):
+                rng = f"{lo}-{hi or '∞'}⭐"
+                where = f"<code>{chat}</code>" + (f" / topic {thread}" if thread else "")
+                lines.append(f"  {rng} → {where}")
+        lines += ["", "<b>🖼 Маршруты по фону (BACKDROP_ROUTES)</b>"]
+        br = settings.backdrop_routes or []
+        if not br:
+            lines.append("<i>не заданы</i>")
+        else:
+            for name, chat, thread in br:
+                where = f"<code>{chat}</code>" + (f" / topic {thread}" if thread else "")
+                lines.append(f"  «{html.escape(name)}» → {where}")
+        lines += [
+            "",
+            "<b>Как менять:</b>",
+            "<code>/set PRICE_ROUTES 200-1000:-1001234/5,1001-2500:-1001234/6</code>",
+            "<code>/set BACKDROP_ROUTES rare:-1001234/7</code>",
+            "<i>hi пустой = без верхней границы</i>",
+        ]
+        await _answer_long(m, "\n".join(lines))
+
+    @admin.message(Command("flood"))
+    async def cmd_flood(m: Message) -> None:
+        """Диагностика FloodWait: за последний час по каждому аккаунту — сколько ловил, когда,
+        какой speed сейчас. Помогает увидеть, какие сессии «горячие» и нужны ли прокси."""
+        import time as _t
+        now = _t.monotonic()
+        rows = []
+        total_h = 0
+        for name, w in sorted(app.sessions.workers.items()):
+            floods = getattr(w, "recent_floods", [])
+            n = sum(1 for t in floods if now - t < 3600)
+            total_h += n
+            if n == 0 and w.speed >= 0.99:
+                continue        # здоровые — пропускаем
+            last_ago = int(now - floods[-1]) if floods else None
+            last_s = f"{last_ago}с назад" if last_ago is not None and last_ago < 3600 else "—"
+            status = w.status.value
+            if w.status.value == "FLOOD_WAIT":
+                remain = max(0, int(w.flood_until - now))
+                status += f" ({remain}с)"
+            rows.append(f"<code>{html.escape(name)}</code> · {status} · speed x{w.speed:.2f} · "
+                        f"за час {n} · последний {last_s}")
+        n_min = app.sessions.flood_rate_per_minute()
+        base = app.sessions._base_rps
+        cur = app.sessions.limiter.rate
+        header = [
+            f"🌩 <b>FloodWait за час: {total_h}</b> · за минуту: {n_min}",
+            f"GLOBAL_RPS: {cur:.1f} из {base:.1f}" + (" (адаптивно замедлены)" if cur < base else ""),
+            "",
+        ]
+        if not rows:
+            header.append("Нет проблемных аккаунтов — все работают на полной скорости.")
+        else:
+            header.append("<b>Проблемные:</b>")
+        await _answer_long(m, "\n".join(header + rows[:40]
+                                        + ([f"… ещё {len(rows) - 40}"] if len(rows) > 40 else [])))
 
     @admin.message(Command("clear_captcha_cache"))
     async def cmd_clear_captcha_cache(m: Message) -> None:
