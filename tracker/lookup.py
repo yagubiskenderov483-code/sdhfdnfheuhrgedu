@@ -354,6 +354,11 @@ class OwnerLookup:
         # Бьёт один раз в сутки на пару (session, bot) — не спамим.
         self.on_bot_blocked = None
         self._blocked_notified: dict[tuple[str, str], float] = {}
+        # Random-click fallback: если OCR не распознал — пробуем 2 случайных кнопки перед админом.
+        # Отключается через CAPTCHA_RANDOM_FALLBACK=false; по умолчанию включено (user хотел так).
+        import os as _os
+        self._random_fallback = (_os.environ.get("CAPTCHA_RANDOM_FALLBACK", "true").strip().lower()
+                                 not in ("0", "false", "no", "off", "n"))
         try:
             from .captcha_solver import CaptchaSolver, _load_cache, captcha_cache_stats
             self._auto = CaptchaSolver()
@@ -901,7 +906,11 @@ class OwnerLookup:
             # user: «если не распознает какая капча, пусть рандом кликает, а в конце кидает админу».
             # Пробуем до 2 случайных кнопок из ещё не пробованных — при 4-6 кнопках ≈20-33% решим сами.
             # Не прошло — упадём ниже в админ-фоллбек.
-            if photo and buttons and not idxs:
+            # Условие `self._auto`: если авто-решатель отключён config'ом (CAPTCHA_AUTO_SOLVE=false),
+            # уважаем выбор — рандом тоже не запускаем. Отключение через CAPTCHA_RANDOM_FALLBACK=false.
+            random_enabled = (self._auto is not None and getattr(self._auto, "enabled", False)
+                              and self._random_fallback)
+            if photo and buttons and not idxs and random_enabled:
                 import random as _r
                 remaining = [i for i in range(len(buttons)) if i not in tried]
                 _r.shuffle(remaining)
