@@ -908,6 +908,18 @@ class MarketplaceCoordinator:
             if self._is_priority(gid):
                 # дорогие коллекции опрашиваются чаще — но не реже обычных
                 cold = min(cold, self._priority_interval())
+            # ДИНАМИЧЕСКИЙ cold: если флот сильно замедлен (шторм FloodWait), растягиваем cold-poll,
+            # чтобы не долбить занятые сессии «страховочными» опросами — hot изменения каталога всё
+            # равно вызовут немедленный опрос. eff/total < 0.3 = сильный шторм.
+            try:
+                total = len(self.sessions.workers) or 1
+                eff_ratio = self.sessions.effective() / total
+                if eff_ratio < 0.15:
+                    cold *= 4
+                elif eff_ratio < 0.3:
+                    cold *= 2
+            except Exception:
+                pass
             if found is None:
                 # нет свободной session — повторить скоро (с нарастающей паузой) и не терять «горячесть»
                 fails = self._poll_fails.get(gid, 0) + 1
