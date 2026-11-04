@@ -1297,6 +1297,9 @@ def build_routers(app: "App") -> list[Router]:
         lines.append(f"✅ Авто-решено (OCR/Vision): {st.get('captcha_auto', 0)}")
         lines.append(f"🎲 Рандом-решено: {st.get('captcha_random', 0)}")
         lines.append(f"❌ Не смог (ушло админу): {st.get('captcha_auto_fail', 0)}")
+        loop_give_up = st.get("captcha_loop_give_up", 0)
+        if loop_give_up:
+            lines.append(f"🌀 Зациклил капчу (5 подряд): {loop_give_up}")
         if auto and not auto._ocr_available:
             lines += ["",
                       "⚠️ OCR недоступен — проверьте, что в Docker-образе есть "
