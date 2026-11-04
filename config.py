@@ -351,7 +351,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOOKUP_CHECK_ONSALE": ("lookup_check_onsale", _bool_strict),
     "LOOKUP_LANG_FILTER": ("lookup_lang_filter", _bool_strict),
     "LOOKUP_TIMEOUT": ("lookup_timeout", _rng(5, 180)),
-    "LOOKUP_INTERVAL": ("lookup_interval", _rng(0, 600)),
+    "LOOKUP_INTERVAL": ("lookup_interval", _rng(2, 600)),   # min 2с — иначе funstat выдаёт капчу на каждый запрос
     "LOOKUP_CAPTCHA_WAIT": ("lookup_captcha_wait", _rng(30, 7200)),
     "LOOKUP_SKIP_OVER": ("lookup_skip_over", lambda v: max(0, min(1000, int(v)))),
     "LOOKUP_RESOLVE_PER_HOUR": ("lookup_resolve_per_hour", lambda v: max(1, min(200, int(v)))),

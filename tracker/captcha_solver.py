@@ -497,14 +497,25 @@ def _emoji_name_words(emoji: str) -> set[str]:
     return words
 
 
+_EMOJI_TO_WORDS: dict[str, set[str]] | None = None
+
+
+def _rev_dict() -> dict[str, set[str]]:
+    """Обратный словарь эмодзи → слова. Один раз на процесс — _WORD_TO_EMOJI не меняется."""
+    global _EMOJI_TO_WORDS
+    if _EMOJI_TO_WORDS is None:
+        rev: dict[str, set[str]] = {}
+        for w, emojis in _WORD_TO_EMOJI.items():
+            for em in emojis:
+                rev.setdefault(em, set()).add(w)
+        _EMOJI_TO_WORDS = rev
+    return _EMOJI_TO_WORDS
+
+
 def _button_vocabulary(buttons: list[str]) -> list[set[str]]:
     """Для каждой кнопки — набор слов, которыми её эмодзи может быть названо
     (из обратного словаря + unicodedata.name)."""
-    # обратный словарь: эмодзи → все слова, которые на него маппятся
-    rev: dict[str, set[str]] = {}
-    for w, emojis in _WORD_TO_EMOJI.items():
-        for em in emojis:
-            rev.setdefault(em, set()).add(w)
+    rev = _rev_dict()
     out: list[set[str]] = []
     for btn in buttons:
         vocab: set[str] = set()
