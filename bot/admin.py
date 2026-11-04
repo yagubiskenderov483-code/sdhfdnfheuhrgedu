@@ -609,7 +609,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1130,6 +1130,25 @@ def build_routers(app: "App") -> list[Router]:
         for i, (name, n, sent) in enumerate(rows, 1):
             fl = floors.get(name)
             lines.append(f"{i}. {html.escape(name)} — {n} → {sent}" + (f" · {fl:,}⭐".replace(",", " ") if fl else ""))
+        await _answer_long(m, "\n".join(lines))
+
+    @admin.message(Command("sellers"))
+    async def cmd_sellers(m: Message, command: CommandObject) -> None:
+        """Топ продавцов за сутки: кто больше всех выставляет лотов, сколько ушло в канал.
+        /sellers — все; /sellers 48 — за 48 часов."""
+        try:
+            hours = min(168, max(1, int((command.args or "24").strip())))
+        except ValueError:
+            hours = 24
+        since = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(time.time() - hours * 3600))
+        rows = await app.db.top_sellers(since, limit=25)
+        if not rows:
+            await m.answer(f"За {hours}ч лоты не выставлялись.")
+            return
+        lines = [f"<b>👥 Топ продавцов за {hours}ч</b>", "ключ · юз · найдено → отправлено", ""]
+        for i, (key, uname, n, sent) in enumerate(rows, 1):
+            u = f"@{uname}" if uname else "—"
+            lines.append(f"{i}. <code>{html.escape(key[:40])}</code> · {html.escape(u)} — {n} → {sent}")
         await _answer_long(m, "\n".join(lines))
 
     def _match_collections(q: str) -> list[str]:

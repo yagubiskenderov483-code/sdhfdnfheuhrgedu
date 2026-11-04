@@ -391,6 +391,18 @@ class Database:
             "FROM listings WHERE first_seen >= ? GROUP BY gift_name ORDER BY n DESC LIMIT ?", (since_iso, limit))
         return [(r[0] or "?", int(r[1] or 0), int(r[2] or 0)) for r in await cur.fetchall()]
 
+    async def top_sellers(self, since_iso: str, limit: int = 20) -> list[tuple[str, str | None, int, int]]:
+        """[(seller_key, seller_username, найдено, отправлено)] за период — самые активные продавцы."""
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT seller_key, "
+            "       MAX(seller_username), "
+            "       COUNT(*) AS n, "
+            "       SUM(CASE WHEN status='SENT' THEN 1 ELSE 0 END) AS s "
+            "FROM listings WHERE first_seen >= ? AND seller_key IS NOT NULL AND seller_key != '' "
+            "GROUP BY seller_key ORDER BY n DESC LIMIT ?", (since_iso, limit))
+        return [(r[0] or "?", r[1], int(r[2] or 0), int(r[3] or 0)) for r in await cur.fetchall()]
+
     async def collection_counts(self, gift_id: int, since_iso: str) -> dict[str, int]:
         assert self.conn
         cur = await self.conn.execute(
