@@ -781,6 +781,7 @@ class OwnerLookup:
                     # 3 капчи подряд на одном /human — больше не вяжемся, уходим
                     if captcha_rounds >= 3:
                         log.warning("Lookup: @%s зациклил капчу на %r (3-я подряд) — сдаёмся", bot, seller_name)
+                        self.stats["captcha_loop_give_up"] = self.stats.get("captcha_loop_give_up", 0) + 1
                     return None
                 captcha_rounds += 1
                 solved = await self._wait_captcha(session, bot, cap)
@@ -965,6 +966,14 @@ class OwnerLookup:
                 if self._captcha_by_session.get(session) == token:
                     self._captcha_by_session.pop(session, None)
                 return False
+            # 2d) если event уже set (кто-то решил капчу параллельно — редко, но бывает) — не шлём админу
+            c_check = self._captcha.get(token)
+            if c_check and c_check.get("event", asyncio.Event()).is_set():
+                log.info("Lookup: @%s на %s — капча решена параллельно, не шлём админу", bot, session)
+                self._captcha.pop(token, None)
+                if self._captcha_by_session.get(session) == token:
+                    self._captcha_by_session.pop(session, None)
+                return True
             # 3) fallback — админ
             if self.on_captcha is None:
                 log.warning("Lookup: @%s просит капчу на %s — пройдите её вручную в этом аккаунте", bot, session)
