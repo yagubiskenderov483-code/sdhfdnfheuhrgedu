@@ -611,7 +611,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1344,6 +1344,57 @@ def build_routers(app: "App") -> list[Router]:
                       "<code>tesseract-ocr</code> и <code>pytesseract</code>. "
                       "В текущем Dockerfile они должны быть — пересоберите образ."]
         await _answer_long(m, "\n".join(lines))
+
+    @admin.message(Command("test_bot"))
+    async def cmd_test_bot(m: Message) -> None:
+        """Ручной тест lookup-бота: '/test_bot [@username] [имя_для_поиска]'.
+        Без аргументов: тест основного бота с именем 'Alex'.
+        Используется чтобы убедиться что бот отвечает / корректно парсятся кандидаты.
+        Пример: /test_bot @funstat Иван"""
+        args = (m.text or "").split()[1:]
+        bot_name = (args[0] if args else (settings.lookup_bot_username or "")).lstrip("@").strip()
+        test_name = " ".join(args[1:]) if len(args) > 1 else "Alex"
+        if not bot_name:
+            await m.answer("Нужен бот: <code>/test_bot @funstat [имя]</code>")
+            return
+        if not test_name or len(test_name) < 2:
+            await m.answer("Нужно имя для поиска (от 2 букв): <code>/test_bot @funstat Иван</code>")
+            return
+        await m.answer(f"⏳ Пишу @{html.escape(bot_name)} <code>{html.escape(test_name)}</code>...")
+        import time as _t
+        t0 = _t.monotonic()
+        try:
+            order = app.lookup._pick_sessions()
+            if not order:
+                await m.answer("❌ Нет рабочих сессий для lookup.")
+                return
+            session = order[0]
+            # Прямой вызов — пробежимся по нормальному пути
+            cands = await asyncio.wait_for(
+                app.lookup._ask_bot(session, bot_name, test_name, prio=-1e12),
+                timeout=max(30.0, settings.lookup_timeout + settings.lookup_captcha_wait + 10)
+            )
+            dt = _t.monotonic() - t0
+            if cands is None:
+                await m.answer(f"⚠️ Бот не ответил за {dt:.1f}с (таймаут / блокировка / капча не прошла). "
+                               f"Сессия: <code>{html.escape(session)}</code>")
+                return
+            if not cands:
+                await m.answer(f"⚠️ Бот ответил за {dt:.1f}с, но кандидатов нет (имя {test_name!r}).\n"
+                               f"Сессия: <code>{html.escape(session)}</code>")
+                return
+            lines = [f"✅ Бот @{html.escape(bot_name)} ответил за {dt:.1f}с — <b>{len(cands)}</b> кандидат(ов):"]
+            for i, c in enumerate(cands[:10], 1):
+                tag = f"@{html.escape(c.username)}" if c.username else f"id<code>{c.user_id}</code>"
+                nm = f" — {html.escape(c.name)}" if c.name else ""
+                lines.append(f"{i}. {tag}{nm}")
+            if len(cands) > 10:
+                lines.append(f"<i>…и ещё {len(cands) - 10}</i>")
+            await _answer_long(m, "\n".join(lines))
+        except asyncio.TimeoutError:
+            await m.answer(f"⚠️ Таймаут {_t.monotonic() - t0:.1f}с.")
+        except Exception as e:
+            await m.answer(f"❌ Ошибка: <code>{html.escape(type(e).__name__)}: {html.escape(str(e)[:300])}</code>")
 
     @admin.message(Command("bots"))
     async def cmd_bots(m: Message) -> None:
