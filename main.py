@@ -632,6 +632,27 @@ class App:
                                                       if settings.seller_repeat_hours else " навсегда"))
             if strict:
                 lines.append("🧹 Фильтры: " + ", ".join(strict) + " · почему отсеяно: /why")
+            # Статус lookup-ботов: если есть мёртвые — показать сразу в startup-отчёте
+            try:
+                if hasattr(self.lookup, "_bot_pool"):
+                    pool = self.lookup._bot_pool()
+                    import time as _t
+                    now_m = _t.monotonic()
+                    dead = [b for b, until in (self.lookup._bot_dead_until or {}).items()
+                            if until > now_m]
+                    if pool and not dead:
+                        lines.append(f"🤖 Lookup-боты: {len(pool)} активн. (/bots)")
+                    elif pool and dead:
+                        lines.append(f"⚠️ Lookup: {len(pool)} активн., 💀 dead: "
+                                     + ", ".join(f"@{b}" for b in dead) + " (/bots)")
+                    elif not pool and self.lookup.any_bot_configured():
+                        lines.append("🚨 Lookup: ВСЕ боты dead — hidden-owner лоты с пометкой без фильтра. "
+                                     "/bots")
+                    elif not self.lookup.any_bot_configured():
+                        lines.append("ℹ️ Lookup-бот не настроен — hidden-owner лоты отсеиваются. "
+                                     "Настрой: /set LOOKUP_BOT_USERNAME funstat")
+            except Exception:
+                pass
             try:
                 rights = await self._chat_rights_report()
             except Exception as e:
