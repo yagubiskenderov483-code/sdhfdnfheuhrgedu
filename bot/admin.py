@@ -629,7 +629,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "sessions_stats", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget", "lookup_memory", "help_lookup", "health", "disk_usage"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "sessions_stats", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget", "lookup_memory", "help_lookup", "health", "disk_usage", "dashboard"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1877,6 +1877,139 @@ def build_routers(app: "App") -> list[Router]:
             f"  • <code>http://localhost:{port_raw}/stats</code> — JSON сводка\n"
             f"  • <code>http://localhost:{port_raw}/metrics</code> — Prometheus\n\n"
             "На Render: в настройках сервиса → Health Check Path: <code>/health</code>")
+
+    @admin.message(Command("dashboard"))
+    async def cmd_dashboard(m: Message) -> None:
+        """Единая быстрая сводка на одной странице: все критичные метрики + inline-кнопки
+        для перехода к детальным командам. Делает не больше одной БД-читки."""
+        import time as _t
+        ws = list(app.sessions.workers.values())
+        counts = app.sessions.counts()
+        active = counts.get("ACTIVE", 0)
+        flood = counts.get("FLOOD_WAIT", 0)
+        err = counts.get("ERROR", 0) + counts.get("AUTH_ERROR", 0)
+        eff = app.sessions.effective()
+        fpm = app.sessions.flood_rate_per_minute()
+        p = app.pipeline.stats
+        c = app.coordinator.stats
+        lk = getattr(app.lookup, "stats", {}) or {}
+        live, total = app.coordinator.sync_progress()
+        # last activity
+        now = _t.time()
+        last_sent = getattr(app.pipeline, "last_sent_at", None)
+        last_new = app.pipeline.last_new_at
+        sent_ago = f"{int(now - last_sent)}с" if last_sent else "—"
+        new_ago = f"{int(now - last_new)}с" if last_new else "—"
+        # lookup health
+        bots_pool = []
+        dead_bots = []
+        try:
+            bots_pool = app.lookup._bot_pool()
+            now_m = _t.monotonic()
+            dead_bots = [b for b, v in (app.lookup._bot_dead_until or {}).items() if v > now_m]
+        except Exception:
+            pass
+        # health emoji
+        if app.coordinator.paused:
+            mood = "⏸"
+        elif not active:
+            mood = "🚨"
+        elif fpm >= 15 or active < len(ws) * 0.4:
+            mood = "⚠️"
+        elif dead_bots:
+            mood = "⚠️"
+        else:
+            mood = "🟢"
+
+        lines = [f"{mood} <b>Дашборд</b>  <i>{__import__('datetime').datetime.now().strftime('%H:%M:%S')}</i>",
+                 ""]
+
+        # Sessions
+        lines.append(f"👥 <b>Аккаунты</b>: 🟢{active} ⏳{flood} 🔴{err} из {len(ws)} · "
+                     f"мощность {eff:.1f}")
+        if fpm >= 5:
+            lines.append(f"  🌩 FloodWait: <b>{fpm}/мин</b>")
+
+        # Collections
+        lines.append(f"📚 <b>Коллекции</b>: {live}/{total} в LIVE")
+
+        # Pipeline
+        lines.append(f"🎁 <b>Лоты</b>: найдено <b>{p.get('new', 0)}</b> · "
+                     f"отправлено <b>{p.get('sent', 0)}</b> · очередь {app.pipeline.queue.qsize()}")
+        lines.append(f"   ⤷ последний найден <i>{new_ago} назад</i>, отправлен <i>{sent_ago} назад</i>")
+
+        # Lookup
+        if bots_pool or dead_bots:
+            bot_str = ", ".join(f"@{b}" for b in bots_pool[:3])
+            if len(bots_pool) > 3:
+                bot_str += f" +{len(bots_pool) - 3}"
+            if dead_bots:
+                bot_str += " · 💀 " + ", ".join(f"@{b}" for b in dead_bots)
+            lines.append(f"🔍 <b>Lookup</b>: {bot_str}")
+            lines.append(f"   ⤷ попыток {lk.get('lookups', 0)} · найдено {lk.get('found', 0)} · "
+                         f"из памяти {lk.get('from_memory', 0)} · не найдено {lk.get('not_found', 0)}")
+            captcha = lk.get('captcha', 0)
+            if captcha:
+                captcha_solved = lk.get('captcha_auto', 0) + lk.get('captcha_random', 0)
+                lines.append(f"   ⤷ 🧩 капч {captcha} (решено {captcha_solved})")
+        elif not getattr(app.lookup, "any_bot_configured", lambda: False)():
+            lines.append("🔍 <b>Lookup</b>: ⚠️ бот не настроен — hidden-owner лоты отсеиваются")
+
+        # Warnings
+        warnings = []
+        if active == 0 and len(ws) > 0:
+            warnings.append("🚨 Нет рабочих аккаунтов — лоты не ищутся")
+        if dead_bots and len(bots_pool) == 0:
+            warnings.append("🚨 Все lookup-боты dead — hidden-owner идут без фильтра")
+        if last_sent and now - last_sent > 1800:
+            warnings.append(f"⚠️ Последний пост {int((now - last_sent) / 60)} мин назад")
+        if app.coordinator.paused:
+            warnings.append("⏸ Парсер на паузе — включить: /on")
+        if warnings:
+            lines += [""] + warnings
+
+        # Buttons for quick nav
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Обновить", callback_data="dash:refresh"),
+             InlineKeyboardButton(text="📊 /stat", callback_data="status:refresh")],
+            [InlineKeyboardButton(text="🤖 Пул ботов", callback_data="bots:refresh"),
+             InlineKeyboardButton(text="📋 Last", callback_data="lookup:last")],
+            [InlineKeyboardButton(text="👥 Sessions", callback_data="dash:sessions"),
+             InlineKeyboardButton(text="🧩 Кеши", callback_data="lookup:cache")],
+            [InlineKeyboardButton(text="🎛 Панель", callback_data="dash:panel"),
+             InlineKeyboardButton(text="❓ Why", callback_data="dash:why")],
+        ])
+        await m.answer("\n".join(lines), reply_markup=kb)
+
+    @admin.callback_query(F.data.startswith("dash:"))
+    async def cb_dash(q: CallbackQuery) -> None:
+        if not is_manager(q.from_user.id):
+            await q.answer("Только для админов", show_alert=True)
+            return
+        action = q.data.split(":", 1)[1]
+        await q.answer()
+        if q.message is None:
+            return
+        try:
+            mm = q.message.model_copy(update={"from_user": q.from_user})
+        except Exception:
+            mm = q.message
+        try:
+            if action == "refresh":
+                await cmd_dashboard(mm)
+            elif action == "sessions":
+                await cmd_sessions_stats(mm)
+            elif action == "panel":
+                await cmd_panel(mm)
+            elif action == "why":
+                # /why 1 час
+                try:
+                    report = await app.why_report(1.0)
+                    await _answer_long(mm, report)
+                except Exception as e:
+                    await mm.answer(f"❌ {html.escape(str(e))}")
+        except Exception as e:
+            log.debug("cb_dash %s failed: %s", action, e)
 
     @admin.message(Command("help_lookup"))
     async def cmd_help_lookup(m: Message) -> None:
