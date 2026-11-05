@@ -1031,10 +1031,11 @@ class App:
         market_saved_full = False
         while True:
             await asyncio.sleep(60)
-            # кеш капч — сохраняем часто и дёшево
+            # кеш капч — сохраняем часто и дёшево. Через to_thread — _save_cache делает
+            # sync IO (json.dump + os.replace), мог блокировать event loop на SSD-glitch.
             try:
                 from tracker.captcha_solver import _save_cache
-                _save_cache()
+                await asyncio.to_thread(_save_cache)
             except Exception:
                 pass
             if not self.storage.list_sessions():
@@ -1055,10 +1056,11 @@ class App:
 
     async def stop(self) -> None:
         log.info("Shutting down...")
-        # сохранить кеш капч при graceful shutdown — чтобы деплой не потерял накопленное
+        # сохранить кеш капч при graceful shutdown — чтобы деплой не потерял накопленное.
+        # Через to_thread — SIGTERM с таймаутом не должен ждать sync IO.
         try:
             from tracker.captcha_solver import _save_cache
-            _save_cache()
+            await asyncio.wait_for(asyncio.to_thread(_save_cache), timeout=5)
         except Exception:
             pass
         # закрыть health HTTP, чтобы freed port на новом инстансе был готов сразу
