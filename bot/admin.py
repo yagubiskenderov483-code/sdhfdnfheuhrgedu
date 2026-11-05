@@ -629,7 +629,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "sessions_stats", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget", "lookup_memory", "help_lookup", "health", "disk_usage", "dashboard"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "sessions_stats", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget", "lookup_memory", "help_lookup", "health", "disk_usage", "dashboard", "lookup_fix"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1877,6 +1877,108 @@ def build_routers(app: "App") -> list[Router]:
             f"  • <code>http://localhost:{port_raw}/stats</code> — JSON сводка\n"
             f"  • <code>http://localhost:{port_raw}/metrics</code> — Prometheus\n\n"
             "На Render: в настройках сервиса → Health Check Path: <code>/health</code>")
+
+    @admin.message(Command("lookup_fix"))
+    async def cmd_lookup_fix(m: Message) -> None:
+        """Автоматическая диагностика проблем lookup с рекомендациями.
+        Проверяет 7 типичных причин 'лоты не идут' и показывает что делать."""
+        import time as _t
+        lk = app.lookup
+        lines = ["🔧 <b>Диагностика lookup</b>", ""]
+        fix_needed = 0
+
+        # 1. бот настроен?
+        if not getattr(lk, "any_bot_configured", lambda: False)():
+            lines.append("❌ <b>Lookup-бот не настроен</b>")
+            lines.append("   <code>/set LOOKUP_BOT_USERNAME funstat</code>")
+            lines.append("")
+            fix_needed += 1
+        else:
+            lines.append("✅ Lookup-бот настроен")
+
+        # 2. есть рабочие боты?
+        bots_pool = lk._bot_pool() if hasattr(lk, "_bot_pool") else []
+        if not bots_pool and getattr(lk, "any_bot_configured", lambda: False)():
+            lines.append("❌ <b>Все боты dead</b> (15-мин блокировка)")
+            lines.append("   <code>/bots_clear_dead</code> — сбросить всех dead-mark")
+            lines.append("   или <code>/bots_add infostat</code> — добавить запасного")
+            lines.append("")
+            fix_needed += 1
+        elif bots_pool:
+            lines.append(f"✅ Активных ботов в пуле: {len(bots_pool)}")
+
+        # 3. есть сессии?
+        try:
+            sessions_pool = lk._pick_sessions() if hasattr(lk, "_pick_sessions") else []
+        except Exception:
+            sessions_pool = []
+        if not sessions_pool:
+            lines.append("❌ <b>Нет сессий для lookup</b> (все в FloodWait или залипли)")
+            lines.append("   <code>/sessions_stats</code> — проверить скорости")
+            lines.append("   <code>/sessions_speedup</code> — мягкий разгон")
+            lines.append("")
+            fix_needed += 1
+        else:
+            lines.append(f"✅ Сессий готово: {len(sessions_pool)}")
+
+        # 4. captcha solver работает?
+        auto = getattr(lk, "_auto", None)
+        if auto is None:
+            lines.append("⚠️ <b>Captcha solver не инициализирован</b>")
+            lines.append("   Если funstat даёт капчи — только админ сможет решить")
+            lines.append("")
+        else:
+            cap_ok = auto.enabled and (auto._ocr_available or auto._vision.enabled)
+            if not cap_ok:
+                lines.append("⚠️ Captcha solver отключён или без OCR/Vision")
+                lines.append("   Включи: <code>/set CAPTCHA_AUTO_SOLVE true</code>")
+                lines.append("   Или проверь что tesseract в Docker: /captcha_status")
+                lines.append("")
+            else:
+                lines.append("✅ Captcha solver работает")
+
+        # 5. есть попытки? (если lookup вообще запускается)
+        st = lk.stats if lk else {}
+        if st.get("lookups", 0) == 0 and (bots_pool or sessions_pool):
+            lines.append("⚠️ <b>Попыток lookup: 0</b>")
+            lines.append("   Lookup запускается только для лотов со скрытым владельцем.")
+            lines.append("   Если лоты идут — всё ОК (funstat не нужен).")
+            lines.append("")
+
+        # 6. много no_answer / no_candidates?
+        no_answer = st.get("no_answer", 0)
+        no_cand = st.get("no_candidates", 0)
+        found = st.get("found", 0)
+        total = st.get("lookups", 1)
+        if total > 20 and (no_answer + no_cand) / total > 0.5:
+            lines.append("⚠️ <b>Более 50% lookup неудачные</b> "
+                         f"(no_answer: {no_answer}, no_candidates: {no_cand})")
+            lines.append("   Бот плохо отвечает или funstat просто не знает этих имён.")
+            lines.append("   <code>/test_bot @funstat Иван</code> — проверить напрямую")
+            lines.append("")
+            fix_needed += 1
+
+        # 7. rate-limit / resolve-limit
+        rate = st.get("rate_limited", 0)
+        res_lim = st.get("resolve_limit", 0)
+        if rate > 5:
+            lines.append(f"⚠️ <b>Rate-limit от бота</b>: {rate}")
+            lines.append("   Попробуй: <code>/set LOOKUP_INTERVAL 3</code> "
+                         "(увеличить паузу между запросами)")
+            lines.append("")
+            fix_needed += 1
+        if res_lim > 10:
+            lines.append(f"⚠️ <b>Resolve-limit</b>: {res_lim} (лимит новых юзеров в час)")
+            lines.append("   <code>/set LOOKUP_RESOLVE_PER_HOUR 25</code> — увеличить лимит")
+            lines.append("")
+
+        # Final
+        if fix_needed == 0:
+            lines.append("")
+            lines.append("✅ <b>Проблем не найдено</b> — lookup должен работать нормально.")
+            lines.append("Если лоты всё равно не идут — смотри /why или /dashboard.")
+
+        await _answer_long(m, "\n".join(lines))
 
     @admin.message(Command("dashboard"))
     async def cmd_dashboard(m: Message) -> None:
