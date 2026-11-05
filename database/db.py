@@ -135,6 +135,20 @@ class Database:
     async def kv_set(self, key: str, value: Any) -> None:
         await self.kv_set_many({key: value})
 
+    async def kv_count_prefix(self, prefix: str) -> int:
+        """Сколько kv-ключей с таким префиксом. Используется для /lookup_memory и подобной диагностики."""
+        assert self.conn
+        cur = await self.conn.execute("SELECT COUNT(*) FROM kv WHERE key LIKE ?", (prefix + "%",))
+        row = await cur.fetchone()
+        return int(row[0]) if row else 0
+
+    async def kv_sample_prefix(self, prefix: str, limit: int = 20) -> list[tuple[str, str]]:
+        """Выборка до limit пар (key, value) с префиксом — для показа в админ-командах."""
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT key, value FROM kv WHERE key LIKE ? LIMIT ?", (prefix + "%", int(limit)))
+        return [(r[0], r[1]) for r in await cur.fetchall()]
+
     async def touch_market_items(self, unique_ids: Iterable[int]) -> None:
         """Отметить, что лоты всё ещё на рынке (якоря, которые не менялись)."""
         assert self.conn

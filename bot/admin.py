@@ -622,7 +622,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "sessions_stats", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget", "help_lookup"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "sessions_stats", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget", "lookup_memory", "help_lookup"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1397,6 +1397,43 @@ def build_routers(app: "App") -> list[Router]:
             lines.append(f"{icon} <code>{html.escape(name[:30])}</code> → {html.escape(result)}{extra_fmt} "
                          f"<i>({age_s})</i>")
         lines += ["", "<i>Легенда: ✅ найден · 💾 из памяти · ❌ не найден · 🫥 нет кандидатов · 👥 слишком много · 🔕 бот молчал · 🚫 rate-limit · 📦 негативный кеш</i>"]
+        await _answer_long(m, "\n".join(lines))
+
+    @admin.message(Command("lookup_memory"))
+    async def cmd_lookup_memory(m: Message) -> None:
+        """Сколько имён владельцев хранится в памяти БД (kv 'owner:*') + несколько примеров.
+
+        Эта память переживает рестарты по дизайну — follow-up lookup одного и того же продавца
+        идёт мгновенно без запроса к funstat, экономит квоту."""
+        try:
+            n = await app.db.kv_count_prefix("owner:")
+        except Exception as e:
+            await m.answer(f"❌ {html.escape(str(e))}")
+            return
+        lines = [f"💾 <b>Память владельцев:</b> <b>{n}</b> имён в БД",
+                 "", "<i>При новом лоте с таким продавцом lookup пропускается — используется "
+                 "сохранённый user_id. Экономит funstat-квоту.</i>"]
+        if n > 0:
+            try:
+                sample = await app.db.kv_sample_prefix("owner:", 10)
+                if sample:
+                    import json as _json
+                    lines += ["", "<b>Примеры (10):</b>"]
+                    for k, v in sample:
+                        name = k[len("owner:"):][:30]
+                        try:
+                            items = _json.loads(v) if v else []
+                            first = items[0] if items else {}
+                            info = f"u{first.get('id')} @{first.get('u') or '—'}"
+                            if len(items) > 1:
+                                info += f" (+{len(items) - 1})"
+                        except Exception:
+                            info = "?"
+                        lines.append(f"  <code>{html.escape(name)}</code> → {html.escape(info)}")
+            except Exception as e:
+                lines.append(f"\n(не удалось выбрать примеры: {html.escape(str(e)[:80])})")
+        lines += ["", "Удалить ошибочную запись: <code>/lookup_forget &lt;имя&gt;</code>",
+                  "Посмотреть одну запись: <code>/lookup_debug &lt;имя&gt;</code>"]
         await _answer_long(m, "\n".join(lines))
 
     @admin.message(Command("lookup_forget"))
