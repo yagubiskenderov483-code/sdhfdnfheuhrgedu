@@ -373,8 +373,13 @@ class ListingPipeline:
                     l.seller_lookup_failed = True
                     return
             self._seller_cache[uid] = (time.monotonic(), full)
+            # LRU-trim: выкидываем 25% самых старых вместо .clear() — иначе каждые 50k
+            # запросов рестартит ВСЕ кеши и каждый повторный продавец снова требует
+            # запрос в Telegram. Для 50k dict сортировка ~20мс на запрос trim-а.
             if len(self._seller_cache) > 50_000:
-                self._seller_cache.clear()
+                cutoff = sorted(self._seller_cache.items(), key=lambda kv: kv[1][0])[:12_500]
+                for k, _ in cutoff:
+                    self._seller_cache.pop(k, None)
         l.level = full.level
         if full.premium is not None:
             l.premium = full.premium
@@ -402,7 +407,9 @@ class ListingPipeline:
             return None          # сбой не кэшируем — в следующий раз спросим снова
         self._nft_cache[uid] = (time.monotonic(), n)
         if len(self._nft_cache) > 50_000:
-            self._nft_cache.clear()
+            cutoff = sorted(self._nft_cache.items(), key=lambda kv: kv[1][0])[:12_500]
+            for k, _ in cutoff:
+                self._nft_cache.pop(k, None)
         return n
 
     async def _gift_texts(self, l: Listing) -> str | None:
@@ -421,7 +428,9 @@ class ListingPipeline:
         if nfts is not None:
             self._nft_cache[uid] = (now, nfts)     # все подарки уже в ответе — число NFT известно
         if len(self._gift_text_cache) > 50_000:
-            self._gift_text_cache.clear()
+            cutoff = sorted(self._gift_text_cache.items(), key=lambda kv: kv[1][0])[:12_500]
+            for k, _ in cutoff:
+                self._gift_text_cache.pop(k, None)
         return txt
 
     async def _extra_texts(self, l: Listing) -> str | None:
@@ -440,7 +449,9 @@ class ListingPipeline:
             return None              # частичный сбой — не кэшируем
         self._extra_text_cache[uid] = (time.monotonic(), txt)
         if len(self._extra_text_cache) > 50_000:
-            self._extra_text_cache.clear()
+            cutoff = sorted(self._extra_text_cache.items(), key=lambda kv: kv[1][0])[:12_500]
+            for k, _ in cutoff:
+                self._extra_text_cache.pop(k, None)
         return txt
 
     def _streak_reason(self, l: Listing) -> str | None:

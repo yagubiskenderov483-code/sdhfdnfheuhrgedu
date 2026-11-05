@@ -969,8 +969,12 @@ class OwnerLookup:
                 return None
             if cands:
                 self._cache[key] = (time.monotonic(), cands)
+            # LRU-подобный trim: выкинуть 25% самых старых (по времени добавления) вместо
+            # полного .clear(), иначе каждый 5001-й lookup обнуляет свежие кеши и тратит квоту funstat.
             if len(self._cache) > 5000:
-                self._cache.clear()
+                cutoff = sorted(self._cache.items(), key=lambda kv: kv[1][0])[:len(self._cache) // 4]
+                for k, _ in cutoff:
+                    self._cache.pop(k, None)
         if not cands:
             # Проверяем: может это rate-limit от funstat, не настоящее «нет кандидатов»?
             # В таком случае не кешируем — попробуем снова позже.
@@ -993,8 +997,11 @@ class OwnerLookup:
             self.stats["not_found"] += 1
             self.stats["no_candidates"] += 1
             self._neg_cache[key] = time.monotonic()
+            # LRU-подобный trim (как в _cache): не выбрасываем всё разом
             if len(self._neg_cache) > 10000:
-                self._neg_cache.clear()
+                cutoff = sorted(self._neg_cache.items(), key=lambda kv: kv[1])[:len(self._neg_cache) // 4]
+                for k, _ in cutoff:
+                    self._neg_cache.pop(k, None)
             llog("LOOKUP", f"@{bot} /human {seller_name!r}: кандидатов нет (кешируем на час)")
             self._track_lookup(seller_name, "no_candidates", f"@{bot}")
             return None
