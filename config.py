@@ -106,6 +106,22 @@ def _bot_list(v: str | None) -> list[str]:
     return out
 
 
+def _lookup_bot_username(v: str | None) -> str:
+    """Валидация одного bot username (для primary LOOKUP_BOT_USERNAME).
+    Невалидный → пустая строка + warning в stderr. Пустой → пустая строка (норма)."""
+    import re as _re
+    import sys as _sys
+    _TG_USERNAME_RE = _re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
+    s = (v or "").strip().lstrip("@").strip()
+    if not s:
+        return ""
+    if not _TG_USERNAME_RE.match(s):
+        print(f"WARNING: LOOKUP_BOT_USERNAME={s!r} невалиден — очищено "
+              "(нужно: 5-32 символа, [A-Za-z0-9_], начинается с буквы)", file=_sys.stderr)
+        return ""
+    return s
+
+
 def _bot_cmds(v: str | None) -> dict[str, str]:
     """Разбор LOOKUP_CMDS: 'funstat:/human,infostat:/find' → {'funstat': '/human {name}'}.
     Если шаблон не содержит '{name}', подставляется автоматически через пробел."""
@@ -397,7 +413,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "SELLER_NAME_SIGNAL": ("seller_name_signal", _bool_strict),
     "PHONE_MISMATCH_BLOCKS": ("phone_mismatch_blocks", _bool_strict),
     "ALLOW_HIDDEN_OWNER": ("allow_hidden_owner", _bool_strict),
-    "LOOKUP_BOT_USERNAME": ("lookup_bot_username", lambda v: v.strip().lstrip("@")),
+    "LOOKUP_BOT_USERNAME": ("lookup_bot_username", _lookup_bot_username),
     "LOOKUP_BOTS": ("lookup_bots", _bot_list),
     "LOOKUP_CMD_TEMPLATE": ("lookup_cmd_template",
                             lambda v: (v.strip() if "{name}" in v else f"{v.strip()} {{name}}")
@@ -485,7 +501,7 @@ def _from_env() -> Settings:
         seller_name_signal=_bool(e("SELLER_NAME_SIGNAL"), False),
         phone_mismatch_blocks=_bool(e("PHONE_MISMATCH_BLOCKS"), True),
         allow_hidden_owner=_bool(e("ALLOW_HIDDEN_OWNER"), False),
-        lookup_bot_username=(e("LOOKUP_BOT_USERNAME") or "").strip().lstrip("@"),
+        lookup_bot_username=_lookup_bot_username(e("LOOKUP_BOT_USERNAME")),
         lookup_bots=_bot_list(e("LOOKUP_BOTS")),
         lookup_cmd_template=((e("LOOKUP_CMD_TEMPLATE") or "/human {name}").strip() or "/human {name}"),
         lookup_cmds=_bot_cmds(e("LOOKUP_CMDS")),
