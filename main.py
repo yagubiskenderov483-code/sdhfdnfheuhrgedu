@@ -962,11 +962,14 @@ class App:
         """Команды в синей кнопке «Меню» рядом с полем ввода."""
         cmds = [
             BotCommand(command="start", description="Главное меню"),
+            BotCommand(command="dashboard", description="📊 Единая сводка (главный экран админа)"),
             BotCommand(command="add_session", description="Добавить аккаунт"),
             BotCommand(command="sessions", description="Мои аккаунты / удалить"),
             BotCommand(command="status", description="Состояние трекера"),
             BotCommand(command="why", description="Почему нет постов"),
             BotCommand(command="panel", description="Фильтры кнопками"),
+            BotCommand(command="bots", description="🤖 Пул lookup-ботов"),
+            BotCommand(command="help_lookup", description="Все команды lookup одной строкой"),
             BotCommand(command="lookup", description="Проверить бота поиска: /lookup имя"),
             BotCommand(command="lot", description="Почему не пришёл лот (ссылка t.me/nft/…)"),
             BotCommand(command="stats", description="Статистика"),
