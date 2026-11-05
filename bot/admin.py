@@ -1737,7 +1737,20 @@ def build_routers(app: "App") -> list[Router]:
             await m.answer("Имя слишком короткое.")
             return
         old_primary = (settings.lookup_bot_username or "").strip()
-        # 1) добавить старый primary в LOOKUP_BOTS (если его там не было)
+        # 1) СНАЧАЛА установить новый primary — если он невалидный (валидация в config._lookup_bot_username),
+        # получим пустую строку и свалим с ошибкой ДО того, как изменили LOOKUP_BOTS.
+        # Это гарантирует атомарность: либо оба значения обновились, либо ни одно.
+        try:
+            applied = set_runtime_value("LOOKUP_BOT_USERNAME", new_bot)
+        except Exception as e:
+            await m.answer(f"❌ Не удалось установить: {html.escape(str(e))}")
+            return
+        if not applied:
+            # Валидатор вернул пустую строку (невалидный формат username)
+            await m.answer(f"❌ Невалидный username <code>{html.escape(new_bot)}</code>.\n\n"
+                           "Нужно: 5-32 символа, [A-Za-z0-9_], начинается с буквы.")
+            return
+        # 2) ТЕПЕРЬ добавить старый primary в LOOKUP_BOTS (если его там не было)
         extras = list(settings.lookup_bots or [])
         if old_primary and old_primary.lower() not in {b.lower() for b in extras} \
                 and old_primary.lower() != new_bot.lower():
@@ -1746,12 +1759,6 @@ def build_routers(app: "App") -> list[Router]:
                 set_runtime_value("LOOKUP_BOTS", ",".join(extras))
             except Exception as e:
                 log.warning("couldn't add %s to LOOKUP_BOTS: %s", old_primary, e)
-        # 2) установить новый primary
-        try:
-            set_runtime_value("LOOKUP_BOT_USERNAME", new_bot)
-        except Exception as e:
-            await m.answer(f"❌ Не удалось установить: {html.escape(str(e))}")
-            return
         # 3) снять dead-mark с нового primary (если был)
         if hasattr(app.lookup, "_clear_bot_unresolved"):
             app.lookup._clear_bot_unresolved(new_bot)
