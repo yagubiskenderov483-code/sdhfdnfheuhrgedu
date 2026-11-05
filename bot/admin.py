@@ -622,7 +622,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget", "help_lookup"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1740,6 +1740,51 @@ def build_routers(app: "App") -> list[Router]:
                        "Следующие lookup-операции попытаются использовать этих ботов.\n"
                        "Если они всё ещё не отвечают — dead-mark будет поставлен снова после "
                        "≥3 подряд unresolvable-фейлов.")
+
+    @admin.message(Command("help_lookup"))
+    async def cmd_help_lookup(m: Message) -> None:
+        """Компактный гайд по всем командам управления lookup в одном сообщении."""
+        text = (
+            "🔍 <b>Lookup — команды и флоу</b>\n\n"
+            "<b>Статус и диагностика</b>\n"
+            "<code>/bots</code> — пул ботов (+ inline-кнопки)\n"
+            "<code>/lookup_cache</code> — кеши, inflight, dead-marks\n"
+            "<code>/lookup_last</code> — последние 20 lookup-операций\n"
+            "<code>/lookup_debug Иван</code> — пошагово что произойдёт с таким именем\n"
+            "<code>/stat</code> — общая сводка с lookup-блоком\n\n"
+            "<b>Тестирование</b>\n"
+            "<code>/test_bots</code> — пинг всех ботов (бесплатно)\n"
+            "<code>/test_bot @funstat Иван</code> — реальный запрос с ответом\n\n"
+            "<b>Управление ботами</b>\n"
+            "<code>/bots_set_primary @infostat</code> — сменить основной\n"
+            "<code>/bots_add @findtg</code> — добавить запасного\n"
+            "<code>/bots_remove @old</code> — убрать запасного\n"
+            "<code>/bots_clear_dead [@bot]</code> — снять dead-mark\n\n"
+            "<b>Обслуживание</b>\n"
+            "<code>/lookup_reset</code> — полный сброс кешей\n"
+            "<code>/lookup_forget Иван</code> — удалить ложный владелец\n"
+            "<code>/clear_captcha_cache</code> — сброс кеша решённых капч\n"
+            "<code>/captcha_status</code> — статус OCR/рандом-солвера\n\n"
+            "<b>Настройки через /set</b>\n"
+            "• <code>LOOKUP_BOT_USERNAME</code> — основной бот\n"
+            "• <code>LOOKUP_BOTS</code> — запасные через запятую\n"
+            "• <code>LOOKUP_CMDS</code> — per-bot команды\n"
+            "• <code>LOOKUP_CMD_TEMPLATE</code> — общий шаблон\n"
+            "• <code>LOOKUP_SESSIONS</code> — выделенные сессии\n"
+            "• <code>LOOKUP_TIMEOUT</code>, <code>LOOKUP_INTERVAL</code>, "
+            "<code>LOOKUP_REQUIRED</code>\n\n"
+            "<b>Типичный флоу при проблемах</b>\n"
+            "1. <code>/bots</code> — какие боты активные, какие dead\n"
+            "2. <code>/lookup_last</code> — причина отказа каждой операции\n"
+            "3. <code>/test_bots</code> — реально живые ли боты\n"
+            "4. Если funstat мёртв:\n"
+            "   <code>/bots_set_primary infostat</code>\n"
+            "5. Если ложные владельцы в памяти:\n"
+            "   <code>/lookup_debug Иван</code> → <code>/lookup_forget Иван</code>\n"
+            "6. Если нужен полный сброс:\n"
+            "   <code>/lookup_reset</code>"
+        )
+        await _answer_long(m, text)
 
     @admin.message(Command("test_bots"))
     async def cmd_test_bots(m: Message) -> None:
