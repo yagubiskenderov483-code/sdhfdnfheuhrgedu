@@ -578,8 +578,18 @@ class ListingPipeline:
 
         # несколько лотов одного продавца проверяются по очереди: второй берёт всё из кэша
         lk = self._seller_locks.setdefault(l.seller_id or 0, asyncio.Lock())
+        # ВАЖНО: trim кешей делаем ТОЛЬКО если текущий lock-объект не входит в trim-список.
+        # Раньше .clear() стирал словарь ЦЕЛИКОМ, и если второй лот того же продавца делал
+        # setdefault в этот момент, он получал НОВЫЙ lock — критическая секция обходилась,
+        # и один и тот же продавец проверялся дважды параллельно.
         if len(self._seller_locks) > 20_000:
-            self._seller_locks.clear()
+            # удаляем НЕЗАНЯТЫЕ locks (без ждущих), кроме текущего
+            current_key = l.seller_id or 0
+            trash = [k for k, v in self._seller_locks.items()
+                     if k != current_key and not v.locked()]
+            # берём первые 50% unlocked чтобы не чистить слишком часто
+            for k in trash[:len(self._seller_locks) // 2]:
+                self._seller_locks.pop(k, None)
         async with lk:
             sr = await self._check_seller(l)
         if sr.code == "LOOKUP_FAILED" and not getattr(l, "lookup_retried", False):
