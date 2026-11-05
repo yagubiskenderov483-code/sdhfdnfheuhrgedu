@@ -896,6 +896,32 @@ class App:
                          f"9 из 10 быстрее {tot[min(len(tot) - 1, int(len(tot) * 0.9))]:.1f} с")
         elif "total" in self.pipeline.latency:
             lines.append(f"⏱ Средняя задержка лота: {self.pipeline.latency['total']:.1f} с")
+        # Lookup-статистика за сутки — из live-счётчиков (сбрасываются с процессом, но за сутки
+        # большая часть будет реальной если трекер работал без рестартов).
+        try:
+            lk_st = getattr(getattr(self, "lookup", None), "stats", {}) or {}
+            total_lookups = lk_st.get("lookups", 0)
+            if total_lookups > 0:
+                found_cnt = lk_st.get("found", 0)
+                not_found = lk_st.get("not_found", 0)
+                from_mem = lk_st.get("from_memory", 0)
+                captcha_cnt = lk_st.get("captcha", 0)
+                captcha_auto = lk_st.get("captcha_auto", 0) + lk_st.get("captcha_random", 0)
+                bot_dead_cnt = lk_st.get("bot_dead_marked", 0)
+                success_rate = int(100 * (found_cnt + from_mem) / max(1, total_lookups))
+                lines.append(f"🔍 Lookup: {total_lookups} попыток · {success_rate}% успех "
+                             f"({found_cnt} найдено, {from_mem} из памяти)")
+                if captcha_cnt > 0:
+                    captcha_rate = int(100 * captcha_auto / captcha_cnt)
+                    lines.append(f"🧩 Капч: {captcha_cnt} · авто-решено {captcha_auto} ({captcha_rate}%)")
+                if bot_dead_cnt > 0:
+                    lines.append(f"💀 Боты помечались dead: {bot_dead_cnt} раз(а) — /bots")
+                bypass = (getattr(getattr(self, "pipeline", None), "stats", {}) or {}) \
+                    .get("owner_bot_dead_bypass", 0)
+                if bypass > 0:
+                    lines.append(f"🔓 Hidden-owner bypass (все боты dead): {bypass} лот(ов)")
+        except Exception:
+            pass
         if found >= 10 and day.get("SENT", 0) < found * 0.2:
             lines.append("🧹 Больше 80% найденных лотов отсеяно — причины: /why 24 · фильтры кнопками: /panel")
         muted = self.backup.flags.get("muted") if hasattr(self.backup, "flags") else None
