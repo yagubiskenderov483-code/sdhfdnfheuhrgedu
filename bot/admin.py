@@ -622,7 +622,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "sessions_stats", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget", "lookup_memory", "help_lookup"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "sessions_stats", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget", "lookup_memory", "help_lookup", "health"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1777,6 +1777,36 @@ def build_routers(app: "App") -> list[Router]:
                        "Следующие lookup-операции попытаются использовать этих ботов.\n"
                        "Если они всё ещё не отвечают — dead-mark будет поставлен снова после "
                        "≥3 подряд unresolvable-фейлов.")
+
+    @admin.message(Command("health"))
+    async def cmd_health(m: Message) -> None:
+        """Статус HTTP health endpoint'а (если включён через HEALTH_PORT). Показывает ссылки
+        на /health /live /stats /metrics для копипаста в мониторинг."""
+        import os as _os
+        port_raw = (_os.environ.get("HEALTH_PORT") or "").strip()
+        if not port_raw or port_raw == "0":
+            await m.answer(
+                "⬜ <b>HTTP health endpoint выключен.</b>\n\n"
+                "Чтобы включить, задай <code>HEALTH_PORT=8080</code> в .env / Render envVars и "
+                "перезапусти.\n\n"
+                "После включения будут доступны:\n"
+                "  • <code>GET /health</code>, <code>/live</code> — 200 OK для liveness-check\n"
+                "  • <code>GET /stats</code> — JSON сводка (mode, sessions, lookup)\n"
+                "  • <code>GET /metrics</code> — Prometheus text exposition\n\n"
+                "На Render задай в Health Check Path: <code>/health</code> — Render автоматически "
+                "перезапустит worker при зависании.")
+            return
+        runner = getattr(app, "_health_runner", None)
+        running = runner is not None
+        state = "🟢 ЗАПУЩЕН" if running else "🔴 НЕ ЗАПУЩЕН (ошибка при старте, смотри логи)"
+        await m.answer(
+            f"🏥 <b>HTTP health endpoint</b>: {state}\n\n"
+            f"Порт: <b>{port_raw}</b>\n\n"
+            "Эндпоинты:\n"
+            f"  • <code>http://localhost:{port_raw}/health</code> — liveness\n"
+            f"  • <code>http://localhost:{port_raw}/stats</code> — JSON сводка\n"
+            f"  • <code>http://localhost:{port_raw}/metrics</code> — Prometheus\n\n"
+            "На Render: в настройках сервиса → Health Check Path: <code>/health</code>")
 
     @admin.message(Command("help_lookup"))
     async def cmd_help_lookup(m: Message) -> None:
