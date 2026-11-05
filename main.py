@@ -312,6 +312,18 @@ class App:
         if run_bot:
             self._spawn(asyncio.create_task(self._backup_loop(), name="backup-loop"))
         self.pipeline.start()
+        # Health HTTP endpoint для Render monitoring (включается HEALTH_PORT=8080).
+        # Не блокирующий, если не задано HEALTH_PORT — вообще не запускается.
+        try:
+            from utils.health_server import health_port_from_env, start_health_server
+            hp = health_port_from_env()
+            if hp > 0:
+                self._health_runner = await start_health_server(self, hp)
+            else:
+                self._health_runner = None
+        except Exception as e:
+            log.warning("Could not start health server: %s", e)
+            self._health_runner = None
         # Восстанавливаем из БД блокировки lookup-ботов, которые не истекли с прошлого запуска.
         # Иначе после деплоя 15-мин блокировка снесённого бота сбрасывалась, и трекер снова
         # долбился в мёртвого funstat'а первые минуты работы.
@@ -994,6 +1006,13 @@ class App:
             _save_cache()
         except Exception:
             pass
+        # закрыть health HTTP, чтобы freed port на новом инстансе был готов сразу
+        if getattr(self, "_health_runner", None) is not None:
+            try:
+                await self._health_runner.cleanup()
+            except Exception:
+                pass
+            self._health_runner = None
         for t in self._tasks:
             if t.get_name() == "boot" and not t.done():
                 t.cancel()             # SIGTERM во время запуска — не стартуем трекер на выходе
