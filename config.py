@@ -81,15 +81,28 @@ def _str_list(v: str | None) -> list[str]:
 
 
 def _bot_list(v: str | None) -> list[str]:
-    """Как _str_list, но убирает @ и дубликаты, сохраняя порядок (первый задан = первым пробуется)."""
+    """Как _str_list, но убирает @ и дубликаты, сохраняя порядок (первый задан = первым пробуется).
+    Валидация: Telegram username должен быть 5-32 символа, [A-Za-z0-9_], начинаться с буквы.
+    Невалидные имена игнорируются с warning в stderr — лучше тихо дропнуть опечатку
+    'funstat 2' чем взять и получить resolveUsername error позже."""
+    import re as _re
+    import sys as _sys
+    _TG_USERNAME_RE = _re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
     seen: set[str] = set()
     out: list[str] = []
     for p in _str_list(v):
         name = p.lstrip("@").strip()
         key = name.lower()
-        if name and key not in seen:
-            seen.add(key)
-            out.append(name)
+        if not name:
+            continue
+        if key in seen:
+            continue
+        if not _TG_USERNAME_RE.match(name):
+            print(f"WARNING: LOOKUP_BOTS: пропущен невалидный username {name!r} "
+                  "(нужно: 5-32 символа, [A-Za-z0-9_], начинается с буквы)", file=_sys.stderr)
+            continue
+        seen.add(key)
+        out.append(name)
     return out
 
 
