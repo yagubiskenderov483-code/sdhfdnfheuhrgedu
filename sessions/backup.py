@@ -110,12 +110,22 @@ def session_file_to_string(path: Path) -> str | None:
 
 
 def string_to_session_file(string: str, path: Path) -> None:
+    """StringSession → *.session SQLite файл.
+
+    Закрытие dst обёрнуто в try/finally — без него set_dc/save при исключении
+    оставляли открытый SQLite connection (утечка FD аналогично
+    session_file_to_string, см. fix a48af7c)."""
     src = StringSession(string)
     dst = SQLiteSession(str(path.with_suffix("")))
-    dst.set_dc(src.dc_id, src.server_address, src.port)
-    dst.auth_key = src.auth_key
-    dst.save()
-    dst.close()
+    try:
+        dst.set_dc(src.dc_id, src.server_address, src.port)
+        dst.auth_key = src.auth_key
+        dst.save()
+    finally:
+        try:
+            dst.close()
+        except Exception:
+            pass
 
 
 class SessionBackup:
