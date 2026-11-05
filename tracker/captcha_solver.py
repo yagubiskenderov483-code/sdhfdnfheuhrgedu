@@ -78,19 +78,24 @@ def _load_cache() -> None:
 
 
 def _save_cache() -> None:
-    """Записывает кеш на диск. Вызывать не чаще раза в минуту (при изменениях)."""
+    """Записывает кеш на диск. Вызывать не чаще раза в минуту (при изменениях).
+
+    Dirty-флаг сбрасывается ТОЛЬКО после успешной записи — если save упал (нет места,
+    permissions, disk slow), следующий цикл попробует снова. Раньше флаг сбрасывался
+    до записи, и накопленные ответы могли теряться до следующего cache_put."""
     global _cache_dirty
     if not _cache_dirty:
         return
-    _cache_dirty = False
     try:
         os.makedirs(os.path.dirname(_CAPTCHA_CACHE_PATH) or ".", exist_ok=True)
         tmp = _CAPTCHA_CACHE_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(_CAPTCHA_CACHE, f, ensure_ascii=False)
         os.replace(tmp, _CAPTCHA_CACHE_PATH)
+        _cache_dirty = False      # ТОЛЬКО после успешной атомарной замены
     except Exception as e:                                             # noqa: BLE001
-        log.warning("Captcha cache: не удалось сохранить %s: %s", _CAPTCHA_CACHE_PATH, e)
+        log.warning("Captcha cache: не удалось сохранить %s: %s — повтор на следующем цикле",
+                    _CAPTCHA_CACHE_PATH, e)
 
 
 def cache_put(key: str, idx: int) -> None:
