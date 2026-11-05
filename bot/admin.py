@@ -611,7 +611,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1431,6 +1431,47 @@ def build_routers(app: "App") -> list[Router]:
                 lines.append(f"  @{html.escape(k)} — <b>{n}</b> фейл(ов) подряд")
         lines += ["", "<i>Кеши живут в RAM, при рестарте стираются (кроме dead-mark'ов — они в БД)</i>"]
         await _answer_long(m, "\n".join(lines))
+
+    @admin.message(Command("bots_set_primary"))
+    async def cmd_bots_set_primary(m: Message) -> None:
+        """'/bots_set_primary infostat' — быстрая смена основного lookup-бота.
+        Эквивалентно '/set LOOKUP_BOT_USERNAME infostat' + сброс dead-mark этого бота +
+        автоматическое добавление старого primary в LOOKUP_BOTS (если его там не было)
+        — он будет запасным, а не потерян."""
+        arg = (m.text or "").split(maxsplit=1)
+        if len(arg) < 2:
+            await m.answer("Нужно имя: <code>/bots_set_primary infostat</code>")
+            return
+        new_bot = arg[1].lstrip("@").strip()
+        if not new_bot or len(new_bot) < 3:
+            await m.answer("Имя слишком короткое.")
+            return
+        old_primary = (settings.lookup_bot_username or "").strip()
+        # 1) добавить старый primary в LOOKUP_BOTS (если его там не было)
+        extras = list(settings.lookup_bots or [])
+        if old_primary and old_primary.lower() not in {b.lower() for b in extras} \
+                and old_primary.lower() != new_bot.lower():
+            extras.insert(0, old_primary)
+            try:
+                set_runtime_value("LOOKUP_BOTS", ",".join(extras))
+            except Exception as e:
+                log.warning("couldn't add %s to LOOKUP_BOTS: %s", old_primary, e)
+        # 2) установить новый primary
+        try:
+            set_runtime_value("LOOKUP_BOT_USERNAME", new_bot)
+        except Exception as e:
+            await m.answer(f"❌ Не удалось установить: {html.escape(str(e))}")
+            return
+        # 3) снять dead-mark с нового primary (если был)
+        if hasattr(app.lookup, "_clear_bot_unresolved"):
+            app.lookup._clear_bot_unresolved(new_bot)
+        await app.backup.save()
+        reply = [f"✅ Основной бот → @{html.escape(new_bot)}"]
+        if old_primary:
+            reply.append(f"Бывший @{html.escape(old_primary)} → добавлен в запасные")
+        reply.append("")
+        reply.append("Текущий пул: " + ", ".join(f"@{b}" for b in app.lookup._bot_pool()))
+        await m.answer("\n".join(reply))
 
     @admin.message(Command("bots_clear_dead"))
     async def cmd_bots_clear_dead(m: Message) -> None:
