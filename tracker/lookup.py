@@ -511,7 +511,12 @@ class OwnerLookup:
         if self.on_bot_dead:
             try:
                 import asyncio as _a
-                _a.get_running_loop().create_task(self.on_bot_dead(bot, next_bot))
+                t = _a.get_running_loop().create_task(self.on_bot_dead(bot, next_bot))
+                # strong-ref: без него Python 3.11+ GC может собрать task до завершения
+                if not hasattr(self, "_notify_tasks"):
+                    self._notify_tasks: set = set()
+                self._notify_tasks.add(t)
+                t.add_done_callback(self._notify_tasks.discard)
             except Exception as e:
                 log.debug("on_bot_dead notify failed: %s", e)
 
@@ -655,7 +660,12 @@ class OwnerLookup:
                     self._bot_dead_notified.add(k)
                     next_bot = next((b for b in all_bots if b.lower() != k and results.get(b, True)), None)
                     try:
-                        asyncio.get_running_loop().create_task(self.on_bot_dead(bot, next_bot))
+                        t = asyncio.get_running_loop().create_task(self.on_bot_dead(bot, next_bot))
+                        # strong-ref (см. _register_bot_unresolved)
+                        if not hasattr(self, "_notify_tasks"):
+                            self._notify_tasks = set()
+                        self._notify_tasks.add(t)
+                        t.add_done_callback(self._notify_tasks.discard)
                     except Exception:
                         pass
         return results
