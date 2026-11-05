@@ -611,7 +611,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1431,6 +1431,31 @@ def build_routers(app: "App") -> list[Router]:
                 lines.append(f"  @{html.escape(k)} — <b>{n}</b> фейл(ов) подряд")
         lines += ["", "<i>Кеши живут в RAM, при рестарте стираются (кроме dead-mark'ов — они в БД)</i>"]
         await _answer_long(m, "\n".join(lines))
+
+    @admin.message(Command("bots_clear_dead"))
+    async def cmd_bots_clear_dead(m: Message) -> None:
+        """Вручную снять dead-mark с бота (если знаешь что он восстановился раньше 15 мин).
+        '/bots_clear_dead funstat' снимает с конкретного, без аргумента — со ВСЕХ помеченных."""
+        lk = app.lookup
+        arg = (m.text or "").split(maxsplit=1)
+        target = arg[1].lstrip("@").strip().lower() if len(arg) > 1 else None
+        dead = dict(getattr(lk, "_bot_dead_until", {}) or {})
+        if not dead:
+            await m.answer("ℹ️ Нет ботов с dead-mark.")
+            return
+        if target and target not in dead:
+            await m.answer(f"ℹ️ @{html.escape(target)} не помечен dead. Текущие: "
+                           + ", ".join(f"@{b}" for b in dead.keys()))
+            return
+        cleared = []
+        for k in list(dead.keys()):
+            if target is None or k == target:
+                lk._clear_bot_unresolved(k)
+                cleared.append(k)
+        await m.answer(f"✅ Снят dead-mark с: {', '.join('@' + b for b in cleared)}\n\n"
+                       "Следующие lookup-операции попытаются использовать этих ботов.\n"
+                       "Если они всё ещё не отвечают — dead-mark будет поставлен снова после "
+                       "≥3 подряд unresolvable-фейлов.")
 
     @admin.message(Command("test_bots"))
     async def cmd_test_bots(m: Message) -> None:
