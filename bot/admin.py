@@ -629,7 +629,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "sessions_stats", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget", "lookup_memory", "help_lookup", "health", "disk_usage", "dashboard", "lookup_fix"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "sessions_stats", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget", "lookup_memory", "help_lookup", "health", "disk_usage", "dashboard", "lookup_fix", "wake"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1877,6 +1877,62 @@ def build_routers(app: "App") -> list[Router]:
             f"  • <code>http://localhost:{port_raw}/stats</code> — JSON сводка\n"
             f"  • <code>http://localhost:{port_raw}/metrics</code> — Prometheus\n\n"
             "На Render: в настройках сервиса → Health Check Path: <code>/health</code>")
+
+    @admin.message(Command("wake"))
+    async def cmd_wake(m: Message) -> None:
+        """'Разбудить' трекер после шторма — в одной команде:
+          - сбрасывает dead-mark'и всех lookup-ботов
+          - мягкий разгон sessions (speed < 0.5 → 0.5)
+          - сбрасывает adaptive throttle
+          - не чистит recent_floods (чтобы адаптация продолжала работать)
+
+        Удобно после 'шторм FloodWait закончился, всё замедлено, хочу разбудить сразу'."""
+        import time as _t
+        done = []
+
+        # 1. Снять dead-mark с ботов
+        lk = app.lookup
+        dead = list((getattr(lk, "_bot_dead_until", {}) or {}).keys())
+        for k in dead:
+            lk._clear_bot_unresolved(k)
+        if dead:
+            done.append(f"🧹 Сняты dead-mark: {', '.join('@' + b for b in dead)}")
+
+        # 2. Мягкий разгон
+        upped = 0
+        for w in app.sessions.workers.values():
+            if getattr(w, "speed", 1.0) < 0.5:
+                w.speed = 0.5
+                upped += 1
+        if upped:
+            done.append(f"⚡ Разогнаны speed &lt;0.5 → 0.5 у {upped} сессий")
+
+        # 3. Сброс adaptive throttle
+        try:
+            base = getattr(app.sessions, "_base_rps", 0)
+            cur = app.sessions.limiter.rate
+            if base and cur < base:
+                app.sessions.limiter.set_rate(base)
+                app.sessions._throttle_until = 0.0
+                done.append(f"🚀 GLOBAL_RPS {cur:.0f} → {base:.0f} (базовый)")
+        except Exception:
+            pass
+
+        # 4. Captcha recent — сброс, чтобы adaptive interval вернулся к базовому
+        if hasattr(lk, "_captcha_recent"):
+            if lk._captcha_recent:
+                old_n = len(lk._captcha_recent)
+                lk._captcha_recent = []
+                done.append(f"🧩 Captcha window очищен ({old_n} записей)")
+
+        if not done:
+            await m.answer("ℹ️ Нечего делать — все системы уже в норме.")
+            return
+
+        text = ("☕ <b>Пробуждение</b>\n\n" + "\n".join(done) + "\n\n"
+                + "<i>recent_floods НЕ очищены — трекер продолжает адаптивно замедляться "
+                + "если шторм FloodWait повторится.</i>")
+        await m.answer(text)
 
     @admin.message(Command("lookup_fix"))
     async def cmd_lookup_fix(m: Message) -> None:
