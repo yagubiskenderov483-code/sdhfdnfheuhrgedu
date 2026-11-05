@@ -611,7 +611,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1352,6 +1352,40 @@ def build_routers(app: "App") -> list[Router]:
                       "⚠️ OCR недоступен — проверьте, что в Docker-образе есть "
                       "<code>tesseract-ocr</code> и <code>pytesseract</code>. "
                       "В текущем Dockerfile они должны быть — пересоберите образ."]
+        await _answer_long(m, "\n".join(lines))
+
+    @admin.message(Command("lookup_last"))
+    async def cmd_lookup_last(m: Message) -> None:
+        """Последние ~50 lookup-операций с результатом. Удобно когда надо понять:
+        'вижу что lookups > 0, а find = 0 — что именно происходит на каждом лоте?'
+        """
+        import time as _t
+        lk = app.lookup
+        buf = getattr(lk, "_recent_lookups", None)
+        if buf is None or not buf:
+            await m.answer("Пока не было ни одного lookup. Либо трекер только запустился, "
+                           "либо не было hidden-owner лотов.")
+            return
+        now = _t.time()
+        # покажем последние 20
+        items = list(buf)[-20:][::-1]
+        icons = {"found": "✅", "from_memory": "💾", "not_found": "❌", "no_candidates": "🫥",
+                 "too_many": "👥", "no_answer": "🔕", "rate_limited": "🚫", "neg_cached": "📦",
+                 "trusted": "🤝", "captcha": "🧩"}
+        lines = [f"🔍 <b>Последние lookup ({len(items)} из {len(buf)})</b>", ""]
+        for ts, name, result, extra in items:
+            age = now - ts
+            if age < 60:
+                age_s = f"{int(age)}с"
+            elif age < 3600:
+                age_s = f"{int(age / 60)}мин"
+            else:
+                age_s = f"{age / 3600:.1f}ч"
+            icon = icons.get(result, "·")
+            extra_fmt = f" — <i>{html.escape(extra)}</i>" if extra else ""
+            lines.append(f"{icon} <code>{html.escape(name[:30])}</code> → {html.escape(result)}{extra_fmt} "
+                         f"<i>({age_s})</i>")
+        lines += ["", "<i>Легенда: ✅ найден · 💾 из памяти · ❌ не найден · 🫥 нет кандидатов · 👥 слишком много · 🔕 бот молчал · 🚫 rate-limit · 📦 негативный кеш</i>"]
         await _answer_long(m, "\n".join(lines))
 
     @admin.message(Command("lookup_cache"))

@@ -381,6 +381,12 @@ class OwnerLookup:
         # on_bot_dead(bot, next_bot) — уведомить админа что lookup-бот недоступен и мы переключились
         self.on_bot_dead = None
         self._bot_dead_notified: set[str] = set()
+        # Ring-buffer последних lookup-операций — для /lookup_last команды диагностики.
+        # Каждая запись: (time.time(), name, result_code, extra_text).
+        # result_code: 'found' | 'from_memory' | 'not_found' | 'no_candidates' | 'too_many' | 'no_answer' |
+        #              'rate_limited' | 'neg_cached' | 'trusted' | 'captcha'
+        from collections import deque as _deque
+        self._recent_lookups: _deque = _deque(maxlen=50)
         self._last_response_text: dict[str, str] = {}       # session → последний текст от funstat (для rate-limit детекта)
         self.stats = {"lookups": 0, "found": 0, "not_found": 0, "no_answer": 0, "skipped": 0,
                       "captcha": 0, "captcha_auto": 0, "too_many": 0, "from_memory": 0,
@@ -893,6 +899,8 @@ class OwnerLookup:
                 self.stats["from_memory"] = self.stats.get("from_memory", 0) + 1
                 llog("LOOKUP", f"{seller_name!r} → u{first.user_id} "
                                f"@{first.username or '—'} из памяти")
+                self._track_lookup(seller_name, "from_memory",
+                                   f"u{first.user_id} @{first.username or '—'}")
                 return FoundOwner(first.user_id, first.username,
                                   first.name or seller_name, None, None, from_memory=True)
         key = _norm_name(seller_name)
@@ -903,6 +911,8 @@ class OwnerLookup:
             self.stats["neg_cached"] = self.stats.get("neg_cached", 0) + 1
             llog("LOOKUP", f"{seller_name!r}: уже искали недавно — не найден, скип "
                            f"({(time.monotonic() - neg) / 60:.0f} мин назад)")
+            self._track_lookup(seller_name, "neg_cached",
+                               f"{(time.monotonic() - neg) / 60:.0f} мин назад")
             return None
         cached = self._cache.get(key)
         if cached and time.monotonic() - cached[0] < _CACHE_TTL:
@@ -965,6 +975,7 @@ class OwnerLookup:
             if last_text and any(w in last_text.lower() for w in _RATE_LIMIT_WORDS):
                 self.stats["rate_limited"] = self.stats.get("rate_limited", 0) + 1
                 llog("LOOKUP", f"@{bot} /human {seller_name!r}: rate-limit, НЕ кешируем")
+                self._track_lookup(seller_name, "rate_limited", f"@{bot}")
                 return None
             self.stats["not_found"] += 1
             self.stats["no_candidates"] += 1
@@ -972,11 +983,13 @@ class OwnerLookup:
             if len(self._neg_cache) > 10000:
                 self._neg_cache.clear()
             llog("LOOKUP", f"@{bot} /human {seller_name!r}: кандидатов нет (кешируем на час)")
+            self._track_lookup(seller_name, "no_candidates", f"@{bot}")
             return None
         if settings.lookup_skip_over and len(cands) >= settings.lookup_skip_over:
             # слишком частое имя — проверять всех долго, такой лот сразу пропускаем
             self.stats["not_found"] += 1
             self.stats["too_many"] = self.stats.get("too_many", 0) + 1
+            self._track_lookup(seller_name, "too_many", f"{len(cands)} кандидатов")
             self._neg_cache[key] = time.monotonic()
             llog("LOOKUP", f"/human {seller_name!r}: {len(cands)} кандидатов (≥{settings.lookup_skip_over}) — "
                            f"скип (кешируем на час)")
@@ -992,13 +1005,26 @@ class OwnerLookup:
             how = "trust" if found.session is None else "NFT в профиле"
             llog("LOOKUP", f"/human {seller_name!r} → u{found.user_id}"
                            + (f" @{found.username}" if found.username else "") + f" ({how})")
+            self._track_lookup(seller_name, "found",
+                               f"u{found.user_id} @{found.username or '—'} ({how})")
         else:
             self.stats["not_found"] += 1
             self.stats["nft_hidden"] += 1
             self._neg_cache[key] = time.monotonic()
             llog("LOOKUP", f"/human {seller_name!r}: {len(cands)} кандидат(ов), NFT ни у кого не виден "
                            f"(кешируем 'не найден' на час)")
+            self._track_lookup(seller_name, "not_found", f"{len(cands)} cand, NFT не виден")
         return found
+
+    def _track_lookup(self, name: str, result: str, extra: str = "") -> None:
+        """Регистрирует lookup-операцию в ring-buffer последних ~50 для /lookup_last.
+        Безопасно к падениям — если буфера нет, молча пропускает."""
+        try:
+            buf = getattr(self, "_recent_lookups", None)
+            if buf is not None:
+                buf.append((time.time(), name, result, extra))
+        except Exception:
+            pass
 
     async def _ask_bot(self, session: str, bot: str, seller_name: str,
                        prio: float = 0.0, deadline: float | None = None) -> list[Candidate] | None:
