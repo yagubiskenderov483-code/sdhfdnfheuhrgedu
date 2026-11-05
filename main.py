@@ -418,26 +418,34 @@ class App:
         """Lookup-бот @bot недоступен (помечен dead на 15 мин). Один раз на дохлого бота
         шлём админу: 'funstat снесли, переключились на infostat'. Если запасных нет —
         просим прописать LOOKUP_BOTS."""
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
         targets = set(settings.admin_ids or set()) | set(all_admins())
         if next_bot:
             text = (f"⚠️ Lookup-бот @{html.escape(bot)} <b>не отвечает</b> ни на одной сессии "
                     "(возможно снесли / переименовали / Telegram пока не отдаёт).\n\n"
                     f"Автоматически переключился на запасной: @{html.escape(next_bot)}.\n\n"
                     "Через 15 мин сам попробует снова оригинальный бот. Если @"
-                    f"{html.escape(bot)} реально мёртв — смени <code>LOOKUP_BOT_USERNAME</code> "
-                    f"на @{html.escape(next_bot)} (или другой рабочий) через /set.")
+                    f"{html.escape(bot)} реально мёртв — закрепи @{html.escape(next_bot)} "
+                    "как основной одной командой:\n"
+                    f"<code>/bots_set_primary {html.escape(next_bot)}</code>")
         else:
             text = (f"🚨 Lookup-бот @{html.escape(bot)} <b>не отвечает</b> ни на одной сессии, "
                     "а запасных в <code>LOOKUP_BOTS</code> нет.\n\n"
-                    "<b>Все лоты со скрытым владельцем отсеиваются</b> пока бот не вернётся / "
-                    "пока не укажешь запасного:\n"
-                    "<code>/set LOOKUP_BOTS infostat,findtg,otherbot</code>\n\n"
+                    "<b>Hidden-owner лоты идут в канал с пометкой без фильтра</b> пока "
+                    "бот не вернётся / пока не укажешь запасного:\n"
+                    "<code>/bots_add infostat</code> (и повторить для других)\n\n"
                     "Через 15 мин сам попробует снова. Если бот @"
                     f"{html.escape(bot)} реально снесён — замени его через "
-                    "<code>/set LOOKUP_BOT_USERNAME &lt;новый&gt;</code>.")
+                    "<code>/bots_set_primary &lt;новый&gt;</code>.")
+        kb_rows = [[InlineKeyboardButton(text="🤖 Пул ботов", callback_data="bots:refresh"),
+                    InlineKeyboardButton(text="🏓 Пинг", callback_data="bots:ping")]]
+        if next_bot:
+            kb_rows.append([InlineKeyboardButton(text=f"🧹 Снять dead-mark с @{bot[:20]}",
+                                                 callback_data="bots:cleardead")])
+        kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
         for chat in sorted(targets):
             try:
-                await self.bot.send_message(chat, text)
+                await self.bot.send_message(chat, text, reply_markup=kb)
             except Exception as e:
                 log.debug("notify_bot_dead to %s failed: %s", chat, e)
 
