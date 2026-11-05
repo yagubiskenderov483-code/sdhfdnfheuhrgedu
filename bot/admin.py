@@ -611,7 +611,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1431,6 +1431,67 @@ def build_routers(app: "App") -> list[Router]:
                 lines.append(f"  @{html.escape(k)} — <b>{n}</b> фейл(ов) подряд")
         lines += ["", "<i>Кеши живут в RAM, при рестарте стираются (кроме dead-mark'ов — они в БД)</i>"]
         await _answer_long(m, "\n".join(lines))
+
+    @admin.message(Command("bots_add"))
+    async def cmd_bots_add(m: Message) -> None:
+        """'/bots_add infostat' — добавить запасного lookup-бота в LOOKUP_BOTS.
+        Если уже есть — без изменений. Если это primary — предупредим."""
+        arg = (m.text or "").split(maxsplit=1)
+        if len(arg) < 2:
+            await m.answer("Нужно имя: <code>/bots_add infostat</code>")
+            return
+        new_bot = arg[1].lstrip("@").strip()
+        if not new_bot or len(new_bot) < 3:
+            await m.answer("Имя слишком короткое.")
+            return
+        primary = (settings.lookup_bot_username or "").strip()
+        if new_bot.lower() == primary.lower():
+            await m.answer(f"⚠️ @{html.escape(new_bot)} уже основной бот, зачем в запасные?")
+            return
+        extras = list(settings.lookup_bots or [])
+        if new_bot.lower() in {b.lower() for b in extras}:
+            await m.answer(f"ℹ️ @{html.escape(new_bot)} уже в запасных.")
+            return
+        extras.append(new_bot)
+        try:
+            set_runtime_value("LOOKUP_BOTS", ",".join(extras))
+        except Exception as e:
+            await m.answer(f"❌ Не удалось сохранить: {html.escape(str(e))}")
+            return
+        await app.backup.save()
+        pool = app.lookup._bot_pool()
+        await m.answer(f"✅ @{html.escape(new_bot)} добавлен в запасные. Пул сейчас:\n"
+                       + "\n".join(f"  {i+1}. @{html.escape(b)}" for i, b in enumerate(pool)))
+
+    @admin.message(Command("bots_remove"))
+    async def cmd_bots_remove(m: Message) -> None:
+        """'/bots_remove infostat' — удалить запасного из LOOKUP_BOTS.
+        Нельзя удалить primary (используй /bots_set_primary для смены)."""
+        arg = (m.text or "").split(maxsplit=1)
+        if len(arg) < 2:
+            await m.answer("Нужно имя: <code>/bots_remove infostat</code>")
+            return
+        target = arg[1].lstrip("@").strip().lower()
+        primary = (settings.lookup_bot_username or "").strip().lower()
+        if target == primary:
+            await m.answer(f"❌ @{html.escape(target)} сейчас ОСНОВНОЙ бот, нельзя удалить из запасных.\n"
+                           f"Сначала смени основной: <code>/bots_set_primary &lt;другой&gt;</code>")
+            return
+        extras = list(settings.lookup_bots or [])
+        new_extras = [b for b in extras if b.lower() != target]
+        if len(new_extras) == len(extras):
+            await m.answer(f"ℹ️ @{html.escape(target)} и так не в запасных.")
+            return
+        try:
+            set_runtime_value("LOOKUP_BOTS", ",".join(new_extras))
+        except Exception as e:
+            await m.answer(f"❌ Не удалось сохранить: {html.escape(str(e))}")
+            return
+        await app.backup.save()
+        pool = app.lookup._bot_pool()
+        await m.answer(f"✅ @{html.escape(target)} удалён из запасных. Пул сейчас:\n"
+                       + ("\n".join(f"  {i+1}. @{html.escape(b)}" for i, b in enumerate(pool))
+                          if pool else "  (пусто)"))
 
     @admin.message(Command("bots_set_primary"))
     async def cmd_bots_set_primary(m: Message) -> None:
