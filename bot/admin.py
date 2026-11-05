@@ -622,7 +622,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget", "help_lookup"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "sessions_stats", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget", "help_lookup"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -2012,6 +2012,68 @@ def build_routers(app: "App") -> list[Router]:
         app.sessions._throttle_until = 0.0
         await m.answer(f"⚡ Сброшено замедление у {reset} аккаунтов. GLOBAL_RPS → {app.sessions._base_rps:.1f}.\n"
                        "⚠️ Если шторм FloodWait ещё идёт — снова поймаешь.")
+
+    @admin.message(Command("sessions_stats"))
+    async def cmd_sessions_stats(m: Message) -> None:
+        """Распределение сессий по speed (histogram) + топ-5 самых замедленных.
+        Даёт быстрое понимание 'флот работает на 90% или сдох'."""
+        import time as _t
+        ws = list(app.sessions.workers.values())
+        if not ws:
+            await m.answer("Нет аккаунтов.")
+            return
+        # Histogram по speed
+        buckets = {"1.0 (норма)": 0, "0.7–1.0": 0, "0.5–0.7": 0, "0.3–0.5": 0,
+                   "0.15–0.3": 0, "<0.15 (почти мёртвый)": 0}
+        now = _t.monotonic()
+        for w in ws:
+            s = getattr(w, "speed", 1.0)
+            if s >= 1.0:
+                buckets["1.0 (норма)"] += 1
+            elif s >= 0.7:
+                buckets["0.7–1.0"] += 1
+            elif s >= 0.5:
+                buckets["0.5–0.7"] += 1
+            elif s >= 0.3:
+                buckets["0.3–0.5"] += 1
+            elif s >= 0.15:
+                buckets["0.15–0.3"] += 1
+            else:
+                buckets["<0.15 (почти мёртвый)"] += 1
+
+        lines = [f"👥 <b>Распределение скорости аккаунтов</b> ({len(ws)} шт.)", ""]
+        for name, n in buckets.items():
+            if n > 0:
+                bar = "█" * min(20, n) + ("" if n <= 20 else f" +{n-20}")
+                lines.append(f"<code>{name:30}</code> {bar}  <b>{n}</b>")
+
+        # Effective capacity
+        eff = app.sessions.effective()
+        lines.append("")
+        lines.append(f"🎯 Эффективная мощность: <b>{eff:.1f}</b> из {len(ws)} "
+                     f"(<b>{100 * eff / max(1, len(ws)):.0f}%</b>)")
+
+        # Топ-5 самых замедленных
+        slow = sorted(ws, key=lambda w: getattr(w, "speed", 1.0))[:5]
+        slow = [w for w in slow if getattr(w, "speed", 1.0) < 1.0]
+        if slow:
+            lines += ["", "<b>🐢 Топ-5 самых замедленных:</b>"]
+            for w in slow:
+                n_flood = sum(1 for t in getattr(w, "recent_floods", []) if now - t < 3600)
+                lines.append(f"  <code>{html.escape(w.name)}</code>: speed <b>{w.speed:.2f}</b>, "
+                             f"FloodWait за час: {n_flood}")
+
+        # Советы
+        hints = []
+        if buckets["<0.15 (почти мёртвый)"] + buckets["0.15–0.3"] > len(ws) * 0.3:
+            hints.append("⚠️ Больше 30% аккаунтов сильно замедлены — рассмотри /sessions_speedup или /proxies")
+        fpm = app.sessions.flood_rate_per_minute()
+        if fpm >= 10:
+            hints.append(f"🌩 Шторм FloodWait сейчас: {fpm}/мин — трекер автоматически замедлил GLOBAL_RPS")
+        if hints:
+            lines += [""] + hints
+
+        await _answer_long(m, "\n".join(lines))
 
     @admin.message(Command("sessions_speedup"))
     async def cmd_sessions_speedup(m: Message) -> None:
