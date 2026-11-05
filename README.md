@@ -244,15 +244,18 @@ Telegram не отдаёт страну/национальность. Имя, ф
 
 ## 15. Команды бота
 
+**🎯 Главный экран:** `/dashboard` — единая сводка (health/sessions/lookup/warnings) + inline-кнопки ко всем разделам. Открой его первым делом когда зашёл в бота.
+
 **Состояние:** `/status` (трекер, скорость, задержки) · `/stats` · `/last` (последние лоты и почему не ушли) · `/collections` · `/why [часы]` (почему нет постов: что нашлось, на чём отсеялось, права бота в группах)
 **Управление:** `/off` `/on` — парсер · `/close` `/open` — для пользователей (лоты идут) · `/settings` · `/set КЛЮЧ ЗНАЧЕНИЕ`
 **Аккаунты:** `/sessions` · `/add_session` · `/removed` (удалённые за 14 дней) · `/revive ИМЯ|all` · `/proxies` · `/proxy`
 **Lookup-боты:**
 `/bots` (статус пула + inline-кнопки быстрых действий) · `/bots_set_primary @x` (сменить основной) · `/bots_add @x` / `/bots_remove @x` (запасные) · `/bots_clear_dead [@x]` (снять dead-mark)
 `/test_bot [@x] [имя]` (реальный тест с ответом бота) · `/test_bots` (пинг всех бесплатно)
-`/lookup_last` (последние 20 операций с результатом) · `/lookup_cache` (состояние кешей) · `/lookup_debug <имя>` (симуляция для имени) · `/lookup_forget <имя>` (удалить из памяти) · `/lookup_reset` (полный сброс)
+`/lookup_last` (последние 20 операций с результатом) · `/lookup_cache` (состояние кешей) · `/lookup_debug <имя>` (симуляция для имени) · `/lookup_forget <имя>` (удалить из памяти) · `/lookup_reset` (полный сброс) · `/lookup_fix` (автодиагностика 7 проблем с рекомендациями) · `/lookup_memory` (память найденных владельцев) · `/help_lookup` (полный гайд)
 `/captcha_status`
 **Подписки:** `/subs` · `/grant ID|@юз 24|3д|навсегда` · `/revoke ID|@юз`
+**Диагностика:** `/sessions_stats` (histogram speed + топ замедленных) · `/sessions_speedup` (мягкий разгон) · `/disk_usage` (размер БД/sessions/кеша) · `/health` (HTTP endpoint для мониторинга)
 **Прочее:** `/test` (проверка, пример сообщения в личку; `/test channel` — тестовый пост) · `/reload` · `/cancel`
 
 ### Multi-bot lookup (funstat / infostat / fallback)
