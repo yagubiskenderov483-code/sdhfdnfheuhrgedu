@@ -611,7 +611,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "lookup_cache"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1396,6 +1396,43 @@ def build_routers(app: "App") -> list[Router]:
             for k, n in unres_counters.items():
                 lines.append(f"  @{html.escape(k)} — <b>{n}</b> фейл(ов) подряд")
         lines += ["", "<i>Кеши живут в RAM, при рестарте стираются (кроме dead-mark'ов — они в БД)</i>"]
+        await _answer_long(m, "\n".join(lines))
+
+    @admin.message(Command("test_bots"))
+    async def cmd_test_bots(m: Message) -> None:
+        """Пинг-тест ВСЕХ настроенных lookup-ботов (primary + LOOKUP_BOTS) через liveness-check.
+        За 1 команду видно какие боты живы, какие снесли, и какие в dead-blacklist.
+        Не тратит funstat-квоту — использует get_input_entity (dirt cheap)."""
+        import time as _t
+        lk = app.lookup
+        if not hasattr(lk, "check_bots_liveness"):
+            await m.answer("Эта версия lookup не поддерживает liveness-check.")
+            return
+        await m.answer("⏳ Пингую всех настроенных ботов...")
+        t0 = _t.monotonic()
+        try:
+            res = await asyncio.wait_for(lk.check_bots_liveness(), timeout=60)
+        except asyncio.TimeoutError:
+            await m.answer("⚠️ Пинг занял больше 60 сек — вероятно сессии в FloodWait.")
+            return
+        except Exception as e:
+            await m.answer(f"❌ Ошибка: <code>{html.escape(type(e).__name__)}: {html.escape(str(e)[:200])}</code>")
+            return
+        dt = _t.monotonic() - t0
+        if not res:
+            await m.answer("ℹ️ Не настроено ни одного бота.\n\nДобавь:\n<code>/set LOOKUP_BOT_USERNAME funstat</code>")
+            return
+        alive = [b for b, ok in res.items() if ok]
+        dead = [b for b, ok in res.items() if not ok]
+        lines = [f"🤖 <b>Проверка ботов</b> ({dt:.1f}с, {len(res)} бот(ов))", ""]
+        for b in alive:
+            lines.append(f"✅ @{html.escape(b)} — отвечает")
+        for b in dead:
+            lines.append(f"💀 @{html.escape(b)} — DEAD (помечен на 15 мин)")
+        if not alive:
+            lines += ["", "⚠️ <b>Ни одного живого бота!</b> hidden-owner лоты пойдут с пометкой без фильтра."]
+        elif not dead:
+            lines += ["", "✅ Все боты в порядке."]
         await _answer_long(m, "\n".join(lines))
 
     @admin.message(Command("test_bot"))
