@@ -622,7 +622,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1967,6 +1967,24 @@ def build_routers(app: "App") -> list[Router]:
         app.sessions._throttle_until = 0.0
         await m.answer(f"⚡ Сброшено замедление у {reset} аккаунтов. GLOBAL_RPS → {app.sessions._base_rps:.1f}.\n"
                        "⚠️ Если шторм FloodWait ещё идёт — снова поймаешь.")
+
+    @admin.message(Command("sessions_speedup"))
+    async def cmd_sessions_speedup(m: Message) -> None:
+        """Мягкий разгон: speed < 0.5 → 0.5 (не до 1.0 как reset_speeds). Безопаснее, если
+        не уверен что шторм закончился: даёт ускорение, но оставляет страховочный запас.
+
+        reset_speeds → 1.0 (риск шторма), sessions_speedup → 0.5 (ускорение ×2-3, безопасно).
+        """
+        upped = 0
+        for w in app.sessions.workers.values():
+            cur = getattr(w, "speed", 1.0)
+            if cur < 0.5:
+                w.speed = 0.5
+                # НЕ очищаем recent_floods — сохраняем историю шторма, но не даём ему давить скорость
+                upped += 1
+        await m.answer(f"⚡ Мягкий разгон: {upped} аккаунт(ов) со speed &lt;0.5 → 0.5.\n"
+                       "<i>recent_floods сохранены — трекер продолжает отслеживать шторм.</i>\n\n"
+                       "Хочешь полный разгон (speed → 1.0, риск шторма): /reset_speeds")
 
     @admin.message(Command("routes"))
     async def cmd_routes(m: Message, command: CommandObject) -> None:
