@@ -611,7 +611,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "lookup_cache"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1352,6 +1352,50 @@ def build_routers(app: "App") -> list[Router]:
                       "⚠️ OCR недоступен — проверьте, что в Docker-образе есть "
                       "<code>tesseract-ocr</code> и <code>pytesseract</code>. "
                       "В текущем Dockerfile они должны быть — пересоберите образ."]
+        await _answer_long(m, "\n".join(lines))
+
+    @admin.message(Command("lookup_cache"))
+    async def cmd_lookup_cache(m: Message) -> None:
+        """Диагностика кешей lookup:
+        - sizeof cache hit (положительный кеш кандидатов по имени)
+        - sizeof neg_cache (имена, которые funstat 'не знает', на час)
+        - inflight (запросы к боту прямо сейчас — у продавца несколько лотов, не долбим)
+        - pending (лотов ждёт свою очередь к боту)
+        - active captchas
+        - unresolvable-записи (сессия → когда последний раз провалилась)
+        - dead-marks (бот → когда снимется)
+        """
+        import time as _t
+        lk = app.lookup
+        lines = ["🧠 <b>Кеши lookup</b>", ""]
+        lines.append(f"• положительный кеш кандидатов: <b>{len(lk._cache)}</b> имён (TTL 1 ч)")
+        lines.append(f"• негативный кеш 'не найдено': <b>{len(lk._neg_cache)}</b> имён (TTL 1 ч)")
+        lines.append(f"• inflight (ждут общего ответа): <b>{len(lk._inflight)}</b>")
+        lines.append(f"• pending (в очереди к боту): <b>{lk._pending}</b> / макс {lk._pending} + "
+                     f"{getattr(lk, '_MAX_PENDING', 5000) - lk._pending if hasattr(lk, '_MAX_PENDING') else '—'}")
+        lines.append(f"• активных капч: <b>{len(lk._captcha)}</b>")
+        # unresolvable
+        now = _t.monotonic()
+        unres_live = [(k, now - v) for k, v in (lk._bot_unresolvable or {}).items()
+                      if now - v < 300]
+        if unres_live:
+            lines += ["", f"<b>⚠️ unresolvable сессии ({len(unres_live)}):</b>"]
+            for (sess, bot), age in unres_live[:10]:
+                lines.append(f"  <code>{html.escape(sess)}</code> + @{html.escape(bot)} — {age:.0f}с назад")
+            if len(unres_live) > 10:
+                lines.append(f"  <i>…и ещё {len(unres_live) - 10}</i>")
+        dead_live = {k: v for k, v in (lk._bot_dead_until or {}).items() if v > now}
+        if dead_live:
+            lines += ["", f"<b>💀 dead-боты ({len(dead_live)}):</b>"]
+            for k, until in dead_live.items():
+                left_min = (until - now) / 60
+                lines.append(f"  @{html.escape(k)} — ещё <b>{left_min:.1f}</b> мин")
+        unres_counters = {k: v for k, v in (lk._bot_consec_unres or {}).items() if v > 0}
+        if unres_counters:
+            lines += ["", "<b>Подряд unresolvable (ещё не dead):</b>"]
+            for k, n in unres_counters.items():
+                lines.append(f"  @{html.escape(k)} — <b>{n}</b> фейл(ов) подряд")
+        lines += ["", "<i>Кеши живут в RAM, при рестарте стираются (кроме dead-mark'ов — они в БД)</i>"]
         await _answer_long(m, "\n".join(lines))
 
     @admin.message(Command("test_bot"))
