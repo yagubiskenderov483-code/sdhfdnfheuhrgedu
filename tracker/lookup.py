@@ -1020,11 +1020,43 @@ class OwnerLookup:
         finally:
             lock.release()
 
+    def _adaptive_interval(self) -> float:
+        """Если за последние 5 мин было много капч — увеличиваем паузу между запросами к боту.
+        funstat даёт капчу именно за частоту: чем чаще пишем, тем чаще капча. Автоматика:
+          0-2 капчи / 5 мин    → базовый interval
+          3-5                 → ×1.5
+          6-10                → ×2
+          11-20               → ×3
+          21+                 → ×5 (шторм, явно нас тротлит)
+        Накопленный список капч: self._captcha_recent (monotonic timestamps за 5 мин)."""
+        base = settings.lookup_interval
+        now = time.monotonic()
+        # Храним timestamps всех capchтa за ~5 мин для скользящего окна
+        recent = getattr(self, "_captcha_recent", None)
+        if recent is None:
+            self._captcha_recent = recent = []
+        # очистим протухшие
+        self._captcha_recent = recent = [t for t in recent if now - t < 300]
+        n = len(recent)
+        if n >= 21:
+            factor = 5.0
+        elif n >= 11:
+            factor = 3.0
+        elif n >= 6:
+            factor = 2.0
+        elif n >= 3:
+            factor = 1.5
+        else:
+            factor = 1.0
+        return base * factor
+
     async def _ask_bot_locked(self, session: str, bot: str, seller_name: str,
                               _retry: bool = True) -> list[Candidate] | None:
         cmd = self._bot_cmd(bot, seller_name)
-        # пауза между запросами с одного аккаунта: частые запросы → бот поиска выдаёт капчу
-        gap = settings.lookup_interval - (time.monotonic() - self._last_ask.get(session, 0.0))
+        # пауза между запросами с одного аккаунта: частые запросы → бот поиска выдаёт капчу.
+        # interval адаптивный: при штормах капчи ×2…×5 от базового lookup_interval.
+        effective_interval = self._adaptive_interval()
+        gap = effective_interval - (time.monotonic() - self._last_ask.get(session, 0.0))
         if gap > 0:
             await asyncio.sleep(gap)
 
@@ -1156,6 +1188,15 @@ class OwnerLookup:
         """Бот поиска показал капчу: ВСЕГДА пробуем решить сами, админу — только
         если OCR вернул None (мусор, не читается)."""
         self.stats["captcha"] += 1
+        # Регистрируем капчу в скользящем окне для адаптивного lookup_interval
+        recent = getattr(self, "_captcha_recent", None)
+        if recent is None:
+            self._captcha_recent = recent = []
+        recent.append(time.monotonic())
+        # Не даём списку бесконтрольно расти: держим последние 5 мин
+        if len(recent) > 500:
+            cutoff = time.monotonic() - 300
+            self._captcha_recent = [t for t in recent if t >= cutoff]
         token = f"{session}-{msg.id}"[-40:]
         try:
             return await self._wait_captcha_impl(session, bot, msg, token)
