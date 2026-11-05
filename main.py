@@ -747,6 +747,19 @@ class App:
                                                        if self.lookup.pending_captchas() else "")]
         except Exception:
             pass
+        # Lookup диагностика: если все боты dead или вообще не настроены — явное предупреждение
+        try:
+            if hasattr(self.lookup, "all_bots_dead") and self.lookup.all_bots_dead():
+                lines += ["", "🚨 <b>Lookup: ВСЕ боты dead</b> — hidden-owner лоты идут с пометкой "
+                              "без фильтра. Проверь: /bots, добавь запасных: /bots_add @infostat"]
+            elif hasattr(self.lookup, "any_bot_configured") and not self.lookup.any_bot_configured():
+                lines += ["", "ℹ️ Lookup-бот не настроен — hidden-owner лоты отсеиваются. "
+                              "Задай: <code>/set LOOKUP_BOT_USERNAME funstat</code>"]
+            elif lk.get("no_bot_pool", 0) > 0 or lk.get("bot_dead_marked", 0) > 0:
+                lines += ["", f"⚠️ Lookup: dead-marks за запуск {lk.get('bot_dead_marked', 0)}, "
+                              f"прошло без бота {lk.get('no_bot_pool', 0)} лотов — /bots"]
+        except Exception:
+            pass
         if found == 0 and self.sessions.usable() and not self.coordinator.paused:
             lines += ["", "Новых лотов не найдено совсем — рынок тихий или коллекции ещё синхронизируются."]
         return "\n".join(lines)
