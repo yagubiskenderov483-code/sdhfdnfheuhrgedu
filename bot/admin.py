@@ -629,7 +629,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "sessions_stats", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget", "lookup_memory", "help_lookup", "health"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "sessions_speedup", "sessions_stats", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget", "lookup_memory", "help_lookup", "health", "disk_usage"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1784,6 +1784,69 @@ def build_routers(app: "App") -> list[Router]:
                        "Следующие lookup-операции попытаются использовать этих ботов.\n"
                        "Если они всё ещё не отвечают — dead-mark будет поставлен снова после "
                        "≥3 подряд unresolvable-фейлов.")
+
+    @admin.message(Command("disk_usage"))
+    async def cmd_disk_usage(m: Message) -> None:
+        """Показать размер основных файлов трекера. На Render с 1GB диском полезно
+        знать растёт ли что-то неконтролируемо."""
+        import os as _os
+        from pathlib import Path as _P
+        items = [
+            ("БД трекера", settings.path(settings.database_path)),
+            ("Папка sessions", settings.path(settings.sessions_dir)),
+            ("Папка data", settings.path("data")),
+            ("Папка logs", settings.path("logs")),
+        ]
+        # Captcha cache — через env var
+        cc_path = _os.environ.get("CAPTCHA_CACHE_PATH") or "/var/data/captcha_cache.json"
+        items.append(("Кеш капч", _P(cc_path)))
+
+        def _size(p: _P) -> int:
+            if not p.exists():
+                return 0
+            if p.is_file():
+                try:
+                    return p.stat().st_size
+                except OSError:
+                    return 0
+            total = 0
+            try:
+                for root, _, files in _os.walk(p):
+                    for f in files:
+                        try:
+                            total += _os.path.getsize(_os.path.join(root, f))
+                        except OSError:
+                            pass
+            except OSError:
+                pass
+            return total
+
+        def _fmt(n: int) -> str:
+            for unit in ("B", "KB", "MB", "GB"):
+                if n < 1024:
+                    return f"{n:.1f} {unit}"
+                n /= 1024
+            return f"{n:.1f} TB"
+
+        total = 0
+        lines = ["💾 <b>Размер файлов трекера</b>", ""]
+        for name, p in items:
+            s = _size(p)
+            total += s
+            exists = "" if p.exists() else " (не существует)"
+            lines.append(f"  {name}: <b>{_fmt(s)}</b> — <code>{html.escape(str(p))}</code>{exists}")
+        lines.append("")
+        lines.append(f"🧮 <b>Всего:</b> {_fmt(total)}")
+        # Free disk space
+        try:
+            import shutil as _sh
+            db_dir = settings.path(settings.database_path).parent
+            du = _sh.disk_usage(str(db_dir))
+            lines.append(f"🧊 Свободно на диске: <b>{_fmt(du.free)}</b> из {_fmt(du.total)} "
+                         f"(занято {int(100 * (du.total - du.free) / du.total)}%)")
+        except Exception as e:
+            lines.append(f"<i>disk_usage: {html.escape(str(e)[:80])}</i>")
+        await m.answer("\n".join(lines))
 
     @admin.message(Command("health"))
     async def cmd_health(m: Message) -> None:
