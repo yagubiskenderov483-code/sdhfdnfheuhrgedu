@@ -674,6 +674,25 @@ class MarketplaceCoordinator:
             log.info("Tracker is PAUSED ⏸ (use /resume)")
         await self._wait_for_sessions()
         log.info("Marketplace tracker started")
+        # Чёткий лог настроек lookup: видно в Render logs сразу при деплое, нет ли опечаток в .env
+        primary_bot = (settings.lookup_bot_username or "").strip()
+        extra_bots = [b for b in (settings.lookup_bots or []) if b]
+        if primary_bot or extra_bots:
+            log.info("Lookup config: primary=@%s, fallback=[%s], sessions=%d (%s), required=%s, "
+                     "dedicated=%s, interval=%.1fs, timeout=%.1fs",
+                     primary_bot or "—",
+                     ", ".join(f"@{b}" for b in extra_bots) or "—",
+                     len(settings.lookup_sessions or []),
+                     ", ".join(settings.lookup_sessions or []) or "any usable",
+                     settings.lookup_required, settings.lookup_dedicated,
+                     settings.lookup_interval, settings.lookup_timeout)
+            cmds = settings.lookup_cmds or {}
+            if cmds:
+                log.info("Lookup per-bot cmds: %s", cmds)
+            log.info("Lookup cmd template: %r", settings.lookup_cmd_template)
+        else:
+            log.warning("Lookup NOT CONFIGURED (LOOKUP_BOT_USERNAME пуст и LOOKUP_BOTS пуст) — "
+                        "hidden-owner лоты будут отсеиваться")
 
         while True:
             try:
