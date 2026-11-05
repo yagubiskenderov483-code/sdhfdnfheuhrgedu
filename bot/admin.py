@@ -620,7 +620,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1395,6 +1395,100 @@ def build_routers(app: "App") -> list[Router]:
             lines.append(f"{icon} <code>{html.escape(name[:30])}</code> → {html.escape(result)}{extra_fmt} "
                          f"<i>({age_s})</i>")
         lines += ["", "<i>Легенда: ✅ найден · 💾 из памяти · ❌ не найден · 🫥 нет кандидатов · 👥 слишком много · 🔕 бот молчал · 🚫 rate-limit · 📦 негативный кеш</i>"]
+        await _answer_long(m, "\n".join(lines))
+
+    @admin.message(Command("lookup_debug"))
+    async def cmd_lookup_debug(m: Message) -> None:
+        """'/lookup_debug Иван Петров' — показать пошагово что будет с таким именем:
+        - в памяти БД (найденный ранее владелец)
+        - в положительном кеше (кандидаты от funstat, час назад)
+        - в негативном кеше (бот сказал 'не знаю', не долбим час)
+        - inflight (уже спрашивают с другого лота — ждём)
+        - пул ботов для него
+        - пул сессий для него
+        Если ничего — делает реальный lookup.
+        """
+        arg = (m.text or "").split(maxsplit=1)
+        if len(arg) < 2:
+            await m.answer("Нужно имя: <code>/lookup_debug Иван Петров</code>")
+            return
+        name = arg[1].strip()
+        if len(name) < 2:
+            await m.answer("Имя слишком короткое.")
+            return
+        import tracker.lookup as L
+        import time as _t
+        lk = app.lookup
+        key = L._norm_name(name)
+        lines = [f"🔍 <b>Debug lookup для</b> <code>{html.escape(name)}</code>", "",
+                 f"Нормализованный ключ: <code>{html.escape(key)}</code>"]
+
+        # 1) память (БД)
+        try:
+            known = await lk._known(name)
+            if known:
+                lines.append(f"\n<b>💾 В памяти БД: {len(known)} запись(ей)</b>")
+                for k in known[:3]:
+                    lines.append(f"  u{k.user_id} @{k.username or '—'}")
+                lines.append("  → lookup вернёт <b>from_memory</b> без обращения к боту")
+            else:
+                lines.append("\n💾 В памяти БД: нет")
+        except Exception as e:
+            lines.append(f"\n💾 Память: ошибка {html.escape(str(e)[:80])}")
+
+        # 2) позитивный кеш
+        now = _t.monotonic()
+        cached = lk._cache.get(key)
+        if cached:
+            age = now - cached[0]
+            if age < 3600:
+                lines.append(f"\n<b>✅ Положительный кеш (TTL {3600 - int(age)}с осталось): "
+                             f"{len(cached[1])} кандидат(ов)</b>")
+                for c in cached[1][:5]:
+                    lines.append(f"  {c.key()} — {html.escape(c.name or '—')}")
+            else:
+                lines.append(f"\n✅ Кеш был, но протух ({int(age)}с назад)")
+        else:
+            lines.append("\n✅ Положительный кеш: пусто")
+
+        # 3) негативный кеш
+        neg = lk._neg_cache.get(key)
+        if neg:
+            age = now - neg
+            if age < 3600:
+                lines.append(f"\n<b>❌ Негативный кеш: 'не найдено' {int(age)}с назад "
+                             f"(ещё {3600 - int(age)}с не будем долбить)</b>")
+                lines.append("  → lookup вернёт <b>None</b> без обращения к боту")
+            else:
+                lines.append(f"\n❌ Негативный кеш был, но протух ({int(age)}с назад)")
+        else:
+            lines.append("\n❌ Негативный кеш: пусто")
+
+        # 4) inflight
+        if key in lk._inflight:
+            lines.append("\n<b>⏳ Inflight: уже идёт запрос с другого лота — новый будет ждать его результат</b>")
+
+        # 5) пул ботов
+        bots = lk._bot_pool()
+        if bots:
+            lines.append(f"\n<b>🤖 Пул ботов ({len(bots)}): {', '.join('@' + b for b in bots)}</b>")
+        else:
+            lines.append("\n⚠️ <b>Пул ботов ПУСТ</b> — lookup не стартует (боты dead / не настроены)")
+
+        # 6) пул сессий
+        sessions = lk._pick_sessions()
+        if sessions:
+            lines.append(f"\n<b>💼 Пул сессий ({len(sessions)}): {', '.join(sessions[:5])}"
+                         + (f" ... и ещё {len(sessions) - 5}" if len(sessions) > 5 else "") + "</b>")
+        else:
+            lines.append("\n⚠️ <b>Пул сессий ПУСТ</b> — все залипли или не LOOKUP_SESSIONS")
+
+        if not bots or not sessions:
+            lines.append("\n<i>Реальный lookup не выполняется из-за пустых пулов.</i>")
+        else:
+            lines.append("\n<i>Чтобы запустить реальный lookup: <code>/test_bot</code> или просто дождаться "
+                         "лота с таким именем.</i>")
+
         await _answer_long(m, "\n".join(lines))
 
     @admin.message(Command("lookup_reset"))
