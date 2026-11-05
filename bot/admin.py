@@ -620,7 +620,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1396,6 +1396,39 @@ def build_routers(app: "App") -> list[Router]:
                          f"<i>({age_s})</i>")
         lines += ["", "<i>Легенда: ✅ найден · 💾 из памяти · ❌ не найден · 🫥 нет кандидатов · 👥 слишком много · 🔕 бот молчал · 🚫 rate-limit · 📦 негативный кеш</i>"]
         await _answer_long(m, "\n".join(lines))
+
+    @admin.message(Command("lookup_reset"))
+    async def cmd_lookup_reset(m: Message) -> None:
+        """Полный сброс lookup-состояния: _neg_cache, _bot_dead_until, _bot_unresolvable,
+        _bot_consec_unres, _bot_dead_notified. НЕ трогает память найденных владельцев (БД).
+
+        Используется чтобы 'с чистого листа' проверить работает ли lookup. Например:
+        после смены LOOKUP_BOT_USERNAME, после ручного восстановления funstat и т.п."""
+        lk = app.lookup
+        before = {
+            "neg_cache": len(lk._neg_cache),
+            "bot_dead": len(lk._bot_dead_until or {}),
+            "unresolvable": len(lk._bot_unresolvable or {}),
+            "consec": len(lk._bot_consec_unres or {}),
+        }
+        # сбросить dead-marks (через _clear_bot_unresolved — заодно почистит persistent)
+        for k in list(lk._bot_dead_until or {}):
+            lk._clear_bot_unresolved(k)
+        lk._neg_cache.clear()
+        lk._bot_unresolvable.clear()
+        lk._bot_consec_unres.clear()
+        lk._bot_dead_notified.clear()
+        # captcha_recent тоже сбросим, чтобы адаптивный interval вернулся к базовому
+        if hasattr(lk, "_captcha_recent"):
+            lk._captcha_recent = []
+        lines = ["🧹 <b>Lookup полностью сброшен</b>", "",
+                 f"Было в кешах:",
+                 f"  негативный: <b>{before['neg_cache']}</b> имён",
+                 f"  dead-ботов: <b>{before['bot_dead']}</b>",
+                 f"  unresolvable: <b>{before['unresolvable']}</b> (сессия, бот)",
+                 f"  подряд-fails: <b>{before['consec']}</b> ботов",
+                 "", "Сейчас — пустые. Следующие lookup пойдут 'с нуля'."]
+        await m.answer("\n".join(lines))
 
     @admin.message(Command("lookup_cache"))
     async def cmd_lookup_cache(m: Message) -> None:
