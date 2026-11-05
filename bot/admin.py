@@ -1890,7 +1890,67 @@ def build_routers(app: "App") -> list[Router]:
         lines += ["", "Сменить основной: <code>/set LOOKUP_BOT_USERNAME &lt;@username&gt;</code>",
                   "Список запасных: <code>/set LOOKUP_BOTS bot1,bot2,bot3</code>",
                   "Команды per-bot: <code>/set LOOKUP_CMDS funstat:/human,infostat:/find</code>"]
-        await _answer_long(m, "\n".join(lines))
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🏓 Пинг всех", callback_data="bots:ping"),
+             InlineKeyboardButton(text="🔄 Обновить", callback_data="bots:refresh")],
+            [InlineKeyboardButton(text="🧹 Снять dead-mark", callback_data="bots:cleardead"),
+             InlineKeyboardButton(text="📊 /stat", callback_data="status:refresh")],
+            [InlineKeyboardButton(text="📋 Последние lookup", callback_data="lookup:last"),
+             InlineKeyboardButton(text="🧠 Кеши", callback_data="lookup:cache")],
+        ])
+        await _answer_long(m, "\n".join(lines), reply_markup=kb)
+
+    @admin.callback_query(F.data.startswith("bots:"))
+    async def cb_bots(q: CallbackQuery) -> None:
+        """Inline-кнопки под /bots. Прямо вызывают нужные команды через существующие handlers.
+        Message в aiogram 3 — pydantic, но text можно подменить через model_copy для одноразового
+        вызова handler'а (чище чем править q.message in-place)."""
+        if not is_manager(q.from_user.id):
+            await q.answer("Только для админов", show_alert=True)
+            return
+        action = q.data.split(":", 1)[1]
+        await q.answer({"ping": "Пингую всех ботов…",
+                        "refresh": "Обновляю…",
+                        "cleardead": "Сбрасываю dead-mark…"}.get(action, ""))
+        if q.message is None:
+            return
+        cmd_text = {"ping": "/test_bots", "refresh": "/bots", "cleardead": "/bots_clear_dead"}.get(action)
+        if not cmd_text:
+            return
+        try:
+            m = q.message.model_copy(update={"text": cmd_text, "from_user": q.from_user})
+        except Exception:
+            m = q.message
+        try:
+            if action == "ping":
+                await cmd_test_bots(m)
+            elif action == "refresh":
+                await cmd_bots(m)
+            elif action == "cleardead":
+                await cmd_bots_clear_dead(m)
+        except Exception as e:
+            log.debug("cb_bots action %s failed: %s", action, e)
+
+    @admin.callback_query(F.data.startswith("lookup:"))
+    async def cb_lookup_panel(q: CallbackQuery) -> None:
+        if not is_manager(q.from_user.id):
+            await q.answer("Только для админов", show_alert=True)
+            return
+        action = q.data.split(":", 1)[1]
+        await q.answer()
+        if q.message is None:
+            return
+        try:
+            m = q.message.model_copy(update={"from_user": q.from_user})
+        except Exception:
+            m = q.message
+        try:
+            if action == "last":
+                await cmd_lookup_last(m)
+            elif action == "cache":
+                await cmd_lookup_cache(m)
+        except Exception as e:
+            log.debug("cb_lookup action %s failed: %s", action, e)
 
     @admin.message(Command("reset_speeds"))
     async def cmd_reset_speeds(m: Message) -> None:
