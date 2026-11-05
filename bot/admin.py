@@ -622,7 +622,7 @@ def build_routers(app: "App") -> list[Router]:
             except Exception:
                 pass
 
-    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug"),
+    @users.message(or_f(Command("pause", "resume", "on", "off", "close", "open", "reload", "set", "proxies", "proxy", "removed", "revive", "top", "find", "mute", "unmute", "why", "lot", "panel", "clear_captcha_cache", "flood", "routes", "reset_speeds", "captcha_status", "sellers", "bots", "test_bot", "test_bots", "lookup_cache", "lookup_last", "bots_clear_dead", "bots_set_primary", "bots_add", "bots_remove", "lookup_reset", "lookup_debug", "lookup_forget"),
                         F.text.in_({BTN_PAUSE, BTN_RESUME})))
     async def cmd_denied(m: Message) -> None:
         await m.answer("⛔ Эта команда доступна админу или тому, кто добавил аккаунт в трекер.\n"
@@ -1398,6 +1398,50 @@ def build_routers(app: "App") -> list[Router]:
                          f"<i>({age_s})</i>")
         lines += ["", "<i>Легенда: ✅ найден · 💾 из памяти · ❌ не найден · 🫥 нет кандидатов · 👥 слишком много · 🔕 бот молчал · 🚫 rate-limit · 📦 негативный кеш</i>"]
         await _answer_long(m, "\n".join(lines))
+
+    @admin.message(Command("lookup_forget"))
+    async def cmd_lookup_forget(m: Message) -> None:
+        """'/lookup_forget Иван Петров' — удалить из памяти БД запись найденного владельца.
+
+        Полезно если funstat когда-то вернул не того человека, и теперь каждый новый лот
+        с этим именем идёт в канал с неверным владельцем. Удалит из kv owner:<name>,
+        следующий lookup пойдёт по новой через бота."""
+        arg = (m.text or "").split(maxsplit=1)
+        if len(arg) < 2:
+            await m.answer("Нужно имя: <code>/lookup_forget Иван Петров</code>")
+            return
+        name = arg[1].strip()
+        if len(name) < 2:
+            await m.answer("Имя слишком короткое.")
+            return
+        import tracker.lookup as L
+        key = f"owner:{L._norm_name(name)}"
+        raw = await app.db.kv_get(key)
+        if not raw:
+            await m.answer(f"ℹ️ В памяти БД нет записи для <code>{html.escape(name)}</code>.")
+            return
+        # Показать что было, перед удалением
+        try:
+            import json as _json
+            items = _json.loads(raw) if raw else []
+        except Exception:
+            items = []
+        await app.db.kv_set(key, None)
+        # Также снять из негативного кеша, чтобы следующий лот сразу пошёл к боту
+        try:
+            app.lookup._neg_cache.pop(L._norm_name(name), None)
+            app.lookup._cache.pop(L._norm_name(name), None)
+        except Exception:
+            pass
+        reply = [f"🧹 Удалена запись для <code>{html.escape(name)}</code>.",
+                 "", "Было:"]
+        for i in items[:5]:
+            reply.append(f"  u{i.get('id')} @{i.get('u') or '—'}")
+        if len(items) > 5:
+            reply.append(f"  ... и ещё {len(items) - 5}")
+        reply.append("")
+        reply.append("Следующий лот с этим именем пойдёт в lookup по-новой.")
+        await m.answer("\n".join(reply))
 
     @admin.message(Command("lookup_debug"))
     async def cmd_lookup_debug(m: Message) -> None:
