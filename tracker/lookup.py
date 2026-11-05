@@ -869,6 +869,7 @@ class OwnerLookup:
             # Все боты в блеклисте (dead) или не настроены — не долбимся вхолостую.
             log.debug("Lookup: пул ботов пуст (все dead или не настроены) — пропускаем %r", seller_name)
             self.stats["no_bot_pool"] = self.stats.get("no_bot_pool", 0) + 1
+            self._track_lookup(seller_name, "no_bot_pool", "все боты dead / не настроены")
             return None
         bot = bots[0]       # основной, используется для логов/метрик; fallback-боты пробуются в цикле ниже
         order = self._pick_sessions()
@@ -882,6 +883,7 @@ class OwnerLookup:
                          "(пишется не чаще раза в минуту)",
                          f" ({', '.join(settings.lookup_sessions)})" if settings.lookup_sessions else "")
             self.stats["no_session"] = self.stats.get("no_session", 0) + 1
+            self._track_lookup(seller_name, "no_session", "все сессии залипли")
             return None
         session = order[0]
         self.stats["lookups"] += 1
@@ -953,6 +955,7 @@ class OwnerLookup:
                     fut.set_result(cands)
             if cands is None:
                 self.stats["no_answer"] += 1
+                self._track_lookup(seller_name, "no_answer", f"@{bot} молчал")
                 return None
             if cands:
                 self._cache[key] = (time.monotonic(), cands)
