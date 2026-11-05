@@ -2131,6 +2131,8 @@ def build_routers(app: "App") -> list[Router]:
                 await cmd_lookup_last(m)
             elif action == "cache":
                 await cmd_lookup_cache(m)
+            elif action == "help":
+                await cmd_help_lookup(m)
         except Exception as e:
             log.debug("cb_lookup action %s failed: %s", action, e)
 
@@ -2466,6 +2468,9 @@ def build_routers(app: "App") -> list[Router]:
             text=f"💰 Торговый бот: @{tb}" if tb else "💰 Добавить торгового бота (оффер)",
             callback_data="flt:TRADEBOT")])
         rows.append([InlineKeyboardButton(text="⚡ Скорость трекера", callback_data="flt:SPEED")])
+        # быстрый переход к /bots (статус пула + inline-кнопки) и /help_lookup (все команды)
+        rows.append([InlineKeyboardButton(text="🤖 Пул lookup-ботов", callback_data="bots:refresh"),
+                     InlineKeyboardButton(text="📖 Гайд", callback_data="lookup:help")])
         rows.append([InlineKeyboardButton(text="🔄 Обновить", callback_data="flt:REFRESH"),
                      InlineKeyboardButton(text="📊 Статус", callback_data="status:refresh")])
         # короткая строка о текущих настройках скорости — чтоб сразу видеть
