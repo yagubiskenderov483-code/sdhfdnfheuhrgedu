@@ -82,13 +82,25 @@ def _fernet() -> Fernet | MultiFernet | None:
 
 
 def session_file_to_string(path: Path) -> str | None:
-    """*.session (SQLite Telethon) → StringSession. Читаем только auth key и DC."""
+    """*.session (SQLite Telethon) → StringSession. Читаем только auth key и DC.
+
+    ВАЖНО: connection закрывается через try/finally. Раньше con.close() был в try и
+    пропускался при любой ошибке execute/fetchone (битая схема, повреждённый файл) —
+    утечка файловых дескрипторов. За недели работы на Render это приводило к EMFILE
+    и backup переставал работать."""
+    con = None
+    row = None
     try:
         con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         row = con.execute("SELECT dc_id, server_address, port, auth_key FROM sessions").fetchone()
-        con.close()
     except sqlite3.Error:
         return None
+    finally:
+        if con is not None:
+            try:
+                con.close()
+            except sqlite3.Error:
+                pass
     if not row or not row[3]:
         return None
     ss = StringSession()
