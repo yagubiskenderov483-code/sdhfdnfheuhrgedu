@@ -441,6 +441,46 @@ class Subscriptions:
                 except Exception:
                     pass
 
+    async def _cleanup_old_invoices(self) -> int:
+        """Удалить старые invoices из state: неоплаченные старше 7 дней, оплаченные старше 60 дней.
+
+        Без этой чистки state['invoices'] растёт бесконечно — через месяц работы становится
+        сотни-тысячи записей, каждая попадает в backup (который сжимается и шифруется, но
+        упирается в Bot API 20MB download limit; переполнение → трекер при деплое не
+        восстановит аккаунты).
+
+        Хранить оплаченные 60 дней нужно чтобы 'повторный перевод по старому коду' всё
+        ещё засчитался. Это окно явно заложено в код (check_payments, 7*86400 там же).
+        60 дней — с запасом х8.
+
+        Отдельно трогаем seen_tx: deque capped 2000 в _merge, но на всякий случай capped и тут."""
+        now = time.time()
+        UNPAID_TTL = 7 * 86400
+        PAID_TTL = 60 * 86400
+        async with self._lock:
+            before = len(self.state["invoices"])
+            drop = []
+            for code, inv in self.state["invoices"].items():
+                age = now - float(inv.get("ts") or 0)
+                if inv.get("paid"):
+                    # оплаченный счёт убираем через PAID_TTL от момента оплаты (paid_at) или ts
+                    paid_age = now - float(inv.get("paid_at") or inv.get("ts") or 0)
+                    if paid_age > PAID_TTL and inv.get("granted") is True:
+                        drop.append(code)
+                else:
+                    if age > UNPAID_TTL:
+                        drop.append(code)
+            for code in drop:
+                self.state["invoices"].pop(code, None)
+            # seen_tx — на всякий случай ограничим 2000 (может прилететь больше через merge)
+            if isinstance(self.state.get("seen_tx"), list) and len(self.state["seen_tx"]) > 2000:
+                self.state["seen_tx"] = self.state["seen_tx"][-2000:]
+            if drop:
+                await self.save(backup=True)
+                log.info("Subscriptions cleanup: removed %d old invoices (%d → %d)",
+                         len(drop), before, len(self.state["invoices"]))
+        return len(drop)
+
     async def _reconcile(self) -> None:
         """Страховка на случай, если Telegram не прислал событие входа/выхода: всех, у кого доступ
         закончился, проверяем по факту — если человек всё ещё в канале, выкидываем."""
@@ -672,6 +712,13 @@ class Subscriptions:
                 await self._remind()
                 if tick % 12 == 0:
                     await self._reconcile()
+                # раз в сутки — чистка старых invoices (защита от роста state)
+                # 8640 ticks × 10с = 86400с = сутки
+                if tick > 0 and tick % 8640 == 0:
+                    try:
+                        await self._cleanup_old_invoices()
+                    except Exception as e:
+                        log.warning("Old invoices cleanup failed: %s", e)
                 await self.flush_backup()
             except Exception as e:
                 log.warning("Subscription expiry check failed: %s", e)
