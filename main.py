@@ -1059,8 +1059,15 @@ class App:
             now = time.monotonic()
             try:
                 if self.pipeline.stats["sent"] != last_sent and now - last_hist >= 600:
-                    last_sent, last_hist = self.pipeline.stats["sent"], now
-                    await self.backup.save()
+                    # ВАЖНО: обновляем last_hist/last_sent ПОСЛЕ успешного save, иначе при
+                    # сбое save (Telegram rate-limit, сеть) следующая попытка только через 10 мин.
+                    # backup.save() возвращает bool — True при успехе.
+                    ok = await self.backup.save()
+                    if ok:
+                        last_sent, last_hist = self.pipeline.stats["sent"], now
+                    else:
+                        # неуспех — retry на следующем tick (через 60с), не ждать полные 10 мин
+                        log.info("Periodic backup retry — previous save returned False")
                 live, total = self.coordinator.sync_progress()
                 all_live = total > 0 and live == total
                 if (all_live and not market_saved_full) or now - last_market >= settings.market_backup_minutes * 60:
