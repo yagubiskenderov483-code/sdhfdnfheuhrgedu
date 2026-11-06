@@ -75,7 +75,11 @@ async def start_health_server(app_ref: Any, port: int) -> Any:
             return web.Response(text=json.dumps(payload), content_type="application/json")
         except Exception as e:
             log.debug("health /stats failed: %s", e)
-            return web.Response(text=f'{{"error":"{e!s}"}}', content_type="application/json", status=500)
+            # json.dumps экранирует кавычки и спецсимволы — f-строка выше ломала валидный
+            # JSON при исключениях с кавычками/бэкслешами в тексте.
+            import json as _json
+            return web.Response(text=_json.dumps({"error": str(e)}),
+                                content_type="application/json", status=500)
 
     async def _metrics(request):
         """Prometheus text exposition format для внешнего мониторинга.
@@ -95,9 +99,12 @@ async def start_health_server(app_ref: Any, port: int) -> Any:
             # Mode
             mode = getattr(getattr(app_ref, "coordinator", None), "mode", "?")
             paused = int(getattr(getattr(app_ref, "coordinator", None), "paused", False))
+            # Prometheus требует экранирования \\, \" и \n в значениях меток.
+            # mode обычно "LIVE"/"CATALOG", но защитимся от неожиданного ввода.
+            safe_mode = str(mode).replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
             lines.append("# HELP tracker_mode_paused 1 if paused")
             lines.append("# TYPE tracker_mode_paused gauge")
-            lines.append(f'tracker_mode_paused{{mode="{mode}"}} {paused}')
+            lines.append(f'tracker_mode_paused{{mode="{safe_mode}"}} {paused}')
             # Pipeline
             p = getattr(getattr(app_ref, "pipeline", None), "stats", {}) or {}
             lines.append("# HELP tracker_listings Count of listings processed")
