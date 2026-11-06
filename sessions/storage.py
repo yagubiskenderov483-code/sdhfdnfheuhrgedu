@@ -177,8 +177,12 @@ class SessionStorage:
             return []
 
     def save_pool(self, proxies: list[str]) -> None:
-        self.pool_path.write_text("\n".join(proxies) + "\n", encoding="utf-8")
-        _secure(self.pool_path)
+        # tmp + os.replace, чтобы при сбое не оставить proxies.txt с половиной строк
+        # (split_lines прочитает их, но потеряет остальные прокси → пустые аккаунты).
+        tmp = self.pool_path.with_suffix(self.pool_path.suffix + ".tmp")
+        tmp.write_text("\n".join(proxies) + "\n", encoding="utf-8")
+        _secure(tmp)
+        os.replace(tmp, self.pool_path)
 
     def pick_proxy(self, per_proxy: int) -> str | None:
         """Наименее загруженный прокси из пула (не больше per_proxy аккаунтов на один)."""
