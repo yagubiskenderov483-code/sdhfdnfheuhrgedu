@@ -82,15 +82,25 @@ def _save_cache() -> None:
 
     Dirty-флаг сбрасывается ТОЛЬКО после успешной записи — если save упал (нет места,
     permissions, disk slow), следующий цикл попробует снова. Раньше флаг сбрасывался
-    до записи, и накопленные ответы могли теряться до следующего cache_put."""
+    до записи, и накопленные ответы могли теряться до следующего cache_put.
+
+    Snapshot дикта делаем под GIL (dict(...) — атомарная операция в CPython), и уже
+    этот snapshot дампим в JSON. Иначе: main.py вызывает _save_cache через
+    asyncio.to_thread → он бежит в executor-потоке, а cache_put на event-loop
+    треде в это же время мутирует _CAPTCHA_CACHE. json.dump итерирует словарь —
+    и ловит 'dictionary changed size during iteration'."""
     global _cache_dirty
     if not _cache_dirty:
         return
+    # dict() копия — одно выражение, выполняется атомарно под GIL. После этого
+    # executor-поток работает со своим снимком, а event-loop может спокойно писать
+    # новые ключи в оригинал (попадут в следующий _save_cache тик).
+    snapshot = dict(_CAPTCHA_CACHE)
     try:
         os.makedirs(os.path.dirname(_CAPTCHA_CACHE_PATH) or ".", exist_ok=True)
         tmp = _CAPTCHA_CACHE_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_CAPTCHA_CACHE, f, ensure_ascii=False)
+            json.dump(snapshot, f, ensure_ascii=False)
         os.replace(tmp, _CAPTCHA_CACHE_PATH)
         _cache_dirty = False      # ТОЛЬКО после успешной атомарной замены
     except Exception as e:                                             # noqa: BLE001
