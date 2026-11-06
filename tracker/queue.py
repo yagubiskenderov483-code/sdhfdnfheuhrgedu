@@ -278,10 +278,23 @@ class ListingPipeline:
                 supervise(f"processor-{i}", (lambda i=i: self._worker_loop(i)), delay=1.0), name=f"processor-{i}"))
 
     async def stop(self) -> None:
-        for t in list(self._workers) + list(self._retries) + list(self._lookup_tasks):
+        pending = list(self._workers) + list(self._retries) + list(self._lookup_tasks)
+        for t in pending:
             t.cancel()
-        await asyncio.gather(*self._workers, return_exceptions=True)
+        # Ждём ВСЕ отменённые задачи, не только воркеров. Иначе _lookup_then_process
+        # / _later retry может быть в середине update_listing, когда дальше по
+        # shutdown-pipeline вызовут db.close() — лот зависнет в SENDING навсегда,
+        # а в логи упадёт "Task was destroyed but it is pending".
+        if pending:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*pending, return_exceptions=True), timeout=10)
+            except asyncio.TimeoutError:
+                log.warning("Pipeline stop: %d task(s) didn't finish in 10s",
+                            sum(1 for t in pending if not t.done()))
         self._workers.clear()
+        self._retries.clear()
+        self._lookup_tasks.clear()
 
     async def _worker_loop(self, idx: int) -> None:
         while True:

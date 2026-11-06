@@ -478,10 +478,17 @@ class App:
                 pass
 
     def _spawn(self, t: asyncio.Task) -> None:
-        """Фоновая задача: держим ссылку и громко пишем в лог, если она упала (а не молча умерла)."""
+        """Фоновая задача: держим ссылку и громко пишем в лог, если она упала (а не молча умерла).
+        Завершённые задачи сами выходят из _tasks — иначе список рос бы бесконечно, а в stop()
+        мы собирали бы в gather уже готовые объекты (они просто вернут результат мгновенно, но
+        логика cancel() их не затронет — лишний шум)."""
         self._tasks.append(t)
 
         def _done(task: asyncio.Task) -> None:
+            try:
+                self._tasks.remove(task)
+            except ValueError:
+                pass
             if not task.cancelled() and task.exception() is not None:
                 log.error("Background task %s crashed: %r", task.get_name(), task.exception())
         t.add_done_callback(_done)
