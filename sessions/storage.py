@@ -132,6 +132,14 @@ class SessionStorage:
             return {}
         return data if isinstance(data, dict) else {}
 
+    def _atomic_write_json(self, meta: Path, data: dict) -> None:
+        """tmp + os.replace — иначе падение (SIGKILL, диск, power) оставит частично
+        записанный .json, и _read_meta вернёт {} → потеря api_id/api_hash/owner_id."""
+        tmp = meta.with_suffix(meta.suffix + ".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        _secure(tmp)
+        os.replace(tmp, meta)
+
     def save_meta(self, name: str, api_id: int, api_hash: str, phone: str | None = None,
                   owner_id: int | None = None, proxy: str | None = None) -> None:
         meta = self.dir / f"{name}.json"
@@ -143,8 +151,7 @@ class SessionStorage:
             data["proxy"] = proxy or None
         if phone:
             data["phone_hint"] = phone[:4] + "****" + phone[-2:] if len(phone) > 6 else "****"
-        meta.write_text(json.dumps(data), encoding="utf-8")
-        _secure(meta)
+        self._atomic_write_json(meta, data)
         sp = self.session_path(name)
         if sp.exists():
             _secure(sp)
@@ -154,8 +161,7 @@ class SessionStorage:
         data = self._read_meta(name)
         data["proxy"] = proxy or None
         meta = self.dir / f"{name}.json"
-        meta.write_text(json.dumps(data), encoding="utf-8")
-        _secure(meta)
+        self._atomic_write_json(meta, data)
         self._invalidate_list_cache()
 
     # ------------------------------------------------------------------ пул прокси
