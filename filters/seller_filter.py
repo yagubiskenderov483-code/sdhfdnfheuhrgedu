@@ -166,12 +166,15 @@ class SellerFilter:
                 return SellerResult(True, "OWNER_HIDDEN", "owner hidden by Telegram — no profile to filter on")
             # ALLOW_HIDDEN_OWNER=false и имя без явных признаков → фильтр ниже вернёт UNKNOWN_BLOCKED
 
-        # продавцу должно быть можно написать бесплатно
-        # НО: если владелец пришёл по доверию от бота поиска и профиль мы НЕ читали
-        # (owner_trusted_no_resolve), статус messages неизвестен — не считаем это PAID.
+        # продавцу должно быть можно написать бесплатно.
+        # ВАЖНО: l.messages приходит СО СТРАНИЦЫ МАРКЕТА (payments.getResaleStarGifts
+        # → User.send_paid_messages_stars / contact_require_premium), а НЕ из профиля.
+        # Значит статус 'платные' / 'только Premium' известен даже если профиль мы
+        # не читали (owner_trusted_no_resolve). Раньше для trusted owner'ов этот
+        # фильтр молча отключался — Maker: 'чтоб соо не платные в лс были' — и лоты
+        # с платным ЛС проскакивали через fallback-доверие funstat'а.
         if (settings.require_free_messages and l.seller_type == "user"
-                and l.messages is not None and l.messages != "бесплатно"
-                and not getattr(l, "owner_trusted_no_resolve", False)):
+                and l.messages is not None and l.messages != "бесплатно"):
             return SellerResult(False, "PAID_MESSAGES",
                                 f"messages: {l.messages or 'unknown'} (REQUIRE_FREE_MESSAGES=true)")
 
