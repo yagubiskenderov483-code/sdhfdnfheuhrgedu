@@ -1010,8 +1010,19 @@ class MarketplaceCoordinator:
                     sleep_time *= 2
                 await asyncio.sleep(sleep_time)
         finally:
-            for t in list(inflight):
+            # Ждём отменённые inflight задачи, чтобы они не висели как pending после
+            # shutdown и не писали в закрытую БД/сессии. Таймаут 5с — если задача
+            # залипла на сессии в FloodWait, SIGTERM всё равно отправит процесс дальше.
+            pending = list(inflight)
+            for t in pending:
                 t.cancel()
+            if pending:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.gather(*pending, return_exceptions=True), timeout=5)
+                except asyncio.TimeoutError:
+                    log.warning("catalog_loop: %d inflight task(s) didn't finish in 5s",
+                                sum(1 for t in pending if not t.done()))
 
     async def _persist_loop(self) -> None:
         while not self._stop.is_set():
