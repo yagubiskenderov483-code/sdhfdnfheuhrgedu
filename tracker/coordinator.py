@@ -877,7 +877,8 @@ class MarketplaceCoordinator:
             # поэтому плановые опросы ждут — опрашиваем только «горячие» (каталог показал новый лот)
             due = [d for d in due if d[0] <= 1]
         live_running = sum(1 for g in self._running if g in self.states and self._is_live(self.states[g]))
-        for _, _, gid in due:
+        spawned_hot = False
+        for tier, _, gid in due:
             if live_running >= capacity:
                 break
             live_running += 1
@@ -889,7 +890,12 @@ class MarketplaceCoordinator:
             task = asyncio.create_task(self._live_poll(st), name=f"poll-{gid}")
             self._polls.add(task)
             task.add_done_callback(self._polls.discard)
-        await asyncio.sleep(0.02)
+            if tier <= 1:                 # hot-коллекция: не тратим 20мс на sleep, крутим дальше
+                spawned_hot = True
+        # Hot-коллекции: сразу ещё раз в цикл, иначе при >capacity hot-коллекциях очередь
+        # разгребается с задержкой 20мс × остаток / capacity. Прыгать без паузы вечно нельзя —
+        # отдаём минимум event-loop'у.
+        await asyncio.sleep(0 if spawned_hot else 0.02)
 
     def _priority_interval(self) -> float:
         """Частый опрос дорогих коллекций, но не больше PRIORITY_SHARE мощности аккаунтов —
