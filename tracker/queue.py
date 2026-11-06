@@ -899,18 +899,21 @@ class ListingPipeline:
         # тонут в 150с таймауте и теряются до admin fallback'а.
         # ×5 после увеличения captcha_rounds до 5 (было 3), но capped 600с.
         timeout = max(60.0, min(600.0, (settings.lookup_captcha_wait + settings.lookup_timeout) * 5 + 30))
+        infra_failure = False       # True = бот жив, но не ответил в срок (timeout/exception) → не наказываем лот
         try:
             found = await asyncio.wait_for(self._lookup_owner(l), timeout=timeout)
         except asyncio.TimeoutError:
             log.warning("Owner lookup for %s (%r) timed out after %.0fs — освобождаем pipeline",
                         l.listing_id, l.seller_name, timeout)
             found = False
+            infra_failure = True
             self.stats["lookup_timeout"] = self.stats.get("lookup_timeout", 0) + 1
         except asyncio.CancelledError:
             raise
         except Exception as e:
             log.exception("Owner lookup for %s (%r) failed: %s", l.listing_id, l.seller_name, e)
             found = False
+            infra_failure = True
             self.stats["lookup_exception"] = self.stats.get("lookup_exception", 0) + 1
         l.lookup_done = True
         # пока ждали бота поиска (очередь, капча), лот мог сильно устареть.
@@ -935,7 +938,11 @@ class ListingPipeline:
             # принимает решение по купле.
             all_dead = (self.owner_lookup is not None and hasattr(self.owner_lookup, "all_bots_dead")
                         and self.owner_lookup.all_bots_dead())
-            if settings.lookup_required and not all_dead:
+            # infra_failure = бот жив, но не ответил в срок (timeout/exception) — это
+            # проблема инфраструктуры, не самого лота. Шлём с пометкой, а не выбрасываем
+            # (иначе при любом залипании funstat'а пропадают все hidden-owner лоты).
+            # Maker: 'нью лоты выдавало' — не теряем лот из-за медленного бота.
+            if settings.lookup_required and not all_dead and not infra_failure:
                 l.status, l.reason = ListingStatus.FILTERED_SELLER, "владелец не найден ботом поиска"
                 l.seller_filter_result = "OWNER_NOT_FOUND"
                 self.stats["filtered_seller"] += 1
@@ -946,6 +953,10 @@ class ListingPipeline:
             if all_dead:
                 self.stats["owner_bot_dead_bypass"] = self.stats.get("owner_bot_dead_bypass", 0) + 1
                 llog("FILTER", f"#{l.listing_id} hidden owner — все lookup-боты dead, "
+                               "шлём с пометкой без фильтра")
+            elif infra_failure:
+                self.stats["owner_bot_timeout_bypass"] = self.stats.get("owner_bot_timeout_bypass", 0) + 1
+                llog("FILTER", f"#{l.listing_id} hidden owner — lookup timeout/exception, "
                                "шлём с пометкой без фильтра")
             l.owner_not_found = True               # шлём с пометкой «владелец не найден»
         # пока ждали бота поиска, лот могли купить или снять — проверяем, что он ещё продаётся
