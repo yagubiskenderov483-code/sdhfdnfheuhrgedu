@@ -72,8 +72,7 @@ class SessionStorage:
                 continue
             if isinstance(data, dict) and data.get("proxy"):
                 data["proxy"] = None
-                meta.write_text(json.dumps(data), encoding="utf-8")
-                _secure(meta)
+                self._atomic_write_json(meta, data)
                 n += 1
         if n:
             self._invalidate_list_cache()

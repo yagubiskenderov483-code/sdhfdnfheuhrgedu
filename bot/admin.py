@@ -56,9 +56,15 @@ def all_admins() -> set[int]:
 
 
 def save_admins(ids: set[int]) -> None:
-    """Админы, назначенные ботом (первый добавивший аккаунт, /claim, восстановленные из копии)."""
+    """Админы, назначенные ботом (первый добавивший аккаунт, /claim, восстановленные из копии).
+
+    Запись через tmp + os.replace — без этого при SIGKILL/power loss файл мог остаться
+    полупустым, и после рестарта admins.json парсился как {} → все /claim терялись."""
+    import os as _os
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    ADMINS_FILE.write_text(json.dumps(sorted(_load_claimed() | set(ids))), encoding="utf-8")
+    tmp = ADMINS_FILE.with_suffix(ADMINS_FILE.suffix + ".tmp")
+    tmp.write_text(json.dumps(sorted(_load_claimed() | set(ids))), encoding="utf-8")
+    _os.replace(tmp, ADMINS_FILE)
 
 
 def can_manage(user_id: int, owner_id: int | None) -> bool:
@@ -612,7 +618,11 @@ def build_routers(app: "App") -> list[Router]:
             return
         claimed = _load_claimed() | {m.from_user.id}
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        ADMINS_FILE.write_text(json.dumps(sorted(claimed)), encoding="utf-8")
+        # Атомарная запись — см. save_admins выше.
+        import os as _os
+        tmp = ADMINS_FILE.with_suffix(ADMINS_FILE.suffix + ".tmp")
+        tmp.write_text(json.dumps(sorted(claimed)), encoding="utf-8")
+        _os.replace(tmp, ADMINS_FILE)
         CLAIM_CODE = None
         log.info("Admin claimed: %s", m.from_user.id)
         await m.answer("✅ Вы администратор.\n\n" + HELP)
