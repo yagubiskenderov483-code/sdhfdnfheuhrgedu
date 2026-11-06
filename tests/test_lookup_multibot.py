@@ -174,6 +174,53 @@ def test_pick_sessions_fallback_when_want_dead():
     check(set(order) == {"live1", "live2"}, f"fallback picked live sessions: {order}")
 
 
+def test_pick_sessions_unresolvable_for_primary_only():
+    """Сессия отмечена unresolvable для primary, но fallback-бот доступен →
+    сессия остаётся в выборке (регрессия: b9768a5)."""
+    settings.lookup_bot_username = "funstat"
+    settings.lookup_bots = ["infostat"]
+    settings.lookup_sessions = ["s1", "s2"]
+    workers = [FakeWorker("s1", usable=True), FakeWorker("s2", usable=True)]
+    lk = L.OwnerLookup(FakeSessions(workers))
+    # s1 помечена unresolvable только для funstat — но infostat у неё работает
+    lk._bot_unresolvable[("s1", "funstat")] = time.monotonic()
+    order = lk._pick_sessions()
+    check("s1" in order, f"s1 остаётся — unres только на primary, fallback свободен: {order}")
+    check("s2" in order, f"s2 без меток, тоже в выборке: {order}")
+
+
+def test_pick_sessions_unresolvable_for_all_bots():
+    """Сессия unresolvable для ВСЕХ активных ботов → исключена."""
+    settings.lookup_bot_username = "funstat"
+    settings.lookup_bots = ["infostat"]
+    settings.lookup_sessions = ["s1", "s2"]
+    workers = [FakeWorker("s1", usable=True), FakeWorker("s2", usable=True)]
+    lk = L.OwnerLookup(FakeSessions(workers))
+    now = time.monotonic()
+    lk._bot_unresolvable[("s1", "funstat")] = now
+    lk._bot_unresolvable[("s1", "infostat")] = now
+    order = lk._pick_sessions()
+    check("s1" not in order, f"s1 unres ко всем ботам пула — исключена: {order}")
+    check("s2" in order, f"s2 без меток — осталась: {order}")
+
+
+def test_pick_sessions_primary_dead_fallback_bot_alive():
+    """Primary в глобальном dead-mark, сессия unres к primary — но fallback-бот жив
+    и сессия к нему не unres → сессия нужна (scenario из коммита b9768a5)."""
+    settings.lookup_bot_username = "funstat"
+    settings.lookup_bots = ["infostat"]
+    settings.lookup_sessions = ["s1"]
+    workers = [FakeWorker("s1", usable=True)]
+    lk = L.OwnerLookup(FakeSessions(workers))
+    now = time.monotonic()
+    lk._bot_dead_until["funstat"] = now + 900     # primary dead-marked
+    lk._bot_unresolvable[("s1", "funstat")] = now  # и у сессии метка на primary
+    # В пуле остался только infostat; s1 к нему не unres → должна остаться
+    check(lk._bot_pool() == ["infostat"], "пул отфильтровал dead primary")
+    order = lk._pick_sessions()
+    check("s1" in order, f"s1 остаётся: primary dead, fallback жив, сессия к fallback'у ок: {order}")
+
+
 def main():
     test_bot_pool_single()
     test_bot_pool_fallback()
@@ -187,6 +234,9 @@ def main():
     test_register_bot_unresolved_threshold()
     test_clear_bot_unresolved()
     test_pick_sessions_fallback_when_want_dead()
+    test_pick_sessions_unresolvable_for_primary_only()
+    test_pick_sessions_unresolvable_for_all_bots()
+    test_pick_sessions_primary_dead_fallback_bot_alive()
     print(f"\n=== {ok_count} tests PASSED ===")
 
 
