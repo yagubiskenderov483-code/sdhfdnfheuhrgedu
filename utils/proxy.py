@@ -28,7 +28,12 @@ def parse_proxy(line: str | None) -> dict | None:
         if len(parts) == 2:
             s = f"socks5://{parts[0]}:{parts[1]}"
         elif len(parts) == 4:
-            s = f"socks5://{parts[2]}:{parts[3]}@{parts[0]}:{parts[1]}"
+            # URL-кодируем login/password: без этого '1.2.3.4:1080:user:p@ss' превращался в
+            # 'socks5://user:p@ss@1.2.3.4:1080' — urlparse брал первый '@' как разделитель
+            # userinfo и терял реальный host. Пароли с ':' и '@' встречаются у ipv4-прокси
+            # с токенами, прокси молча отбрасывался.
+            user, pw = quote(parts[2], safe=""), quote(parts[3], safe="")
+            s = f"socks5://{user}:{pw}@{parts[0]}:{parts[1]}"
         else:
             return None
     try:
