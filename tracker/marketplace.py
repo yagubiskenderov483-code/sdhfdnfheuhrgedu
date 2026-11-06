@@ -445,4 +445,6 @@ async def fetch_nft_count(client: TelegramClient, user_id: int) -> int:
     entity = await client.get_input_entity(types.PeerUser(user_id))
     res = await client(GetSavedStarGiftsRequest(peer=entity, offset="", limit=1, exclude_unlimited=True,
                                                 exclude_upgradable=True, exclude_unupgradable=True))
-    return int(res.count)
+    # Telegram может не прислать count при приватном профиле → None. Без защиты int(None)
+    # кидает TypeError и ломает _nft_count → весь _enrich падает в failover.
+    return int(getattr(res, "count", 0) or 0)
