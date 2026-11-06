@@ -80,6 +80,9 @@ class FoundOwner:
     premium: bool | None = None
     session: str | None = None          # аккаунт, который видит этого пользователя (есть access_hash)
     from_memory: bool = False           # найден из нашей базы — enrich выполнить обычным путём
+    bot: str | None = None              # какой lookup-бот реально ответил (primary или fallback из LOOKUP_BOTS).
+                                        # queue.py использует это как owner_found_via, иначе был бы указан
+                                        # primary даже когда ответил запасной.
 
 
 def _norm_name(s: str | None) -> str:
@@ -1034,6 +1037,14 @@ class OwnerLookup:
         found = await self._verify(session, cands,
                                    seller_name, slug, unique_id)
         if found:
+            # Проставляем реально ответившего бота. В ветках cached/inflight used_bot может
+            # не быть определён (UnboundLocalError на fallback'е) — тогда используем bot
+            # как fallback (primary из _bot_pool). Так owner_found_via перестанет лгать,
+            # что ответил funstat, когда реально отвечал запасной.
+            try:
+                found.bot = locals().get("used_bot") or bot
+            except Exception:
+                pass
             self.stats["found"] += 1
             await self._remember(seller_name, found)
             # session=None → trust-fallback (резолв упёрся в лимит / без проверки NFT), иначе _verify

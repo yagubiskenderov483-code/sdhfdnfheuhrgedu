@@ -1025,7 +1025,11 @@ class ListingPipeline:
             # from_memory: session_source=None, enrich попробует любую сессию. Если упадёт,
             # LOOKUP_FAILED → мы помечаем owner_from_memory чтобы не блокировать.
             l.owner_from_memory = True
-        l.owner_found_via = settings.lookup_bot_username.lstrip("@")
+        # Если найдено через fallback-бота из LOOKUP_BOTS, бот отличается от primary
+        # (settings.lookup_bot_username). Берём реальный бот из FoundOwner.bot — иначе
+        # /stats и логи показывали ложь: "найдено через funstat", когда funstat мёртв и
+        # ответил infostat. Fallback — primary из настроек, если бот не проставлен.
+        l.owner_found_via = (getattr(owner, "bot", None) or settings.lookup_bot_username).lstrip("@")
         self.stats["owner_found"] = self.stats.get("owner_found", 0) + 1
         llog("FILTER", f"#{l.listing_id} hidden owner found via @{l.owner_found_via} → u{uid}"
                        + (f" @{owner.username}" if owner.username else ""))
