@@ -1096,6 +1096,32 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         # inf / nan / 100 лет — не срок (inf ломал запись подписчика навсегда)
         return v if math.isfinite(v) and 60 <= v <= 10 * 365 * 86400 else None
 
+    @r.message(Command("subs_cleanup"), _ADM)
+    async def cmd_subs_cleanup(m: Message) -> None:
+        """Ручная чистка старых invoices (без ожидания суточной автоматической).
+        Удаляет unpaid старше 7 дней и paid старше 60 дней."""
+        await subs.load()
+        before = {
+            "invoices": len(subs.state.get("invoices", {})),
+            "users": len(subs.state.get("users", {})),
+            "seen_tx": len(subs.state.get("seen_tx", [])),
+        }
+        n = await subs._cleanup_old_invoices()
+        after = {
+            "invoices": len(subs.state.get("invoices", {})),
+            "users": len(subs.state.get("users", {})),
+            "seen_tx": len(subs.state.get("seen_tx", [])),
+        }
+        await m.answer(
+            f"🧹 <b>Чистка старых invoices</b>\n\n"
+            f"Удалено: <b>{n}</b>\n\n"
+            f"Было: invoices={before['invoices']}, users={before['users']}, "
+            f"seen_tx={before['seen_tx']}\n"
+            f"Стало: invoices={after['invoices']}, users={after['users']}, "
+            f"seen_tx={after['seen_tx']}\n\n"
+            "<i>Эта чистка автоматически выполняется раз в сутки. Используй /subs_cleanup "
+            "только если подозреваешь переполнение backup.</i>")
+
     @r.message(Command("revoke"), _ADM)
     async def cmd_revoke(m: Message, command: CommandObject) -> None:
         await subs.load()
