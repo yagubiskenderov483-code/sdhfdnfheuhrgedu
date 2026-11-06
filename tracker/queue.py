@@ -740,24 +740,23 @@ class ListingPipeline:
             return SellerResult(True, "OWNER_NOT_FOUND_SENT", "owner hidden, not found — sent with a note")
         # Владелец от funstat по доверию имени: пробуем прочитать профиль через failover
         # (resale-страница коллекции отдаёт access_hash → профиль станет доступен). Если
-        # получилось — _enrich_seller снимет флаг owner_trusted_no_resolve и мы пойдём
-        # по обычному пути через _check_seller_found. Это нужно чтобы для trust-fallback
-        # тоже отсеивать платные ЛС (Maker: 'чтоб соо не платные в лс были').
+        # получилось — _enrich_seller снимет флаг owner_trusted_no_resolve, и мы ПРОВАЛИМСЯ
+        # сквозь if в обычный путь (_check_seller_found + override-логика). Это нужно
+        # чтобы для trust-fallback тоже отсеивать платные ЛС
+        # (Maker: 'чтоб соо не платные в лс были').
         if getattr(l, "owner_trusted_no_resolve", False):
             await self._enrich_seller(l)
-            if not getattr(l, "owner_trusted_no_resolve", False):
-                # enrich удался — обычная проверка
-                sr = await self._check_seller_found(l)
-                if sr.passed:
-                    self.stats["trusted_verified_passed"] = \
-                        self.stats.get("trusted_verified_passed", 0) + 1
-                return sr
-            # enrich не смог — остаёмся на доверии, но хотя бы blacklist / то что есть
-            pre = self.seller_filter.check(l)
-            if pre.code in ("BLACKLIST", "PAID_MESSAGES"):
-                return pre
-            self.stats["owner_trusted_sent"] = self.stats.get("owner_trusted_sent", 0) + 1
-            return SellerResult(True, "OWNER_TRUSTED", "owner trusted via lookup bot (name match)")
+            if getattr(l, "owner_trusted_no_resolve", False):
+                # enrich не смог — остаёмся на доверии, но хотя бы blacklist / то что есть
+                pre = self.seller_filter.check(l)
+                if pre.code in ("BLACKLIST", "PAID_MESSAGES"):
+                    return pre
+                self.stats["owner_trusted_sent"] = self.stats.get("owner_trusted_sent", 0) + 1
+                return SellerResult(True, "OWNER_TRUSTED", "owner trusted via lookup bot (name match)")
+            # enrich удался — проваливаемся в обычный путь ниже, где работают override-правила
+            # для linguistic-кодов (FOREIGN_TEXT и т.п.) т.к. owner_found_via установлен.
+            self.stats["trusted_enriched_fallthrough"] = \
+                self.stats.get("trusted_enriched_fallthrough", 0) + 1
         sr = await self._check_seller_found(l)
         # Владелец найден через funstat: мягкая фильтрация, НО не для «жёстких» причин:
         # - BLACKLIST: сам пользователь банил
