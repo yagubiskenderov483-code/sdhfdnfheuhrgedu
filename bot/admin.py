@@ -1664,14 +1664,21 @@ def build_routers(app: "App") -> list[Router]:
     @admin.message(Command("bots_add"))
     async def cmd_bots_add(m: Message) -> None:
         """'/bots_add infostat' — добавить запасного lookup-бота в LOOKUP_BOTS.
-        Если уже есть — без изменений. Если это primary — предупредим."""
+        Если уже есть — без изменений. Если это primary — предупредим.
+
+        Валидация формата username ДО вызова set_runtime_value: раньше принимались
+        4-символьные имена (валидатор команды) и отбрасывались валидатором _bot_list
+        (нужно 5+) — результат: LOOKUP_BOTS очищался без предупреждения."""
+        import re as _re
+        _TG_RE = _re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
         arg = (m.text or "").split(maxsplit=1)
         if len(arg) < 2:
             await m.answer("Нужно имя: <code>/bots_add infostat</code>")
             return
         new_bot = arg[1].lstrip("@").strip()
-        if not new_bot or len(new_bot) < 3:
-            await m.answer("Имя слишком короткое.")
+        if not _TG_RE.match(new_bot):
+            await m.answer(f"❌ Невалидный Telegram username <code>{html.escape(new_bot)}</code>.\n\n"
+                           "Нужно: 5-32 символа, [A-Za-z0-9_], начинается с буквы.")
             return
         primary = (settings.lookup_bot_username or "").strip()
         if new_bot.lower() == primary.lower():
@@ -1683,9 +1690,14 @@ def build_routers(app: "App") -> list[Router]:
             return
         extras.append(new_bot)
         try:
-            set_runtime_value("LOOKUP_BOTS", ",".join(extras))
+            applied = set_runtime_value("LOOKUP_BOTS", ",".join(extras))
         except Exception as e:
             await m.answer(f"❌ Не удалось сохранить: {html.escape(str(e))}")
+            return
+        # Доп-проверка: если валидатор _bot_list по какой-то причине отбросил (очень длинный?),
+        # не падаем молча — сообщаем.
+        if applied is not None and new_bot.lower() not in {b.lower() for b in (applied or [])}:
+            await m.answer(f"⚠️ @{html.escape(new_bot)} не прошёл валидацию _bot_list — пропущен.")
             return
         await app.backup.save()
         pool = app.lookup._bot_pool()
@@ -1728,13 +1740,16 @@ def build_routers(app: "App") -> list[Router]:
         Эквивалентно '/set LOOKUP_BOT_USERNAME infostat' + сброс dead-mark этого бота +
         автоматическое добавление старого primary в LOOKUP_BOTS (если его там не было)
         — он будет запасным, а не потерян."""
+        import re as _re
+        _TG_RE = _re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
         arg = (m.text or "").split(maxsplit=1)
         if len(arg) < 2:
             await m.answer("Нужно имя: <code>/bots_set_primary infostat</code>")
             return
         new_bot = arg[1].lstrip("@").strip()
-        if not new_bot or len(new_bot) < 3:
-            await m.answer("Имя слишком короткое.")
+        if not _TG_RE.match(new_bot):
+            await m.answer(f"❌ Невалидный Telegram username <code>{html.escape(new_bot)}</code>.\n\n"
+                           "Нужно: 5-32 символа, [A-Za-z0-9_], начинается с буквы.")
             return
         old_primary = (settings.lookup_bot_username or "").strip()
         # 1) СНАЧАЛА установить новый primary — если он невалидный (валидация в config._lookup_bot_username),
