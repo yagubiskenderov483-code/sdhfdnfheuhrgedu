@@ -2135,6 +2135,21 @@ def build_routers(app: "App") -> list[Router]:
             if captcha:
                 captcha_solved = lk.get('captcha_auto', 0) + lk.get('captcha_random', 0)
                 lines.append(f"   ⤷ 🧩 капч {captcha} (решено {captcha_solved})")
+            # Новые счётчики резервных путей — чтобы было видно, когда hidden-owner идёт по
+            # bypass'у (все боты dead, или timeout/exception), и когда trusted-no-resolve
+            # удалось дорешать через failover-enrich (PAID_MESSAGES-фильтр отработал).
+            bypass_dead = p.get("owner_bot_dead_bypass", 0)
+            bypass_timeout = p.get("owner_bot_timeout_bypass", 0)
+            trust_enriched = p.get("trusted_enriched_fallthrough", 0)
+            if bypass_dead or bypass_timeout or trust_enriched:
+                parts = []
+                if bypass_dead:
+                    parts.append(f"bypass-dead {bypass_dead}")
+                if bypass_timeout:
+                    parts.append(f"bypass-timeout {bypass_timeout}")
+                if trust_enriched:
+                    parts.append(f"trust→enriched {trust_enriched}")
+                lines.append(f"   ⤷ 🔓 " + " · ".join(parts))
         elif not getattr(app.lookup, "any_bot_configured", lambda: False)():
             lines.append("🔍 <b>Lookup</b>: ⚠️ бот не настроен — hidden-owner лоты отсеиваются")
 
