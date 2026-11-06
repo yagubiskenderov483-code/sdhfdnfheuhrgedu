@@ -763,22 +763,34 @@ class OwnerLookup:
 
         FALLBACK: если выделенный пул LOOKUP_SESSIONS весь мёртвый (FloodWait /
         unresolvable блеклист), берём любые is_usable() сессии трекера — иначе
-        hidden-owner лоты отсеиваются глухо, пока пул не отойдёт (минуты-часы)."""
+        hidden-owner лоты отсеиваются глухо, пока пул не отойдёт (минуты-часы).
+
+        ВАЖНО: фильтруем сессию по unresolvable ТОЛЬКО если она не может достучаться
+        НИ ДО ОДНОГО бота из пула. Раньше мы смотрели только на primary — и когда
+        primary dead, или сессия случайно получила USERNAME_INVALID на primary но
+        прекрасно работает с fallback-ботами, _pick_sessions всё равно её
+        выкидывал → _find получал пустой order → silent-skip через no_session, а
+        боты живы ('не ищет иногда')."""
         want = [n for n in settings.lookup_sessions if n]
-        bot = settings.lookup_bot_username.lstrip("@")
         now = time.monotonic()
-        # Окно блеклиста unresolvable уменьшено с 600s до 120s (константа модуля) — funstat мог
-        # просто не ответить на одно сообщение (сеть, редкий glitch); незачем выводить аккаунт
-        # из пула на 10 минут. YOU_BLOCKED_USER сохраняет свою отдельную 6-часовую блокировку
-        # — туда сохраняется absolute-time + offset, см. _ask_bot_locked.
+        # Актуальный список ботов (без тех, что в глобальном dead-mark) — именно его
+        # будет перебирать _find. Если пул пуст — без фильтра по бот-специфичным меткам,
+        # _ok сводится к is_usable: нам всё равно не к кому писать, но пусть вызывающий
+        # сам увидит это через bot_pool() (no_bot_pool), а не через no_session.
+        active_bots = [b.lower() for b in self._bot_pool()]
+
         def _ok(n):
             w = self.sessions.get(n)
             if w is None or not w.is_usable():
                 return False
-            unres = self._bot_unresolvable.get((n, bot))
-            if unres and now - unres < _UNRESOLVABLE_COOLDOWN:
-                return False
-            return True
+            if not active_bots:
+                return True
+            # Сессия пригодна, если ХОТЬ ОДИН активный бот у неё не в unresolvable-блоке.
+            for b in active_bots:
+                unres = self._bot_unresolvable.get((n, b))
+                if not unres or now - unres >= _UNRESOLVABLE_COOLDOWN:
+                    return True
+            return False
 
         def _rank(n):
             w = self.sessions.get(n)
