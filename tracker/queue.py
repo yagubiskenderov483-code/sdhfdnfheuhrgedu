@@ -333,10 +333,43 @@ class ListingPipeline:
         if l.seller_id < 0:
             return
         # Владельца funstat выдал по доверию имени, резолва не было → access_hash нет
-        # ни у одной сессии. Любая попытка fetch_full_user даст
-        # 'Could not find input entity' → seller_lookup_failed → лот отбрасывается.
-        # Этот случай трактуем как успех без enrich: имя и @юз от funstat — достаточно.
-        if getattr(l, "owner_trusted_no_resolve", False):
+        # ни у одной сессии. Прямой fetch_full_user даёт 'Could not find input entity'.
+        # НО: fetch_full_user_failover сначала читает страницу маркета этой коллекции —
+        # Telegram отдаёт продавцов вместе с access_hash. Если у владельца на маркете
+        # активные лоты в той же коллекции (а это и есть исходный лот), access_hash
+        # подтянется и профиль прочитается. Это нужно чтобы для trusted-no-resolve
+        # мы всё-таки видели l.messages и могли отсеять продавцов с платным ЛС
+        # (Maker: 'чтоб соо не платные в лс были').
+        trusted_no_resolve = getattr(l, "owner_trusted_no_resolve", False)
+        if trusted_no_resolve:
+            # Пробуем именно failover (с чтением resale страницы), прямой fetch_full_user
+            # заведомо не работает без access_hash. Если и failover не смог — остаёмся
+            # с l.messages=None (как раньше), лот пройдёт как OWNER_TRUSTED.
+            try:
+                full, other = await self.sessions.run(
+                    lambda c: fetch_full_user_failover(c, l.seller_id, l.gift_id),
+                    attempts=2, timeout=15)
+                l.session_source = other
+                l.level = full.level
+                if full.premium is not None:
+                    l.premium = full.premium
+                if full.username and not l.seller_username:
+                    l.seller_username = full.username
+                    l.seller_profile_link = username_link(full.username)
+                if full.phone and not l.seller_phone:
+                    l.seller_phone = full.phone
+                l.seller_about = full.about
+                l.seller_channel = full.channel_title
+                l.seller_business = getattr(full, "business_text", None)
+                l.seller_channel_id = getattr(full, "channel_id", None)
+                l.messages = _messages_status(full.paid_message_stars, full.contact_require_premium)
+                # Снимаем флаг — теперь owner у нас реально проверен, не на доверии
+                l.owner_trusted_no_resolve = False
+                self._seller_cache[l.seller_id] = (time.monotonic(), full)
+                self.stats["trusted_enriched"] = self.stats.get("trusted_enriched", 0) + 1
+            except Exception as e:
+                # failover не прошёл — остаёмся как раньше (OWNER_TRUSTED без messages-проверки)
+                log.debug("trusted-no-resolve enrich failed for %s: %s", l.seller_id, e)
             return
         cached = self._seller_cache.get(l.seller_id)
         if cached and time.monotonic() - cached[0] < settings.seller_cache_ttl:
@@ -705,11 +738,21 @@ class ListingPipeline:
             if pre.code == "BLACKLIST":
                 return pre
             return SellerResult(True, "OWNER_NOT_FOUND_SENT", "owner hidden, not found — sent with a note")
-        # Владелец от funstat по доверию имени: профиль не читали, фильтры по профилю применить нечего.
-        # Проверяем ТОЛЬКО то, что известно до профиля: blacklist по имени И платные сообщения
-        # (видны на самой странице маркета, не требуют запроса профиля). user: 'выдает людей с
-        # платным соо убери' — это правило работает и для trusted-fallback.
+        # Владелец от funstat по доверию имени: пробуем прочитать профиль через failover
+        # (resale-страница коллекции отдаёт access_hash → профиль станет доступен). Если
+        # получилось — _enrich_seller снимет флаг owner_trusted_no_resolve и мы пойдём
+        # по обычному пути через _check_seller_found. Это нужно чтобы для trust-fallback
+        # тоже отсеивать платные ЛС (Maker: 'чтоб соо не платные в лс были').
         if getattr(l, "owner_trusted_no_resolve", False):
+            await self._enrich_seller(l)
+            if not getattr(l, "owner_trusted_no_resolve", False):
+                # enrich удался — обычная проверка
+                sr = await self._check_seller_found(l)
+                if sr.passed:
+                    self.stats["trusted_verified_passed"] = \
+                        self.stats.get("trusted_verified_passed", 0) + 1
+                return sr
+            # enrich не смог — остаёмся на доверии, но хотя бы blacklist / то что есть
             pre = self.seller_filter.check(l)
             if pre.code in ("BLACKLIST", "PAID_MESSAGES"):
                 return pre
