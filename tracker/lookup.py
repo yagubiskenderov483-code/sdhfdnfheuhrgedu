@@ -947,18 +947,33 @@ class OwnerLookup:
                 # Мульти-бот fallback: сначала primary (funstat), затем запасные из LOOKUP_BOTS.
                 # Если бот снесён и попал в _bot_dead_until, он выпадает из _bot_pool и мы его
                 # не пробуем — сразу идём на следующего. Пробуем каждую сессию на каждом боте.
+                expired_on_all = True
                 for b in bots:
+                    expired_on_bot = False
                     for session in order:
-                        cands = await self._ask_bot(session, b, seller_name, prio=prio, deadline=deadline)
+                        try:
+                            cands = await self._ask_bot(session, b, seller_name, prio=prio, deadline=deadline)
+                        except _Expired:
+                            # Дедлайн истёк. Если есть ещё бот/сессия — пробуем их.
+                            # Полностью expired только если ВСЕ пары (bot, session) истекли.
+                            expired_on_bot = True
+                            continue
+                        expired_on_all = False
                         if cands is not None:
                             used_bot = b
                             break
                     if cands is not None:
                         break
+                    if not expired_on_bot:
+                        expired_on_all = False
                     # Все сессии провалились на этом боте — если он теперь в блеклисте, пишем лог
                     if b.lower() in self._bot_dead_until:
                         log.warning("Lookup: бот @%s помечен как недоступный — fallback на следующий", b)
                 bot = used_bot
+                # Если дедлайн истёк на ВСЕХ попытках и cands всё равно None — пробрасываем _Expired
+                # чтобы _find увидел его и не кешировал результат как negative.
+                if cands is None and expired_on_all and bots:
+                    raise _Expired()
             finally:
                 self._inflight.pop(key, None)
                 if not fut.done():
