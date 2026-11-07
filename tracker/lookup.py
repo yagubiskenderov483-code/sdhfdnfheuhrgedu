@@ -381,6 +381,15 @@ class OwnerLookup:
         # Счётчик подряд идущих unresolvable-фейлов на одного бота по РАЗНЫМ сессиям.
         # Когда достигает ~половины LOOKUP_SESSIONS или 3 (меньшее) — помечаем бота как dead.
         self._bot_consec_unres: dict[str, int] = {}
+        # Сессии, которые уже внесли вклад в счётчик unresolved для этого бота. Нужно
+        # чтобы «2 подряд» действительно означало 2 РАЗНЫЕ сессии, а не одну и ту же
+        # дважды подряд (как было раньше: любые 2 USERNAME-ошибки, даже с одной и той же
+        # сессии в разные секунды, помечали бота как dead на 15 мин).
+        self._bot_unres_sessions: dict[str, set[str]] = {}
+        # Время последнего unresolved по боту — для time-decay (если за 5 мин ни одной
+        # ошибки, счётчик сбрасывается; иначе одноразовый glitch Telegram'а копится в
+        # счётчик неделями до реального шторма).
+        self._bot_unres_last_at: dict[str, float] = {}
         # on_bot_dead(bot, next_bot) — уведомить админа что lookup-бот недоступен и мы переключились
         self.on_bot_dead = None
         self._bot_dead_notified: set[str] = set()
@@ -482,16 +491,37 @@ class OwnerLookup:
             tpl = f"{tpl} {{name}}"
         return tpl.format(name=seller_name)
 
-    def _register_bot_unresolved(self, bot: str) -> None:
+    def _register_bot_unresolved(self, bot: str, session: str | None = None) -> None:
         """Инкрементирует подряд идущий счётчик unresolved на бота. При достижении порога
-        (≥3 разных сессии подряд, или ≥половины LOOKUP_SESSIONS если он настроен) —
-        помечаем бота как dead глобально на 15 минут и уведомляем админа. На успешный
-        ответ счётчик сбрасывается (см. _ask_bot_locked после успешного _send)."""
+        (≥N РАЗНЫХ сессий, а не любых N подряд) — помечаем бота как dead глобально на
+        15 минут и уведомляем админа. На успешный ответ счётчик сбрасывается.
+
+        Два изменения относительно старой версии:
+        1) Считаем только УНИКАЛЬНЫЕ сессии. Раньше код инкрементировал счётчик при каждой
+           USERNAME-ошибке, и две подряд с ОДНОЙ сессии (Telegram glitch) помечали бота
+           мёртвым. Теперь нужно 3+ разных сессии.
+        2) Time-decay: если с последнего unresolved прошло больше 5 минут, счётчик
+           сбрасывается — одиночные транзиентные glitch'и не накапливаются неделями.
+
+        Maker: 'пишет что боты мертвы хотя все живы' — это оно."""
         k = bot.lower()
+        now = time.monotonic()
+        last_at = self._bot_unres_last_at.get(k, 0.0)
+        if last_at and now - last_at > 300:
+            # 5 минут тишины — сбрасываем накопленное (одиночный glitch не накапливается)
+            self._bot_consec_unres.pop(k, None)
+            self._bot_unres_sessions.pop(k, None)
+        self._bot_unres_last_at[k] = now
+        sessions_hit = self._bot_unres_sessions.setdefault(k, set())
+        if session:
+            sessions_hit.add(session)
         self._bot_consec_unres[k] = self._bot_consec_unres.get(k, 0) + 1
-        n = self._bot_consec_unres[k]
+        # «Разных сессий» — вот что реально означает dead. Если нет имени сессии (edge-case),
+        # считаем по общему числу попыток, но с более высоким порогом.
+        n = len(sessions_hit) if sessions_hit else self._bot_consec_unres[k]
+        # Пороги: 3 разные сессии (раньше было 2), для больших пулов — половина пула.
         pool_size = max(1, len(settings.lookup_sessions or []))
-        threshold = min(3, max(2, pool_size // 2))
+        threshold = max(3, pool_size // 2)
         if n < threshold:
             return
         now = time.monotonic()
@@ -526,8 +556,9 @@ class OwnerLookup:
     def _clear_bot_unresolved(self, bot: str) -> None:
         """После успешного ответа от бота — сбрасываем счётчик подряд и снимаем dead-mark."""
         k = bot.lower()
-        if k in self._bot_consec_unres:
-            self._bot_consec_unres.pop(k, None)
+        self._bot_consec_unres.pop(k, None)
+        self._bot_unres_sessions.pop(k, None)
+        self._bot_unres_last_at.pop(k, None)
         if k in self._bot_dead_until:
             self._bot_dead_until.pop(k, None)
             self._bot_dead_notified.discard(k)
@@ -653,12 +684,26 @@ class OwnerLookup:
                 self._clear_bot_unresolved(bot)
                 log.info("Lookup liveness: @%s — alive", bot)
             else:
+                # Mark dead только если РЕАЛЬНО 3+ сессии подтвердили username-ошибку.
+                # Раньше: 3 из 3 пробованных → сразу dead на 15 мин. Проблема в том что
+                # на старте / после деплоя сессии ещё не имеют бота в своём peer-кэше
+                # и contacts.resolveUsername МОГ вернуть transient 'USERNAME_NOT_OCCUPIED'
+                # из-за реплики Telegram'а — все 3 попытки давали эту ошибку, бот
+                # помечался мёртвым, Maker видел '💀 боты мертвы хотя все живы'.
+                # Теперь проверяем ДВАЖДЫ: если <3 session_candidates, не хватает данных —
+                # не маркируем.
+                probed = min(3, len(session_candidates))
+                if probed < 3:
+                    log.warning("Lookup liveness: @%s — не смог проверить (пробовано %d сессий, "
+                                "для dead-mark нужно 3+). Пропускаем.", bot, probed)
+                    results[bot] = None     # inconclusive — не маркируем ни alive ни dead
+                    continue
                 # mark dead immediately: liveness подтвердил что все наши сессии не видят бота
                 k = bot.lower()
                 self._bot_dead_until[k] = time.monotonic() + 900
                 self.stats["bot_dead_marked"] = self.stats.get("bot_dead_marked", 0) + 1
                 log.error("Lookup liveness: @%s — DEAD (не резолвится ни на одной из %d сессий)",
-                          bot, min(3, len(session_candidates)))
+                          bot, probed)
                 if k not in self._bot_dead_notified and self.on_bot_dead:
                     self._bot_dead_notified.add(k)
                     next_bot = next((b for b in all_bots if b.lower() != k and results.get(b, True)), None)
@@ -1173,7 +1218,7 @@ class OwnerLookup:
                 # ошибку на одном боте — бот скорее всего снесли. Помечаем его как dead глобально,
                 # fallback на следующего из LOOKUP_BOTS автоматически (см. _bot_pool).
                 self.stats["bot_unresolved"] = self.stats.get("bot_unresolved", 0) + 1
-                self._register_bot_unresolved(bot)
+                self._register_bot_unresolved(bot, session=session)
             # Аккаунт заблокировал бота (владелец ЛИЧНО нажал /block в чате с ботом на этом
             # аккаунте). Пока не разблокирует — писать невозможно. Блочим на 6 часов (хранится
             # как absolute-time + смещение, cooldown-chek всегда "сейчас - stored < cooldown"
