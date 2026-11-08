@@ -20,46 +20,10 @@ class MarketplaceCoordinator(_core.MarketplaceCoordinator):
         await super()._load_state()
 
     async def full_sync(self, st, reason):
-        if not getattr(settings, "strict_new_lots", True):
-            return await super().full_sync(st, reason)
-        seen, first_top = set(), []
-        session, count, reached_end = None, 0, False
-        max_pages = settings.initial_sync_pages or 10**9
-        for _ in range(max(1, settings.sync_passes)):
-            offset, reached_end, offsets = "", False, set()
-            for page_number in range(max_pages):
-                if offset in offsets:
-                    break  # Broken/repeated API cursors must not hang a worker.
-                offsets.add(offset)
-                page, session = await self._fetch(st.gift_id, offset, 100)
-                count = page.count
-                if page_number == 0:
-                    first_top = [it.listing_id for it in page.items[:settings.page_limit]]
-                fresh = [it for it in page.items if it.unique_id not in seen]
-                seen.update(it.unique_id for it in page.items)
-                await self.db.upsert_market_items(self._row(it, MarketState.KNOWN) for it in fresh)
-                if not page.next_offset or not page.items:
-                    reached_end = True
-                    break
-                offset = page.next_offset
-            if reached_end and len(seen) >= count:
-                break
-            if not reached_end:
-                break
-        st.synced = True
-        st.complete = reached_end and len(seen) >= count
-        st.partial = not st.complete
-        st.needs_full_sync = not st.complete
-        st.baseline_pending = bool(seen)
-        st.last_count = count
-        st.prev_top = first_top
-        st.last_cursor = first_top[0] if first_top else None
-        st.last_poll, st.last_session = utcnow_iso(), session
-        await self.db.save_collection_state(st.to_row())
-        await self.db.kv_set(f"strict_baseline:v1:{st.gift_id}", "1" if st.complete else "0")
-        self._dirty.discard(st.gift_id)
-        log.info("Strict baseline %s: seen=%s count=%s complete=%s; sent=0", st.title, len(seen), count, st.complete)
-        return len(seen)
+        # Use the mature core sync algorithm. In fast mode it intentionally establishes
+        # a safe top-of-market baseline instead of requiring tens of thousands of rows
+        # before a collection may enter LIVE.
+        return await super().full_sync(st, reason)
 
     async def _apply(self, st, cls, items, session, mode, count=None):
         if not getattr(settings, "strict_new_lots", True):
