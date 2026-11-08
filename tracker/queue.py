@@ -160,9 +160,16 @@ class ListingPipeline(_core.ListingPipeline):
         if remaining_seconds(l, settings) <= 0:
             await self._discard(l, "stale: expired before sending")
             return
-        if await self._still_on_sale(l) is not True:
-            await self._discard(l, "listing changed, sold or could not be revalidated")
+        sale_state = await self._still_on_sale(l)
+        if sale_state is False:
+            await self._discard(l, "listing changed or sold during final revalidation")
             return
+        if sale_state is None:
+            # A transient Telegram/FloodWait/session failure is not evidence that the
+            # listing disappeared. Core pipeline historically treats an inconclusive
+            # recheck as non-blocking; otherwise healthy lots are mass-dropped during
+            # account throttling.
+            log.warning("Final sale revalidation inconclusive for %s; continuing", l.listing_id)
         left = remaining_seconds(l, settings)
         if left <= 0:
             await self._discard(l, "stale: expired during sale verification")
