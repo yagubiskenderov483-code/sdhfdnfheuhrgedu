@@ -47,27 +47,10 @@ class ListingPipeline(_core.ListingPipeline):
         return len(self._lookup_tasks) < 128 and super()._needs_lookup(l)
 
     async def _lookup_then_process(self, l):
-        try:
-            left = remaining_seconds(l, settings, lookup=True)
-            if left <= 0:
-                await self._discard(l, "stale: expired before owner lookup")
-                return
-            found = await asyncio.wait_for(self._lookup_owner(l), timeout=left)
-            l.lookup_done = True
-            if not found or not normalize_username(l.seller_username):
-                await self._discard(l, "owner not verified or no current username", "OWNER_NOT_FOUND")
-                return
-            if remaining_seconds(l, settings, lookup=True) <= 0:
-                await self._discard(l, "stale: expired during owner lookup")
-                return
-            await self._enqueue(ListingEvent(l, l.t_found or time.monotonic(), "lookup"))
-        except asyncio.CancelledError:
-            raise
-        except asyncio.TimeoutError:
-            await self._discard(l, "stale: owner lookup deadline expired")
-        except Exception as exc:
-            log.warning("Lookup failed for %s: %s", l.listing_id, type(exc).__name__)
-            await self._discard(l, "owner lookup failed; other listings continue", "LOOKUP_FAILED")
+        # Keep the core lookup failure policy: a bot timeout/exception is an
+        # infrastructure failure, not proof that the listing/seller is invalid.
+        # Core also re-checks whether the NFT is still on sale before continuing.
+        return await super()._lookup_then_process(l)
 
     async def _resolve_hidden_owner(self, l):
         # The old users[] display-name guess is not proof of NFT ownership.
