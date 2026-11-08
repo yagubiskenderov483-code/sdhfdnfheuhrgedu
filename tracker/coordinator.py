@@ -14,12 +14,10 @@ def __getattr__(name):
 
 class MarketplaceCoordinator(_core.MarketplaceCoordinator):
     async def _load_state(self):
+        # Keep the proven persisted market baseline from coordinator_core.
+        # Forcing every existing collection through a brand-new full baseline on deploy
+        # stalls large collections for hours and suppresses all live listings meanwhile.
         await super()._load_state()
-        if getattr(settings, "strict_new_lots", True):
-            for st in self.states.values():
-                if await self.db.kv_get(f"strict_baseline:v1:{st.gift_id}") != "1":
-                    st.complete = False
-                    st.needs_full_sync = True
 
     async def full_sync(self, st, reason):
         if not getattr(settings, "strict_new_lots", True):
@@ -74,8 +72,10 @@ class MarketplaceCoordinator(_core.MarketplaceCoordinator):
             self._dirty.add(st.gift_id)
             return 0
         fresh, silent = list(cls.new), list(cls.silent)
-        quiet = (not st.complete or st.partial or st.baseline_pending
-                 or (mode == "recover" and settings.start_fresh))
+        # coordinator_core already distinguishes safe baseline/recovery cases. Do not
+        # silence every partial collection: large Telegram markets can remain partial
+        # indefinitely, which previously blocked almost all live listings.
+        quiet = (st.baseline_pending or (mode == "recover" and settings.start_fresh))
         if quiet:
             silent += [(it, "unverified_or_baseline") for it in fresh]
             fresh = []
