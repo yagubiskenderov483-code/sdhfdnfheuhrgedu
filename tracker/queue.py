@@ -146,6 +146,14 @@ class ListingPipeline(_core.ListingPipeline):
                 or l.seller_type != "user" or not l.seller_id or l.seller_id <= 0):
             await self._reject_no_username(l)
             return
+        # Последняя проверка перед постом: ЛС бесплатно подтверждено (неизвестно = не шлём) и Level ≤ лимита
+        if settings.require_free_messages and l.messages != "бесплатно":
+            await self._discard(l, f"сообщения не бесплатные/не проверены: {l.messages or 'неизвестно'}",
+                                "PAID_MESSAGES")
+            return
+        if settings.max_seller_level > 0 and (l.level or 0) > settings.max_seller_level:
+            await self._discard(l, f"level {l.level} > {settings.max_seller_level}", "LEVEL_TOO_HIGH")
+            return
         if remaining_seconds(l, settings) <= 0:
             await self._discard(l, "stale: expired before sending")
             return

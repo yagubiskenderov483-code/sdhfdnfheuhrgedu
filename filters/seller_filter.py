@@ -159,4 +159,14 @@ class SellerFilter:
         if any(is_foreign_text(value) for value in visible_text):
             return SellerResult(False, "ARABIC_SCRIPT", "Arabic/Persian script in seller profile")
 
+        # Писать в ЛС должно быть бесплатно (не платные сообщения и не «только Premium»)
+        if (settings.require_free_messages and l.seller_type == "user"
+                and l.messages is not None and l.messages != "бесплатно"):
+            return SellerResult(False, "PAID_MESSAGES", f"сообщения: {l.messages}")
+
+        # Level продавца (stars rating); нет рейтинга = 0
+        if settings.max_seller_level > 0 and (l.level or 0) > settings.max_seller_level:
+            return SellerResult(False, "LEVEL_TOO_HIGH",
+                                f"level {l.level} > MAX_SELLER_LEVEL={settings.max_seller_level}")
+
         return SellerResult(True, "RELAXED", "seller filters relaxed")
