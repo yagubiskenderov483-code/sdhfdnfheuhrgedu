@@ -143,19 +143,25 @@ class OwnerLookup(_core.OwnerLookup):
         return None, None
 
     async def _verify(self, session, cands, seller_name, slug, unique_id):
-        """Владелец подтверждён, если:
-          1) этот NFT виден в его профиле — точно он; или
-          2) (большинство прячет подарки) бот поиска вернул РОВНО ОДНОГО человека с тем же именем,
-             и его ТЕКУЩЕЕ имя в Telegram совпадает с именем продавца на маркете дословно,
-             у него есть @username, он не бот и не удалён.
-        @username всегда берём из Telegram сейчас, а не из базы бота — поэтому старых юзов нет."""
+        """Владелец по ответу funstat (подарки в профиле Telegram теперь не видны вообще, поэтому
+        по профилю NFT не проверяем — только лишние запросы и FloodWait).
+
+        Кандидата открываем в Telegram и берём ТЕКУЩИЕ имя и @username (не из базы бота → без
+        старых юзов). Принимаем, если:
+          • ровно один кандидат с именем, дословно совпадающим с именем продавца; или
+          • кандидат с похожим именем вообще один (все совпавшие проверены).
+        Несколько одинаковых людей — не угадываем, лот не шлём."""
         unique = list({c.key(): c for c in cands}.values())
         matched = [c for c in unique if c.name and same_name(c.name, seller_name)]
-        todo = matched or unique[:max(0, settings.lookup_nomatch_check)]
-        todo = sorted(todo, key=lambda c: c.user_id is None)[:max(1, settings.lookup_max_candidates)]
+        if not matched and len(unique) == 1:
+            matched = unique                    # бот вернул одного, но имя в базе бота записано иначе
+        limit = max(1, settings.lookup_max_candidates)
+        if not matched or len(matched) > limit:
+            return None                         # всех не проверить → не угадываем
+        matched = sorted(matched, key=lambda c: c.user_id is None)
         want = _core._norm_name(seller_name)
-        name_only = []
-        for candidate in todo:
+        owners, exact = [], []
+        for candidate in matched:
             try:
                 peer, used = await self._peer_any_session(session, candidate)
                 if peer is None:
@@ -169,36 +175,24 @@ class OwnerLookup(_core.OwnerLookup):
                     continue
                 name = " ".join(v for v in (getattr(user, "first_name", None), getattr(user, "last_name", None)) if v)
                 if not same_name(name, seller_name):
-                    continue
+                    continue                    # сейчас его зовут иначе — это не продавец с маркета
                 username = normalize_username(getattr(user, "username", None) or next(
                     (u.username for u in getattr(user, "usernames", None) or [] if getattr(u, "active", False)), None))
                 if not username:
                     continue
                 owner = FoundOwner(uid, username, name, getattr(user, "premium", None), used)
-                async def check(client, peer=peer):
-                    return await profile_has_gift(client, peer, slug, unique_id)
-                try:
-                    has = await self._run(used, check, timeout=10)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    has = None            # подарки скрыты/не прочитались — неизвестно
-                if has:
-                    self.stats["verified_nft"] = self.stats.get("verified_nft", 0) + 1
-                    return owner
+                owners.append(owner)
                 if _core._norm_name(name) == want:
-                    name_only.append(owner)
+                    exact.append(owner)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 continue
-        if (getattr(settings, "lookup_trust_single_match", True) and len(matched) == 1
-                and len(name_only) == 1):
+        pick = exact[0] if len(exact) == 1 else (owners[0] if len(owners) == 1 else None)
+        if pick is not None:
             self.stats["trusted_match"] = self.stats.get("trusted_match", 0) + 1
-            llog("LOOKUP", f"{seller_name!r} → u{name_only[0].user_id} @{name_only[0].username}: "
-                           "единственное точное совпадение имени, подарки скрыты — принимаем")
-            return name_only[0]
-        return None
+            llog("LOOKUP", f"{seller_name!r} → u{pick.user_id} @{pick.username} (funstat + имя в TG)")
+        return pick
 
     async def _ask_bot_locked(self, session, bot, seller_name, _retry=True):
         gap = self._adaptive_interval() - (time.monotonic() - self._last_ask.get(session, 0))
