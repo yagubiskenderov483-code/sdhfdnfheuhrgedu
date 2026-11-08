@@ -1,0 +1,19 @@
+name: Reliability policy tests
+on:
+  push:
+    branches: [main, fix/tracker-fresh-verified-offers]
+  pull_request:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  policies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Policy boundaries and syntax without production credentials
+        run: python tests/test_reliability.py -v
