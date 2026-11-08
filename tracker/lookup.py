@@ -64,6 +64,10 @@ class OwnerLookup(_core.OwnerLookup):
         task.add_done_callback(self._notify_tasks.discard)
 
     def _register_bot_unresolved(self, bot, session=None):
+        # A slow/silent lookup bot is not a reason to disable it. Keep it in the pool
+        # indefinitely; the tracker itself is controlled only by the admin (/off/stop).
+        # We only emit a throttled diagnostic warning.
+        self._bot_dead_until.pop((bot or "").casefold(), None)
         self._warn_unavailable(bot)
 
     async def check_bots_liveness(self):
@@ -182,5 +186,7 @@ class OwnerLookup(_core.OwnerLookup):
             if not waiting and previous == text:
                 return []
             previous = text
+        # No reply is treated as a transient lookup miss, never as a global bot death.
+        self._bot_dead_until.pop((bot or "").casefold(), None)
         self._warn_unavailable(bot)
         return None
