@@ -119,10 +119,8 @@ class ListingPipeline(_core.ListingPipeline):
                 if (getattr(current, "id", None) != l.seller_id or getattr(current, "deleted", False)
                         or getattr(current, "bot", False)):
                     return False
-                if peer is None:
-                    from tracker.lookup import profile_has_gift
-                    if not await profile_has_gift(client, current, l.gift_slug, l.gift_unique_id):
-                        return False
+                # peer is None: владелец скрыт Telegram и уже подтверждён поиском — повторно по
+                # подаркам не проверяем (у большинства они скрыты → лот ложно считался «проданным»)
             elif peer is None:
                 return False
             return True

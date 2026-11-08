@@ -272,6 +272,7 @@ class Settings:
     lookup_name_check: bool = True            # найденный аккаунт должен называться так же, как владелец NFT
     lookup_nomatch_check: int = 1             # имя в ответе бота не совпало ни у кого — проверить первых N
     lookup_max_candidates: int = 3            # сколько кандидатов из ответа проверять
+    lookup_trust_single_match: bool = True  # бот вернул ОДНОГО с этим именем и имя в TG совпало дословно → владелец (подарки часто скрыты)
     lookup_trust_name_match: bool = False # имя из базы бота само по себе не подтверждает владельца
     strict_owner_verification: bool = True  # проверяем конкретный NFT, даже если legacy trust=True      # если funstat вернул ОДНОГО кандидата с совпадающим именем —
                                               # верим без проверки «NFT виден в профиле» (многие прячут подарки)
@@ -449,6 +450,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOOKUP_RESOLVE_PER_HOUR": ("lookup_resolve_per_hour", lambda v: max(1, min(200, int(v)))),
     "LOOKUP_NAME_CHECK": ("lookup_name_check", _bool_strict),
     "LOOKUP_TRUST_NAME_MATCH": ("lookup_trust_name_match", _bool_strict),
+    "LOOKUP_TRUST_SINGLE_MATCH": ("lookup_trust_single_match", _bool_strict),
     "STRICT_OWNER_VERIFICATION": ("strict_owner_verification", _bool_strict),
     "LOOKUP_NOMATCH_CHECK": ("lookup_nomatch_check", lambda v: max(0, min(10, int(v)))),
     "LOOKUP_MAX_CANDIDATES": ("lookup_max_candidates", lambda v: max(1, min(30, int(v)))),
@@ -539,6 +541,7 @@ def _from_env() -> Settings:
         lookup_skip_over=max(0, min(1000, _int(e("LOOKUP_SKIP_OVER"), 20))),
         lookup_resolve_per_hour=max(1, min(200, _int(e("LOOKUP_RESOLVE_PER_HOUR"), 15))),
         lookup_name_check=_bool(e("LOOKUP_NAME_CHECK"), True),
+        lookup_trust_single_match=_bool(e("LOOKUP_TRUST_SINGLE_MATCH"), True),
         lookup_nomatch_check=max(0, min(10, _int(e("LOOKUP_NOMATCH_CHECK"), 1))),
         lookup_max_candidates=max(1, min(30, _int(e("LOOKUP_MAX_CANDIDATES"), 3))),
         lookup_trust_name_match=_bool(e("LOOKUP_TRUST_NAME_MATCH"), False),
