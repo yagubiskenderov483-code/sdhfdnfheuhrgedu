@@ -218,8 +218,10 @@ class Settings:
     priority_share: float = 0.65         # какая доля мощности аккаунтов уходит на дорогие коллекции
     priority_poll_interval: float = 1.5  # ускорено (было 2.5): как часто опрашивать каждую дорогую коллекцию
     auto_remove_dead: bool = True        # сессию, которую снёс Telegram, удалять из трекера автоматически
-    max_lot_age: int = 1800              # ускорено: было 600, лот в очереди до 30 мин ещё релевантен (0 = выкл)
+    max_lot_age: int = 180              # ускорено: было 600, лот в очереди до 30 мин ещё релевантен (0 = выкл)
     route_by: str = "floor"              # тема по: floor (флор коллекции = цена гифта) | price (цена лота)
+    premium_over_floor_percent: int = 333  # наценка >= 333%: только редкие модель/фон или Monochrome
+    rare_attribute_percent: float = 1.5   # редкость модели или фона <= 1.5%
     max_above_floor: int = 500           # не слать лоты дороже флора коллекции больше чем на N% (0 = выкл).
     # По умолчанию 500% (6х флора): фильтрует явный overprice типа «NFT с флором 400⭐ выставлен за 20k»,
     # но пропускает редкие атрибуты (2-5х от флора — нормально). /set MAX_ABOVE_FLOOR N для изменения.
@@ -227,6 +229,7 @@ class Settings:
 
     # --- фильтр продавца ---
     russian_only: bool = True
+    block_arabic_script: bool = True      # фильтр письменности в тексте профиля, НЕ национальности
     unknown_seller_policy: str = "block"      # allow | block
     seller_name_signal: bool = False          # имя/фамилия кириллицей = русскоязычный продавец (по умолчанию выкл.)
     phone_mismatch_blocks: bool = True        # чужой телефон отсеивает сразу; false — решают тексты профиля
@@ -256,7 +259,7 @@ class Settings:
     require_username: bool = True             # слать только продавцов с @username
     gift_page_owner: bool = False             # искать скрытого владельца через страницу подарка (+1 запрос
                                               # на лот, раскрывает ~1%) — по умолчанию выкл., ищет бот поиска
-    lookup_max_age: int = 900                 # ускорено (было 300): лот старше N сек не слать после поиска. С капчами + queue увеличили
+    lookup_max_age: int = 180                 # ускорено (было 300): лот старше N сек не слать после поиска. С капчами + queue увеличили
     lookup_check_onsale: bool = True          # после поиска проверить, что лот ещё продаётся
     lookup_lang_filter: bool = False          # найденного ботом поиска владельца проверять и по языку профиля
     lookup_required: bool = True              # скрытый владелец не найден ботом поиска → лот не слать
@@ -269,7 +272,8 @@ class Settings:
     lookup_name_check: bool = True            # найденный аккаунт должен называться так же, как владелец NFT
     lookup_nomatch_check: int = 1             # имя в ответе бота не совпало ни у кого — проверить первых N
     lookup_max_candidates: int = 3            # сколько кандидатов из ответа проверять
-    lookup_trust_name_match: bool = True      # если funstat вернул ОДНОГО кандидата с совпадающим именем —
+    lookup_trust_name_match: bool = False # имя из базы бота само по себе не подтверждает владельца
+    strict_owner_verification: bool = True  # проверяем конкретный NFT, даже если legacy trust=True      # если funstat вернул ОДНОГО кандидата с совпадающим именем —
                                               # верим без проверки «NFT виден в профиле» (многие прячут подарки)
     trade_bot_username: str = ""              # @username торгового бота (напр. "iostherobot") —
                                               # кнопка «Написать» открывает его с готовым
@@ -287,6 +291,7 @@ class Settings:
     start_fresh: bool = True                 # после запуска/деплоя слать только НОВЫЕ лоты (без лотов «пока был выключен»)
     initial_sync: bool = True
     initial_sync_pages: int = 0              # 0 = все страницы (полная синхронизация, рекомендуется)
+    strict_new_lots: bool = True         # в fast-режиме не считать старые незнакомые лоты новыми без роста count
     sync_mode: str = "fast"                  # fast: база = верхняя страница (FAST_SYNC_PAGES), коллекция сразу LIVE | full: читать всё
     fast_sync_pages: int = 1
     sync_passes: int = 3                     # доп. проходы полной синхронизации, если выдача «уехала»
@@ -311,6 +316,7 @@ class Settings:
     startup_delay: float = 25.0              # пауза перед подключением аккаунтов при запуске (защита при деплое)
 
     # --- обработка ---
+    verify_sale_after_seconds: float = 15.0  # повторно проверять лот перед отправкой, если проверка продавца затянулась
     processor_workers: int = 24
     fetch_full_seller: bool = True
     seller_cache_ttl: int = 3600
@@ -402,13 +408,17 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOW_PRIORITY_POLL_INTERVAL": ("low_priority_poll_interval", _rng(5, 3600)),
     "MIN_TON": ("min_ton", lambda v: float(v.replace(",", "."))),
     "MAX_ABOVE_FLOOR": ("max_above_floor", lambda v: max(0, int(v))),
+    "PREMIUM_OVER_FLOOR_PERCENT": ("premium_over_floor_percent", lambda v: max(0, int(v))),
+    "RARE_ATTRIBUTE_PERCENT": ("rare_attribute_percent", _rng(0.1, 100.0)),
     "PRIORITY_FLOOR": ("priority_floor", lambda v: max(0, int(v))),
     "PRIORITY_SHARE": ("priority_share", lambda v: min(0.9, max(0.1, float(v.replace(",", "."))))),
     "PRIORITY_POLL_INTERVAL": ("priority_poll_interval", _rng(0.5, 600)),
     "SYNC_MODE": ("sync_mode", lambda v: _choice(v, {"fast", "full"})),
+    "STRICT_NEW_LOTS": ("strict_new_lots", _bool_strict),
     "ROUTE_BY": ("route_by", lambda v: v.strip().lower() if v.strip().lower() in ("floor", "price") else "floor"),
     "ALLOW_TON_ONLY": ("allow_ton_only", _bool_strict),
     "RUSSIAN_ONLY": ("russian_only", _bool_strict),
+    "BLOCK_ARABIC_SCRIPT": ("block_arabic_script", _bool_strict),
     "UNKNOWN_SELLER_POLICY": ("unknown_seller_policy", lambda v: _choice(v, {"allow", "block"})),
     "SELLER_NAME_SIGNAL": ("seller_name_signal", _bool_strict),
     "PHONE_MISMATCH_BLOCKS": ("phone_mismatch_blocks", _bool_strict),
@@ -436,6 +446,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOOKUP_RESOLVE_PER_HOUR": ("lookup_resolve_per_hour", lambda v: max(1, min(200, int(v)))),
     "LOOKUP_NAME_CHECK": ("lookup_name_check", _bool_strict),
     "LOOKUP_TRUST_NAME_MATCH": ("lookup_trust_name_match", _bool_strict),
+    "STRICT_OWNER_VERIFICATION": ("strict_owner_verification", _bool_strict),
     "LOOKUP_NOMATCH_CHECK": ("lookup_nomatch_check", lambda v: max(0, min(10, int(v)))),
     "LOOKUP_MAX_CANDIDATES": ("lookup_max_candidates", lambda v: max(1, min(30, int(v)))),
     "TRADE_BOT_USERNAME": ("trade_bot_username", lambda v: v.strip().lstrip("@")),
@@ -457,6 +468,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "SELLER_REPEAT_HOURS": ("seller_repeat_hours", _rng(0, 87600)),
     "ALLOW_ALL_USERS": ("allow_all_users", _bool_strict),
     "FETCH_FULL_SELLER": ("fetch_full_seller", _bool_strict),
+    "VERIFY_SALE_AFTER_SECONDS": ("verify_sale_after_seconds", _rng(0, 3600)),
 }
 
 
@@ -489,14 +501,17 @@ def _from_env() -> Settings:
         low_priority_hot_min=max(1.0, _float(e("LOW_PRIORITY_HOT_MIN"), 10.0)),
         min_ton=_float(e("MIN_TON"), 0.0),
         max_above_floor=max(0, _int(e("MAX_ABOVE_FLOOR"), 500)),
+        premium_over_floor_percent=max(0, _int(e("PREMIUM_OVER_FLOOR_PERCENT"), 333)),
+        rare_attribute_percent=max(0.1, min(100.0, _float(e("RARE_ATTRIBUTE_PERCENT"), 1.5))),
         priority_floor=max(0, _int(e("PRIORITY_FLOOR"), 2500)),
         priority_poll_interval=max(0.5, _float(e("PRIORITY_POLL_INTERVAL"), 1.5)),
         priority_share=min(0.9, max(0.1, _float(e("PRIORITY_SHARE"), 0.65))),
-        max_lot_age=max(0, _int(e("MAX_LOT_AGE"), 1800)),
+        max_lot_age=max(0, _int(e("MAX_LOT_AGE"), 180)),
         auto_remove_dead=_bool(e("AUTO_REMOVE_DEAD"), True),
         route_by=("price" if (e("ROUTE_BY") or "").strip().lower() == "price" else "floor"),
         allow_ton_only=_bool(e("ALLOW_TON_ONLY"), False),
         russian_only=_bool(e("RUSSIAN_ONLY"), True),
+        block_arabic_script=_bool(e("BLOCK_ARABIC_SCRIPT"), True),
         unknown_seller_policy=(e("UNKNOWN_SELLER_POLICY") or "block").strip().lower(),
         seller_name_signal=_bool(e("SELLER_NAME_SIGNAL"), False),
         phone_mismatch_blocks=_bool(e("PHONE_MISMATCH_BLOCKS"), True),
@@ -511,7 +526,7 @@ def _from_env() -> Settings:
         lookup_required=_bool(e("LOOKUP_REQUIRED"), True),
         require_username=_bool(e("REQUIRE_USERNAME"), True),
         gift_page_owner=_bool(e("GIFT_PAGE_OWNER"), False),
-        lookup_max_age=max(0, min(86400, _int(e("LOOKUP_MAX_AGE"), 900))),
+        lookup_max_age=max(0, min(86400, _int(e("LOOKUP_MAX_AGE"), 180))),
         start_fresh=_bool(e("START_FRESH"), True),
         lookup_check_onsale=_bool(e("LOOKUP_CHECK_ONSALE"), True),
         lookup_lang_filter=_bool(e("LOOKUP_LANG_FILTER"), False),
@@ -523,7 +538,8 @@ def _from_env() -> Settings:
         lookup_name_check=_bool(e("LOOKUP_NAME_CHECK"), True),
         lookup_nomatch_check=max(0, min(10, _int(e("LOOKUP_NOMATCH_CHECK"), 1))),
         lookup_max_candidates=max(1, min(30, _int(e("LOOKUP_MAX_CANDIDATES"), 3))),
-        lookup_trust_name_match=_bool(e("LOOKUP_TRUST_NAME_MATCH"), True),
+        lookup_trust_name_match=_bool(e("LOOKUP_TRUST_NAME_MATCH"), False),
+        strict_owner_verification=_bool(e("STRICT_OWNER_VERIFICATION"), True),
         trade_bot_username=(e("TRADE_BOT_USERNAME") or "").strip().lstrip("@"),
         unique_gifts=_bool(e("UNIQUE_GIFTS"), True),
         require_free_messages=_bool(e("REQUIRE_FREE_MESSAGES"), True),
@@ -538,6 +554,7 @@ def _from_env() -> Settings:
         initial_sync=_bool(e("INITIAL_SYNC"), True),
         initial_sync_pages=max(0, _int(e("INITIAL_SYNC_PAGES"), 0)),
         sync_passes=max(1, _int(e("SYNC_PASSES"), 3)),
+        strict_new_lots=_bool(e("STRICT_NEW_LOTS"), True),
         sync_mode=("full" if (e("SYNC_MODE") or "").strip().lower() == "full" else "fast"),
         fast_sync_pages=max(1, min(20, _int(e("FAST_SYNC_PAGES"), 1))),
         resync_retry_seconds=max(10.0, _float(e("RESYNC_RETRY_SECONDS"), 300.0)),
@@ -555,6 +572,7 @@ def _from_env() -> Settings:
         accounts_per_proxy=max(1, _int(e("ACCOUNTS_PER_PROXY"), 3)),
         startup_delay=max(0.0, _float(e("STARTUP_DELAY"), 25.0)),
         processor_workers=max(1, _int(e("PROCESSOR_WORKERS"), 24)),
+        verify_sale_after_seconds=max(0.0, min(3600.0, _float(e("VERIFY_SALE_AFTER_SECONDS"), 15.0))),
         fetch_full_seller=_bool(e("FETCH_FULL_SELLER"), True),
         seller_cache_ttl=max(0, _int(e("SELLER_CACHE_TTL"), 3600)),
         send_interval=max(0.0, _float(e("SEND_INTERVAL"), 1.1)),

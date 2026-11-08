@@ -1,14 +1,7 @@
-"""
-Фильтр цены. Никакой конвертации Stars ↔ TON по выдуманному курсу:
-  • если у лота есть цена в Stars → проходит при stars >= MIN_STARS;
-  • если лот продаётся ТОЛЬКО за TON (resale_ton_only / нет цены в Stars) →
-    проходит только при ALLOW_TON_ONLY=true и ton >= MIN_TON;
-  • если MIN_TON > 0 и у лота есть обе цены — должны выполняться оба порога.
-"""
+"""API prices only. Rare patterns alone do not excuse a high markup."""
 from __future__ import annotations
-
 from dataclasses import dataclass
-
+from decimal import Decimal, InvalidOperation
 from config import settings
 from database.models import Listing
 
@@ -19,44 +12,47 @@ class FilterResult:
     reason: str
 
 
+def _rare(value):
+    text = (value or "").strip().casefold()
+    if text in {"rare", "epic", "legendary", "\u0440\u0435\u0434\u043a\u0430\u044f", "\u044d\u043f\u0438\u0447\u0435\u0441\u043a\u0430\u044f", "\u043b\u0435\u0433\u0435\u043d\u0434\u0430\u0440\u043d\u0430\u044f"}:
+        return True
+    if not text.endswith("%"):
+        return False
+    try:
+        rarity = Decimal(text[:-1].replace(",", "."))
+        return rarity.is_finite() and Decimal(0) < rarity <= Decimal(str(getattr(settings, "rare_attribute_percent", 1.5)))
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def premium_exception(l):
+    monochrome = any((v or "").strip().casefold() in {"monochrome", "\u043c\u043e\u043d\u043e\u0445\u0440\u043e\u043c"}
+                     for v in (l.model, l.backdrop))
+    return monochrome or _rare(l.model_rarity) or _rare(l.backdrop_rarity)
+
+
 class PriceFilter:
     def check(self, l: Listing) -> FilterResult:
-        # Один порог: если задан COLLECTION_MIN_FLOOR, лоты идут от него же (флор 3000 → лоты от 3000).
-        # MIN_STARS используется, только когда флор не задан (COLLECTION_MIN_FLOOR=0).
-        min_stars = settings.collection_min_floor or settings.min_stars
-        min_ton = settings.min_ton
-        ton = l.ton_price
-
-        # Лот только за TON: Telegram всё равно присылает и пересчитанную цену в Stars,
-        # поэтому смотрим на флаг, а не на наличие цены в Stars
-        if getattr(l, "ton_only", False):
-            if not settings.allow_ton_only:
-                return FilterResult(False, "TON-only listing (ALLOW_TON_ONLY=false)")
-            if ton is not None and ton < min_ton:
-                return FilterResult(False, f"{ton:g} TON < {min_ton:g}")
-            if l.stars_price is not None and l.stars_price < min_stars:
-                return FilterResult(False, f"≈{l.stars_price} Stars < {min_stars}")
+        stars, ton = l.stars_price, l.ton_price
+        ton_only = l.ton_only or stars is None
+        if (stars is None and ton is None) or (stars is not None and stars <= 0) or (ton is not None and ton <= 0):
+            return FilterResult(False, "no positive price in API response")
+        if ton_only and not settings.allow_ton_only:
+            return FilterResult(False, "TON-only listing (ALLOW_TON_ONLY=false)")
+        if l.ton_only and ton is None:
+            return FilterResult(False, "TON-only listing has no TON price")
+        minimum = settings.collection_min_floor or settings.min_stars
+        if stars is not None and stars < minimum:
+            return FilterResult(False, f"{stars} Stars < {minimum}")
+        if ton is not None and ton < settings.min_ton:
+            return FilterResult(False, f"{ton:g} TON < {settings.min_ton:g}")
+        threshold = getattr(settings, "premium_over_floor_percent", 333)
+        if stars is not None and l.floor_stars and l.floor_stars > 0:
+            over = (stars - l.floor_stars) * 100
+            special = premium_exception(l)
+            if threshold > 0 and over >= l.floor_stars * threshold and not special:
+                return FilterResult(False, f"premium >= {threshold}% above floor; no rare model/backdrop or Monochrome")
             cap = settings.max_above_floor
-            if cap and l.floor_stars and l.stars_price and l.stars_price > l.floor_stars * (1 + cap / 100):
-                return FilterResult(False, f"≈{l.stars_price} Stars дороже флора {l.floor_stars} больше чем на {cap}%")
-            return FilterResult(True, f"TON-only {ton:g} TON" if ton is not None else "TON-only")
-
-        if l.stars_price is not None:
-            if l.stars_price < min_stars:
-                return FilterResult(False, f"{l.stars_price} Stars < {min_stars}")
-            if min_ton > 0 and ton is not None and ton < min_ton:
-                return FilterResult(False, f"{ton:g} TON < {min_ton:g}")
-            cap = settings.max_above_floor
-            if cap and l.floor_stars and l.stars_price > l.floor_stars * (1 + cap / 100):
-                over = (l.stars_price - l.floor_stars) / l.floor_stars * 100
-                return FilterResult(False, f"{l.stars_price} Stars на {over:.0f}% дороже флора {l.floor_stars}")
-            return FilterResult(True, f"{l.stars_price} Stars >= {min_stars}")
-
-        if ton is not None:
-            if not settings.allow_ton_only:
-                return FilterResult(False, "TON-only listing (ALLOW_TON_ONLY=false)")
-            if ton < min_ton:
-                return FilterResult(False, f"{ton:g} TON < {min_ton:g}")
-            return FilterResult(True, f"{ton:g} TON >= {min_ton:g}")
-
-        return FilterResult(False, "no price in API response")
+            if cap > 0 and over > l.floor_stars * cap and not (threshold > 0 and special):
+                return FilterResult(False, f"{stars} Stars above floor {l.floor_stars} by more than {cap}%")
+        return FilterResult(True, "API price and attribute rules passed")
