@@ -68,17 +68,13 @@ class ListingPipeline(_core.ListingPipeline):
             l.seller_profile_link = username_link(l.seller_username)
 
     async def _check_seller(self, l):
-        if getattr(l, "owner_not_found", False) or getattr(l, "owner_trusted_no_resolve", False):
-            return SellerResult(False, "OWNER_NOT_FOUND", "owner is not verified")
-        if not normalize_username(l.seller_username):
-            return SellerResult(False, "NO_USERNAME", "seller has no current username")
-        result = await self._check_seller_found(l)
-        if getattr(l, "seller_lookup_failed", False):
-            return SellerResult(False, "LOOKUP_FAILED", "seller profile unavailable")
-        if not normalize_username(l.seller_username):
-            return SellerResult(False, "NO_USERNAME", "seller username was removed")
-        # Found owners do not bypass language, paid-message, blacklist or level rules.
-        return result
+        # Preserve the core infrastructure-failure fallback for verified lookup owners
+        # and hidden-owner timeout cases. The wrapper used to convert temporary profile
+        # read failures into hard rejects, which amplified FloodWait into lost lots.
+        if l.seller_username:
+            l.seller_username = normalize_username(l.seller_username)
+            l.seller_profile_link = username_link(l.seller_username)
+        return await super()._check_seller(l)
 
     async def _still_on_sale(self, l):
         from telethon import types
