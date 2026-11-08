@@ -1,4 +1,4 @@
-"""Acknowledge slow controls and report errors without replaying side effects."""
+"""Keep the admin bot responsive: acknowledge slow commands, never swallow a repeated command."""
 from __future__ import annotations
 import asyncio
 import logging
@@ -7,10 +7,13 @@ from aiogram.types import CallbackQuery, Message
 
 log = logging.getLogger(__name__)
 
+_ACK_AFTER = 3.0      # команда дольше 3 с — пишем «выполняю», чтобы не жали повторно
+_STILL_AFTER = 25.0   # дольше 25 с — ещё одно сообщение, что команда жива
+
 
 class ResponsiveReplies(BaseMiddleware):
     def __init__(self):
-        self.active = set()
+        self.active_callbacks = set()
 
     async def __call__(self, handler, event, data):
         callback = isinstance(event, CallbackQuery)
@@ -22,26 +25,33 @@ class ResponsiveReplies(BaseMiddleware):
         text = (event.data or "") if callback else (message.text or "")
         if not callback and not text.startswith("/") and text not in labels:
             return await handler(event, data)
-        key = (event.from_user.id if event.from_user else 0, message.chat.id, text,
-               message.message_id if callback else 0)
 
-        async def notice(text):
+        async def notice(msg):
             try:
                 if callback:
-                    await event.answer(text)
+                    await event.answer(msg)
                 else:
-                    await message.answer(text)
+                    await message.answer(msg)
             except Exception:
                 log.debug("Control notice could not be delivered")
 
-        if key in self.active:
-            await notice("Команда уже выполняется.")
-            return None
-        self.active.add(key)
+        # Двойное нажатие одной и той же inline-кнопки гасим (чтобы не сделать действие дважды).
+        # Команды текстом НЕ гасим: раньше повтор команды отвечал «уже выполняется» и молча
+        # выкидывался — из-за этого приходилось писать по несколько раз.
+        key = None
+        if callback:
+            key = (event.from_user.id if event.from_user else 0, message.chat.id, text, message.message_id)
+            if key in self.active_callbacks:
+                await notice("Уже выполняю…")
+                return None
+            self.active_callbacks.add(key)
 
         async def acknowledge():
-            await asyncio.sleep(0.7 if callback else 1.2)
-            await notice("Команда принята, выполняю.")
+            await asyncio.sleep(_ACK_AFTER)
+            await notice("⏳ Выполняю…")
+            if not callback:
+                await asyncio.sleep(_STILL_AFTER - _ACK_AFTER)
+                await notice("⏳ Всё ещё выполняется — ответ придёт, повторять не нужно.")
 
         task = asyncio.create_task(acknowledge())
         try:
@@ -49,10 +59,11 @@ class ResponsiveReplies(BaseMiddleware):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            log.error("Control handler failed: %s", type(exc).__name__)
-            await notice("Ошибка команды. Перед повтором проверь /status; трекер продолжает работу.")
+            log.exception("Control handler failed: %s", type(exc).__name__)
+            await notice("Ошибка команды, трекер продолжает работу. Попробуй ещё раз.")
             return None
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-            self.active.discard(key)
+            if key is not None:
+                self.active_callbacks.discard(key)

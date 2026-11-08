@@ -34,6 +34,14 @@ class ListingPipeline(_core.ListingPipeline):
             await self._discard(l, "missing canonical NFT link")
             return
         l.gift_slug = l.gift_link.rsplit("/", 1)[-1]
+        # Свежесть: если трекер увидел лот позже MAX_DETECT_SECS после его появления — это уже
+        # «старый» лот (его успели увидеть другие), не шлём. Проверяем один раз, до поиска владельца.
+        limit = getattr(settings, "max_detect_secs", 0)
+        t_detect, t_found = getattr(l, "t_detect", None), getattr(l, "t_found", None)
+        if (ev.mode != "lookup" and limit > 0 and t_detect is not None and t_found is not None
+                and t_found - t_detect > limit):
+            await self._discard(l, f"stale: detected {t_found - t_detect:.0f}s after listing (> {limit}s)")
+            return
         left = remaining_seconds(l, settings)
         if left <= 0:
             await self._discard(l, "stale: delivery deadline expired")
@@ -133,7 +141,9 @@ class ListingPipeline(_core.ListingPipeline):
             return None
 
     async def _send_stage(self, ev, l, base, t_start):
-        if not normalize_username(l.seller_username):
+        # Жёстко: только продавец-человек с реальным @username (не «владелец не найден», не канал).
+        if (not normalize_username(l.seller_username) or getattr(l, "owner_not_found", False)
+                or l.seller_type != "user" or not l.seller_id or l.seller_id <= 0):
             await self._reject_no_username(l)
             return
         if remaining_seconds(l, settings) <= 0:

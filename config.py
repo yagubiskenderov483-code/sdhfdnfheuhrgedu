@@ -218,7 +218,7 @@ class Settings:
     priority_share: float = 0.65         # какая доля мощности аккаунтов уходит на дорогие коллекции
     priority_poll_interval: float = 1.5  # ускорено (было 2.5): как часто опрашивать каждую дорогую коллекцию
     auto_remove_dead: bool = True        # сессию, которую снёс Telegram, удалять из трекера автоматически
-    max_lot_age: int = 180              # ускорено: было 600, лот в очереди до 30 мин ещё релевантен (0 = выкл)
+    max_lot_age: int = 120              # ускорено: было 600, лот в очереди до 30 мин ещё релевантен (0 = выкл)
     route_by: str = "floor"              # тема по: floor (флор коллекции = цена гифта) | price (цена лота)
     premium_over_floor_percent: int = 333  # наценка >= 333%: только редкие модель/фон или Monochrome
     rare_attribute_percent: float = 1.5   # редкость модели или фона <= 1.5%
@@ -259,7 +259,7 @@ class Settings:
     require_username: bool = True             # слать только продавцов с @username
     gift_page_owner: bool = False             # искать скрытого владельца через страницу подарка (+1 запрос
                                               # на лот, раскрывает ~1%) — по умолчанию выкл., ищет бот поиска
-    lookup_max_age: int = 180                 # ускорено (было 300): лот старше N сек не слать после поиска. С капчами + queue увеличили
+    lookup_max_age: int = 120                 # ускорено (было 300): лот старше N сек не слать после поиска. С капчами + queue увеличили
     lookup_check_onsale: bool = True          # после поиска проверить, что лот ещё продаётся
     lookup_lang_filter: bool = False          # найденного ботом поиска владельца проверять и по языку профиля
     lookup_required: bool = True              # скрытый владелец не найден ботом поиска → лот не слать
@@ -291,6 +291,7 @@ class Settings:
     start_fresh: bool = True                 # после запуска/деплоя слать только НОВЫЕ лоты (без лотов «пока был выключен»)
     initial_sync: bool = True
     initial_sync_pages: int = 0              # 0 = все страницы (полная синхронизация, рекомендуется)
+    max_detect_secs: int = 30            # лот, который трекер увидел позже N сек после появления, — старый, не шлём (0 = выкл)
     strict_new_lots: bool = True         # в fast-режиме не считать старые незнакомые лоты новыми без роста count
     sync_mode: str = "fast"                  # fast: база = верхняя страница (FAST_SYNC_PAGES), коллекция сразу LIVE | full: читать всё
     fast_sync_pages: int = 1
@@ -359,8 +360,8 @@ class Settings:
                 if stars >= lo and (hi is None or stars < hi):
                     return chat, thread
             lo, _hi, chat, thread = min(self.price_routes, key=lambda r: r[0])
-            if lo * 0.9 <= stars < lo:
-                return chat, thread        # чуть ниже самой нижней границы (флор просел) — в нижнюю тему
+            if stars < lo:
+                return chat, thread        # всё что ниже нижней границы (напр. <400) — в нижнюю тему (400-1000)
         return self.target_chat_id, None
 
     def public_view(self) -> dict[str, Any]:
@@ -415,6 +416,8 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "PRIORITY_POLL_INTERVAL": ("priority_poll_interval", _rng(0.5, 600)),
     "SYNC_MODE": ("sync_mode", lambda v: _choice(v, {"fast", "full"})),
     "STRICT_NEW_LOTS": ("strict_new_lots", _bool_strict),
+    "MAX_DETECT_SECS": ("max_detect_secs", lambda v: max(0, min(3600, int(v)))),
+    "MAX_LOT_AGE": ("max_lot_age", lambda v: max(0, min(3600, int(v)))),
     "ROUTE_BY": ("route_by", lambda v: v.strip().lower() if v.strip().lower() in ("floor", "price") else "floor"),
     "ALLOW_TON_ONLY": ("allow_ton_only", _bool_strict),
     "RUSSIAN_ONLY": ("russian_only", _bool_strict),
@@ -506,7 +509,7 @@ def _from_env() -> Settings:
         priority_floor=max(0, _int(e("PRIORITY_FLOOR"), 2500)),
         priority_poll_interval=max(0.5, _float(e("PRIORITY_POLL_INTERVAL"), 1.5)),
         priority_share=min(0.9, max(0.1, _float(e("PRIORITY_SHARE"), 0.65))),
-        max_lot_age=max(0, _int(e("MAX_LOT_AGE"), 180)),
+        max_lot_age=max(0, _int(e("MAX_LOT_AGE"), 120)),
         auto_remove_dead=_bool(e("AUTO_REMOVE_DEAD"), True),
         route_by=("price" if (e("ROUTE_BY") or "").strip().lower() == "price" else "floor"),
         allow_ton_only=_bool(e("ALLOW_TON_ONLY"), False),
@@ -526,7 +529,7 @@ def _from_env() -> Settings:
         lookup_required=_bool(e("LOOKUP_REQUIRED"), True),
         require_username=_bool(e("REQUIRE_USERNAME"), True),
         gift_page_owner=_bool(e("GIFT_PAGE_OWNER"), False),
-        lookup_max_age=max(0, min(86400, _int(e("LOOKUP_MAX_AGE"), 180))),
+        lookup_max_age=max(0, min(86400, _int(e("LOOKUP_MAX_AGE"), 120))),
         start_fresh=_bool(e("START_FRESH"), True),
         lookup_check_onsale=_bool(e("LOOKUP_CHECK_ONSALE"), True),
         lookup_lang_filter=_bool(e("LOOKUP_LANG_FILTER"), False),
@@ -555,6 +558,7 @@ def _from_env() -> Settings:
         initial_sync_pages=max(0, _int(e("INITIAL_SYNC_PAGES"), 0)),
         sync_passes=max(1, _int(e("SYNC_PASSES"), 3)),
         strict_new_lots=_bool(e("STRICT_NEW_LOTS"), True),
+        max_detect_secs=max(0, min(3600, _int(e("MAX_DETECT_SECS"), 30))),
         sync_mode=("full" if (e("SYNC_MODE") or "").strip().lower() == "full" else "fast"),
         fast_sync_pages=max(1, min(20, _int(e("FAST_SYNC_PAGES"), 1))),
         resync_retry_seconds=max(10.0, _float(e("RESYNC_RETRY_SECONDS"), 300.0)),

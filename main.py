@@ -18,11 +18,16 @@ class App(_core.App):
         self.dp.message.middleware(responsive)
         self.dp.callback_query.middleware(responsive)
 
-    async def _notify_bot_dead(self, bot, next_bot=None):
-        text = (f"⚠️ Lookup-бот @{html.escape(bot)} не отвечает или недоступен.\n"
-                "Причина не подтверждена: возможен временный сбой, переименование или удаление.\n\n"
-                "Трекер продолжает работу. Основной бот не изменён; аккаунты не отключены. "
-                "Лоты без проверенного владельца и @username не публикуются.")
+    async def _notify_bot_dead(self, bot, next_bot=None, kind="silent"):
+        b = html.escape(bot)
+        if kind == "back":
+            text = f"✅ Lookup-бот @{b} снова отвечает."
+        elif kind == "missing":
+            text = (f"⚠️ Lookup-бот @{b} не находится — похоже, его снесли или переименовали.\n"
+                    "Трекер работает дальше, поиск идёт через запасных ботов (если они есть).")
+        else:
+            text = (f"⚠️ Lookup-бот @{b} не отвечает.\n"
+                    "Трекер работает дальше: следующие 10 мин сначала спрашиваю запасных ботов, потом снова его.")
         async def notify(chat):
             try:
                 await asyncio.wait_for(self.bot.send_message(chat, text), timeout=8)

@@ -27,9 +27,13 @@ def listing_keyboard(l, with_seller=True):
         url = username_link(username)
         trade_bot = normalize_username(getattr(settings, "trade_bot_username", ""))
         offer = _core._trade_offer(l) if trade_bot else None
-        if trade_bot and offer and link:
-            amount, unit = offer
-            text = f"@{trade_bot} {link} {amount} {unit}".rstrip()
+        if trade_bot and link:
+            # ссылка на NFT в оффере ВСЕГДА (раньше без рассчитанной цены оффер уходил пустым)
+            if offer:
+                amount, unit = offer
+                text = f"@{trade_bot} {link} {amount} {unit}".rstrip()
+            else:
+                text = f"@{trade_bot} {link}"
             url += "?text=" + quote(text, safe="")
         actions.append(InlineKeyboardButton(text="\u041d\u0430\u043f\u0438\u0441\u0430\u0442\u044c", url=url))
     if actions:

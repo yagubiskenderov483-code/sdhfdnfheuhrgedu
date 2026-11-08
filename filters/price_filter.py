@@ -25,10 +25,21 @@ def _rare(value):
         return False
 
 
+_MONO_WORDS = ("monochrome", "\u043c\u043e\u043d\u043e\u0445\u0440\u043e\u043c")
+
+
+def is_monochrome(l) -> bool:
+    """Монохром в модели, фоне или узоре (в т.ч. «Monochrome Black» и т.п.)."""
+    for v in (l.model, l.backdrop, getattr(l, "symbol", None)):
+        text = (v or "").casefold()
+        if any(w in text for w in _MONO_WORDS):
+            return True
+    return False
+
+
 def premium_exception(l):
-    monochrome = any((v or "").strip().casefold() in {"monochrome", "\u043c\u043e\u043d\u043e\u0445\u0440\u043e\u043c"}
-                     for v in (l.model, l.backdrop))
-    return monochrome or _rare(l.model_rarity) or _rare(l.backdrop_rarity)
+    """+333% к флору и выше пропускаем ТОЛЬКО если редкая модель, редкий фон или монохром."""
+    return is_monochrome(l) or _rare(l.model_rarity) or _rare(l.backdrop_rarity)
 
 
 class PriceFilter:

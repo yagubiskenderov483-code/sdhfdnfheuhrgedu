@@ -13,6 +13,15 @@ def __getattr__(name):
 
 
 class OwnerLookup(_core.OwnerLookup):
+    _SILENT_COOLDOWN = 600.0   # молчащий бот уходит в конец очереди на 10 мин (но НЕ выключается)
+    _WARN_EVERY = 900.0        # одно и то же предупреждение — не чаще раза в 15 мин
+
+    def _silent_map(self):
+        m = getattr(self, "_silent_until", None)
+        if m is None:
+            self._silent_until = m = {}
+        return m
+
     def _bot_pool(self):
         result, seen = [], set()
         for raw in [settings.lookup_bot_username] + list(settings.lookup_bots or []):
@@ -20,7 +29,10 @@ class OwnerLookup(_core.OwnerLookup):
             if bot and bot.casefold() not in seen:
                 seen.add(bot.casefold())
                 result.append(bot)
-        return result
+        # Бот, который недавно молчал, спрашиваем ПОСЛЕДНИМ — иначе каждый лот ждёт его таймаут
+        # (из-за этого поиск тормозил). Из пула не убираем: если запасных нет, спросим его же.
+        now, silent = time.monotonic(), self._silent_map()
+        return sorted(result, key=lambda b: silent.get(b.casefold(), 0) > now)
 
     async def load_persisted_bot_deads(self):
         self._bot_dead_until.clear()
@@ -42,18 +54,35 @@ class OwnerLookup(_core.OwnerLookup):
             # One gift failing verification must not suppress every seller with that name.
             self._neg_cache.pop(key, None)
 
-    def _warn_unavailable(self, bot):
+    def _warn_unavailable(self, bot, kind="silent"):
+        """kind: silent — не отвечает; missing — не находится (снесли/переименовали); back — снова отвечает."""
+        bot = (bot or "").lstrip("@")
+        if not bot:
+            return
+        if kind != "back":
+            self._silent_map()[bot.casefold()] = time.monotonic() + self._SILENT_COOLDOWN
         recent = getattr(self, "_warning_times", None)
         if recent is None:
             self._warning_times = recent = {}
-        now, key = time.monotonic(), bot.casefold()
-        if key in recent and now - recent[key] < 300:
-            return
-        recent[key] = now
+        warned = getattr(self, "_warned_bots", None)
+        if warned is None:
+            self._warned_bots = warned = set()
+        now, key = time.monotonic(), (bot.casefold(), kind)
+        if kind == "back":
+            if bot.casefold() not in warned:
+                return                       # о восстановлении пишем только если раньше предупреждали
+            warned.discard(bot.casefold())
+        else:
+            if key in recent and now - recent[key] < self._WARN_EVERY:
+                return
+            recent[key] = now
+            warned.add(bot.casefold())
         if not self.on_bot_dead:
             return
         async def notify():
             try:
+                await asyncio.wait_for(self.on_bot_dead(bot, None, kind), timeout=10)
+            except TypeError:
                 await asyncio.wait_for(self.on_bot_dead(bot, None), timeout=10)
             except Exception:
                 log.warning("Could not send lookup warning for @%s", bot)
@@ -63,12 +92,17 @@ class OwnerLookup(_core.OwnerLookup):
         self._notify_tasks.add(task)
         task.add_done_callback(self._notify_tasks.discard)
 
+    def _clear_bot_unresolved(self, bot):
+        super()._clear_bot_unresolved(bot)
+        key = (bot or "").lstrip("@").casefold()
+        if self._silent_map().pop(key, None) is not None:
+            log.info("Lookup: @%s снова отвечает", bot)
+        self._warn_unavailable(bot, "back")
+
     def _register_bot_unresolved(self, bot, session=None):
-        # A slow/silent lookup bot is not a reason to disable it. Keep it in the pool
-        # indefinitely; the tracker itself is controlled only by the admin (/off/stop).
-        # We only emit a throttled diagnostic warning.
+        # Молчащий бот не выключается — только уходит в конец очереди и шлётся предупреждение.
         self._bot_dead_until.pop((bot or "").casefold(), None)
-        self._warn_unavailable(bot)
+        self._warn_unavailable(bot, "silent")
 
     async def check_bots_liveness(self):
         results = {}
@@ -91,7 +125,7 @@ class OwnerLookup(_core.OwnerLookup):
                     results[bot] = None
                     break
             if results[bot] is False:
-                self._warn_unavailable(bot)
+                self._warn_unavailable(bot, "missing")
         return results
 
     async def _verify(self, session, cands, seller_name, slug, unique_id):
@@ -144,8 +178,11 @@ class OwnerLookup(_core.OwnerLookup):
             sent = await self._run(session, send, timeout=10)
         except asyncio.CancelledError:
             raise
+        except (ValueError, TypeError):
+            self._warn_unavailable(bot, "missing")   # username не резолвится — бота снесли/переименовали
+            return None
         except Exception:
-            self._warn_unavailable(bot)
+            self._warn_unavailable(bot, "silent")
             return None
         self._last_ask[session] = time.monotonic()
         self._last_response_text.pop(session, None)
@@ -188,5 +225,5 @@ class OwnerLookup(_core.OwnerLookup):
             previous = text
         # No reply is treated as a transient lookup miss, never as a global bot death.
         self._bot_dead_until.pop((bot or "").casefold(), None)
-        self._warn_unavailable(bot)
+        self._warn_unavailable(bot, "silent")
         return None
