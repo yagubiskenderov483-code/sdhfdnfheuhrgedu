@@ -140,95 +140,22 @@ class SellerFilter:
         return bool(l.seller_username and l.seller_username.lower() in names)
 
     def check(self, l: Listing) -> SellerResult:
+        # Minimal seller policy: keep explicit blacklist and block Arabic/Persian
+        # script anywhere visible in the seller profile. All former nationality,
+        # phone, bio, level, NFT-count and paid-message heuristics are intentionally
+        # non-blocking. Username presence/currentness is enforced by tracker/queue.
         if self._match(l, self.black_ids, self.black_names):
             return SellerResult(False, "BLACKLIST", "seller in blacklist")
 
-        # Telegram в октябре 26 начал скрывать владельцев NFT: owner_id и host_id отсутствуют,
-        # видно только owner_name. Профиля нет → обычный RUSSIAN_ONLY неприменим.
-        # Логика: имя (owner_name) — единственный доступный сигнал. На нём и фильтруем.
-        if l.seller_type is None and l.seller_id is None:
-            name = (l.seller_name or "").strip()
-            # 0a) слишком короткое имя — минимум 5 букв (ар, k, G., ры — мусор)
-            if _letter_count(name) < 5:
-                return SellerResult(False, "SHORT_NAME_HIDDEN", "name has fewer than 5 letters (profile hidden)")
-            # 1) явно русское имя (кириллица 2+ букв подряд) или флаг RU/UA/BY — пропускаем
-            if settings.russian_only and (is_russian_name(name) or has_flag(name)):
-                return SellerResult(True, "NAME_RU_HIDDEN", "Cyrillic name / RU flag (profile hidden by Telegram)")
-            # 2) явно иностранный скрипт в имени (арабица, иероглифы, иврит, казахские буквы) — блок
-            if settings.russian_only and is_foreign_text(name):
-                return SellerResult(False, "FOREIGN_NAME_HIDDEN", "foreign script in name (profile hidden)")
-            # 3) всё остальное (латиница без явных признаков, пустое) — решает ALLOW_HIDDEN_OWNER
-            if settings.allow_hidden_owner:
-                return SellerResult(True, "OWNER_HIDDEN", "owner hidden by Telegram — no profile to filter on")
-            # ALLOW_HIDDEN_OWNER=false и имя без явных признаков → фильтр ниже вернёт UNKNOWN_BLOCKED
+        visible_text = (
+            l.seller_name,
+            l.seller_about,
+            l.seller_channel,
+            l.seller_gift_text,
+            l.seller_business,
+            l.seller_extra_text,
+        )
+        if any(is_foreign_text(value) for value in visible_text):
+            return SellerResult(False, "ARABIC_SCRIPT", "Arabic/Persian script in seller profile")
 
-        # продавцу должно быть можно написать бесплатно.
-        # ВАЖНО: l.messages приходит СО СТРАНИЦЫ МАРКЕТА (payments.getResaleStarGifts
-        # → User.send_paid_messages_stars / contact_require_premium), а НЕ из профиля.
-        # Значит статус 'платные' / 'только Premium' известен даже если профиль мы
-        # не читали (owner_trusted_no_resolve). Раньше для trusted owner'ов этот
-        # фильтр молча отключался — Maker: 'чтоб соо не платные в лс были' — и лоты
-        # с платным ЛС проскакивали через fallback-доверие funstat'а.
-        if (settings.require_free_messages and l.seller_type == "user"
-                and l.messages is not None and l.messages != "бесплатно"):
-            return SellerResult(False, "PAID_MESSAGES",
-                                f"messages: {l.messages or 'unknown'} (REQUIRE_FREE_MESSAGES=true)")
-
-        # у продавца не слишком много NFT
-        if settings.max_seller_nfts > 0 and l.seller_nfts is not None and l.seller_nfts > settings.max_seller_nfts:
-            return SellerResult(False, "TOO_MANY_NFTS",
-                                f"{l.seller_nfts} NFT > MAX_SELLER_NFTS={settings.max_seller_nfts}")
-
-        # Level продавца (UserFull.stars_rating.level); нет рейтинга = Level 0
-        if settings.max_seller_level > 0 and (l.level or 0) > settings.max_seller_level:
-            return SellerResult(False, "LEVEL_TOO_HIGH",
-                                f"level {l.level} > MAX_SELLER_LEVEL={settings.max_seller_level}")
-
-        if not settings.russian_only:
-            return SellerResult(True, "DISABLED", "RUSSIAN_ONLY=false")
-
-        if self._match(l, self.white_ids, self.white_names):
-            return SellerResult(True, "WHITELIST", "seller in whitelist")
-
-        phone = (l.seller_phone or "").lstrip("+")
-        if phone:
-            if any(phone.startswith(p) for p in settings.seller_phone_prefixes):
-                return SellerResult(True, "PHONE_MATCH", "visible phone prefix matches")
-            if settings.phone_mismatch_blocks:
-                return SellerResult(False, "PHONE_MISMATCH", "visible phone prefix does not match")
-            # PHONE_MISMATCH_BLOCKS=false: чужой номер ≠ чужой язык (переехавшие) — решают тексты ниже
-
-        if is_russian_text(l.seller_about):
-            return SellerResult(True, "BIO_RU", "profile bio is written in Russian")
-
-        if is_russian_text(l.seller_channel):
-            return SellerResult(True, "CHANNEL_RU", "personal channel title is in Russian")
-
-        if is_russian_text(l.seller_gift_text):
-            return SellerResult(True, "GIFT_MSG_RU", "gift messages are written in Russian")
-
-        if has_flag(l.seller_name, l.seller_about, l.seller_channel, l.seller_business):
-            return SellerResult(True, "FLAG_RU", "RU/UA/BY flag in profile")
-
-        if is_russian_text(l.seller_business):
-            return SellerResult(True, "BUSINESS_RU", "business profile is in Russian")
-
-        if is_russian_text(l.seller_extra_text):
-            return SellerResult(True, "STORIES_RU", "stories / channel posts are in Russian")
-
-        if settings.seller_name_signal and l.seller_type == "user" and is_russian_name(l.seller_name):
-            return SellerResult(True, "NAME_RU", "first/last name is in Cyrillic (SELLER_NAME_SIGNAL=true)")
-
-        if has_ru_marker(l.seller_about, l.seller_channel, l.seller_business, l.seller_extra_text):
-            return SellerResult(True, "RU_MARKER", "Russian services / cities / currency in profile")
-
-        # явно чужой язык в био / канале / подписях подарков → не наш продавец
-        for field in (l.seller_about, l.seller_channel, l.seller_gift_text, l.seller_business, l.seller_extra_text):
-            if is_foreign_text(field):
-                return SellerResult(False, "FOREIGN_TEXT", "profile text is in a foreign language")
-
-        if phone and not settings.phone_mismatch_blocks:
-            return SellerResult(False, "PHONE_MISMATCH", "visible phone prefix does not match")
-        if settings.unknown_seller_policy == "allow":
-            return SellerResult(True, "UNKNOWN_ALLOWED", "no objective data (policy=allow)")
-        return SellerResult(False, "UNKNOWN_BLOCKED", "no Russian bio / phone / whitelist (policy=block)")
+        return SellerResult(True, "RELAXED", "seller filters relaxed")
