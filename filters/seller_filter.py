@@ -36,10 +36,9 @@ _CYR = re.compile(r"[Ѐ-ӿ]", re.IGNORECASE)        # любая кирилли�
 _NON_SLAVIC = re.compile(r"[әғқңөұүһҳҷҙҗӣӯҫӑӕҝҕӧҭҡӳӗђћџњљјѓќѕ]", re.IGNORECASE)
 
 
-# Письменности, которых нет у RU/UA/BY: арабская/персидская, иврит, индийские, тайская,
-# китайская/японская/корейская, грузинская, армянская.
-_FOREIGN_SCRIPT = re.compile(r"[\u0590-\u06FF\u0750-\u077F\u0900-\u0DFF\u0E00-\u0E7F"
-                             r"\u10A0-\u10FF\u0530-\u058F\u3040-\u30FF\u4E00-\u9FFF\uAC00-\uD7AF]")
+# Only Arabic/Persian script is a hard script-level reject. Other languages/scripts
+# are not rejected merely because of how a nickname/name is written.
+_ARABIC_SCRIPT = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]")
 
 # \u0422\u0443\u0440\u0435\u0446\u043A\u0438\u0435 / \u0430\u0437\u0435\u0440\u0431\u0430\u0439\u0434\u0436\u0430\u043D\u0441\u043A\u0438\u0435 / \u043D\u0435\u043C\u0435\u0446\u043A\u0438\u0435 \u0431\u0443\u043A\u0432\u044B \u0441 \u0434\u0438\u0430\u043A\u0440\u0438\u0442\u0438\u043A\u043E\u0439: \u00F6 \u00FC \u011F \u0259 \u00E7 \u015F \u0131.
 # \u0412 \u0438\u043C\u0435\u043D\u0430\u0445 \u043D\u0430\u0441\u0442\u043E\u044F\u0449\u0438\u0445 RU/UA/BY-\u043F\u0440\u043E\u0434\u0430\u0432\u0446\u043E\u0432 \u043F\u0440\u0430\u043A\u0442\u0438\u0447\u0435\u0441\u043A\u0438 \u043D\u0435 \u0432\u0441\u0442\u0440\u0435\u0447\u0430\u044E\u0442\u0441\u044F \u2014 \u0434\u043B\u044F \u0441\u043A\u0440\u044B\u0442\u044B\u0445 \u0432\u043B\u0430\u0434\u0435\u043B\u044C\u0446\u0435\u0432
@@ -53,10 +52,10 @@ def _letter_count(s: str) -> int:
 
 
 def is_foreign_text(text: str | None) -> bool:
-    """Текст явно не на нашем языке: чужая письменность или неславянская кириллица."""
-    if not text:
+    """Hard script reject requested by the tracker policy: Arabic/Persian only."""
+    if not text or not getattr(settings, "block_arabic_script", True):
         return False
-    return bool(_FOREIGN_SCRIPT.search(text) or _NON_SLAVIC.search(text))
+    return bool(_ARABIC_SCRIPT.search(text))
 
 
 def is_russian_text(text: str | None) -> bool:
@@ -152,9 +151,6 @@ class SellerFilter:
             # 0a) слишком короткое имя — минимум 5 букв (ар, k, G., ры — мусор)
             if _letter_count(name) < 5:
                 return SellerResult(False, "SHORT_NAME_HIDDEN", "name has fewer than 5 letters (profile hidden)")
-            # 0b) турецкие / азербайджанские / немецкие буквы (ö ü ğ ə ç ş ı) — не наш
-            if _HIDDEN_FOREIGN_LETTERS.search(name):
-                return SellerResult(False, "FOREIGN_LETTER_HIDDEN", "foreign-script letters in name (profile hidden)")
             # 1) явно русское имя (кириллица 2+ букв подряд) или флаг RU/UA/BY — пропускаем
             if settings.russian_only and (is_russian_name(name) or has_flag(name)):
                 return SellerResult(True, "NAME_RU_HIDDEN", "Cyrillic name / RU flag (profile hidden by Telegram)")
