@@ -31,7 +31,12 @@ class MarketplaceCoordinator(_core.MarketplaceCoordinator):
         self.stats["polls"] += 1
         if cls is None or not cls.decided:
             self.stats["resyncs"] += 1
-            st.complete, st.needs_full_sync = False, True
+            # In fast-sync mode, lack of an anchor in one bounded poll is not proof that
+            # the collection needs an expensive full resync. Keep it live and retry the
+            # next top-of-market poll; otherwise large collections oscillate back into
+            # the sync queue and stop producing listings.
+            if getattr(settings, "sync_mode", "fast") == "full":
+                st.complete, st.needs_full_sync = False, True
             await self.db.upsert_market_items(self._row(it, MarketState.SILENT_OLD) for it in items)
             self._dirty.add(st.gift_id)
             return 0
