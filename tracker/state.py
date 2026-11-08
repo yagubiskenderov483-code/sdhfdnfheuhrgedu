@@ -176,12 +176,12 @@ def classify(state: CollectionState, items: list[ResaleItem], known: dict[int, K
     if anchor_idx is not None:
         c.decided = True
         c.known.append(items[anchor_idx])
-        # A stable KNOWN anchor proves that rows above it appeared/moved since our
-        # previous top-of-market snapshot. Fast-sync collections are intentionally
-        # incomplete, so requiring state.complete here permanently suppresses live
-        # listings for large collections. Price moves were already separated above.
-        c.new = above
-        c.reason = "above_anchor" if state.complete else "above_anchor_fast_sync"
+        if state.complete:
+            c.new = above
+            c.reason = "above_anchor"
+        else:
+            c.silent += [(it, "collection_not_fully_synced") for it in above]
+            c.reason = "above_anchor_but_incomplete"
         for it in items[anchor_idx + 1:]:
             st, k = item_status(it, known)
             if st == "UNKNOWN":

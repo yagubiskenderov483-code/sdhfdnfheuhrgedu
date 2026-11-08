@@ -215,17 +215,15 @@ class TelegramSender:
                             markup = fallback_markup
                             attempt -= 1
                             continue
-                    # Превью NFT (карточка с картинкой) отключаем ТОЛЬКО если ошибка именно про превью.
-                    # Раньше превью снималось при любой ошибке — поэтому иногда пост шёл без NFT-карточки.
-                    preview_err = any(w in es.upper() for w in ("WEBPAGE", "PREVIEW", "MEDIA_EMPTY"))
-                    if preview_err and preview.is_disabled is not True:
-                        log.warning("Link preview rejected (%s) — sending without NFT card", es)
+                    # Превью NFT снимаем ТОЛЬКО при ошибке самого превью (раньше — при любой ошибке,
+                    # поэтому иногда пост шёл без карточки NFT)
+                    if (any(w in es.upper() for w in ("WEBPAGE", "PREVIEW", "MEDIA_EMPTY"))
+                            and preview.is_disabled is not True):
                         preview = LinkPreviewOptions(is_disabled=True)
                         attempt -= 1
                         continue
-                    # неизвестная ошибка: сначала пробуем без кнопки продавца, превью оставляем
                     if fallback_markup is not None and markup is not fallback_markup:
-                        markup = fallback_markup
+                        markup = fallback_markup     # неизвестная ошибка: сначала без кнопки продавца
                         attempt -= 1
                         continue
                     if preview.is_disabled is not True:      # последний шанс не потерять лот

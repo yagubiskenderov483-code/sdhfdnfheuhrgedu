@@ -1,38 +1,34 @@
-"""Canonical Telegram links; never invent a gift slug or a username."""
-from __future__ import annotations
-import re
-from urllib.parse import unquote, urlsplit
+"""
+Ссылки. Используются только реальные форматы Telegram:
 
-_SLUG = re.compile(r"[A-Za-z][A-Za-z0-9]*-[1-9][0-9]*\Z")
-_USERNAME = re.compile(r"[A-Za-z][A-Za-z0-9_]{3,31}\Z")
+  https://t.me/nft/<slug>   — deep link на коллекционный подарок (slug приходит из API в starGiftUnique.slug)
+  https://t.me/<username>   — публичный username (приходит из API в User.username / Channel.username)
+  tg://user?id=<id>         — ссылка на пользователя по ID. Работает в клиентах Telegram, только если
+                              у читателя есть доступ к этому пользователю (зависит от приватности).
+Username никогда не генерируется «из головы».
+"""
+from __future__ import annotations
+
+import re
+
+
+def gift_slug(slug: str | None, title: str | None = None, num: int | None = None) -> str | None:
+    """slug из API; если API его не отдал — собираем по правилу Telegram: «Lol Pop» #40171 → LolPop-40171.
+    Без этого у части лотов не было ссылки на NFT (ни в заголовке, ни в кнопке «Лот», ни в оффере)."""
+    if slug:
+        return slug
+    base = re.sub(r"[^A-Za-z0-9]", "", title or "")
+    return f"{base}-{int(num)}" if base and num else None
 
 
 def gift_link(slug: str | None) -> str | None:
-    value = (slug or "").strip()
-    if value.startswith(("http://", "https://")):
-        try:
-            parsed = urlsplit(value)
-            if parsed.hostname not in {"t.me", "telegram.me"} or not parsed.path.startswith("/nft/"):
-                return None
-            value = unquote(parsed.path[5:]).rstrip("/")
-        except ValueError:
-            return None
-    return "https://t.me/nft/" + value if _SLUG.fullmatch(value) else None
-
-
-def listing_gift_link(listing) -> str | None:
-    return gift_link(getattr(listing, "gift_slug", None)) or gift_link(getattr(listing, "gift_link", None))
-
-
-def normalize_username(username: str | None) -> str | None:
-    value = (username or "").strip().lstrip("@")
-    return value if _USERNAME.fullmatch(value) else None
+    return f"https://t.me/nft/{slug}" if slug else None
 
 
 def username_link(username: str | None) -> str | None:
-    value = normalize_username(username)
-    return "https://t.me/" + value if value else None
+    return f"https://t.me/{username}" if username else None
 
 
 def user_id_deeplink(user_id: int | None) -> str | None:
-    return f"tg://user?id={user_id}" if user_id and user_id > 0 else None
+    # Negative user_id — наши псевдо-ID (хеш username), tg:// их не откроет
+    return f"tg://user?id={user_id}" if (user_id and user_id > 0) else None
