@@ -745,7 +745,18 @@ class OwnerLookup:
             return None
         self._pending += 1
         try:
-            return await self._find(seller_name, slug, unique_id, prio, deadline)
+            found = await self._find(seller_name, slug, unique_id, prio, deadline)
+            if found is None:
+                # Ник «шрифтом» (𝗠𝗜𝗡𝗥𝗜, ᴀʟᴇx, zalgo, с эмодзи) — бот поиска может не найти его как есть.
+                # Пробуем ещё раз обычными буквами (один доп. запрос, только если имя реально другое).
+                from utils.names import search_name
+                alt = search_name(seller_name)
+                if (alt and len(alt) >= 3 and _norm_name(alt) != _norm_name(seller_name)
+                        and (deadline is None or time.time() < deadline)):
+                    self.stats["fancy_retry"] = self.stats.get("fancy_retry", 0) + 1
+                    llog("LOOKUP", f"{seller_name!r}: не нашли — ищу обычными буквами {alt!r}")
+                    found = await self._find(alt, slug, unique_id, prio, deadline)
+            return found
         except _Expired:
             self.stats["expired"] = self.stats.get("expired", 0) + 1
             return None
@@ -1696,9 +1707,13 @@ class OwnerLookup:
                     now_r = time.monotonic()
                     def _used(n):
                         return sum(1 for t in self._resolves.get(n, []) if now_r - t < 3600)
+                    # только здоровые аккаунты: без FloodWait за последние 10 мин и не замедленные
+                    # (раньше выбирались «простаивающие» — а простаивают как раз больные во FloodWait)
                     pool = [w for w in self.sessions.usable(include_reserved=True)
-                            if w.is_usable() and _used(w.name) < settings.lookup_resolve_per_hour]
-                    pool.sort(key=lambda w: (_used(w.name), -getattr(w, "speed", 1.0)))
+                            if w.is_usable() and _used(w.name) < settings.lookup_resolve_per_hour
+                            and getattr(w, "speed", 1.0) >= 0.5
+                            and not any(now_r - t < 600 for t in getattr(w, "recent_floods", []))]
+                    pool.sort(key=lambda w: (-getattr(w, "speed", 1.0), _used(w.name)))
                     for w in pool[:2]:                       # максимум 2 попытки на лот
                         got = await self._input_user(w.name, trust_cand)
                         if got is not None:

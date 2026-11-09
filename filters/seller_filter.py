@@ -28,6 +28,7 @@ from pathlib import Path
 
 from config import settings
 from database.models import Listing
+from utils.names import letter_count, plain_name
 
 _CYR = re.compile(r"[Ѐ-ӿ]", re.IGNORECASE)        # любая кириллица
 # Буквы, которых НЕТ в русском/украинском/белорусском (казахский, таджикский, башкирский,
@@ -161,9 +162,11 @@ class SellerFilter:
         # видно только owner_name. Профиля нет → обычный RUSSIAN_ONLY неприменим.
         # Логика: имя (owner_name) — единственный доступный сигнал. На нём и фильтруем.
         if l.seller_type is None and l.seller_id is None:
-            name = (l.seller_name or "").strip()
+            raw_name = (l.seller_name or "").strip()
+            # «шрифтовые» ники (𝗠𝗜𝗡𝗥𝗜, ᴀʟᴇx, zalgo) → обычные буквы; украшения (𖥔 ꧁ 彡) буквами не считаем
+            name = plain_name(raw_name)
             # 0a) слишком короткое имя — минимум 5 букв (ар, k, G., ры — мусор)
-            if _letter_count(name) < 5:
+            if letter_count(raw_name) < 5:
                 return SellerResult(False, "SHORT_NAME_HIDDEN", "name has fewer than 5 letters (profile hidden)")
             # 0b) турецкие / азербайджанские / немецкие буквы (ö ü ğ ə ç ş ı) — не наш
             if _HIDDEN_FOREIGN_LETTERS.search(name):

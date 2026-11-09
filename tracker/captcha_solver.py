@@ -46,7 +46,16 @@ log = logging.getLogger("captcha")
 # чтобы Render-деплои / рестарты не теряли накопленные ответы.
 _CAPTCHA_CACHE: dict[str, int] = {}
 _CAPTCHA_CACHE_MAX = 5000      # LRU-ish очистка при превышении
-_CAPTCHA_CACHE_PATH = (os.environ.get("CAPTCHA_CACHE_PATH") or "/var/data/captcha_cache.json").strip()
+def _default_cache_path() -> str:
+    # Render: постоянный диск /var/data. Bothost и др.: папка данных бота (DATA_DIR / ./data),
+    # иначе кэш решённых капч писался в /var/data, которого там нет, и терялся при каждом рестарте.
+    if os.path.isdir("/var/data"):
+        return "/var/data/captcha_cache.json"
+    base = os.environ.get("DATA_DIR") or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+    return os.path.join(base, "captcha_cache.json")
+
+
+_CAPTCHA_CACHE_PATH = (os.environ.get("CAPTCHA_CACHE_PATH") or _default_cache_path()).strip()
 _cache_loaded = False
 _cache_dirty = False
 

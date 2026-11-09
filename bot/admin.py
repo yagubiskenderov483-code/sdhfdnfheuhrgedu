@@ -1836,7 +1836,7 @@ def build_routers(app: "App") -> list[Router]:
             ("Папка logs", settings.path("logs")),
         ]
         # Captcha cache — через env var
-        cc_path = _os.environ.get("CAPTCHA_CACHE_PATH") or "/var/data/captcha_cache.json"
+        from tracker.captcha_solver import _CAPTCHA_CACHE_PATH as cc_path
         items.append(("Кеш капч", _P(cc_path)))
 
         def _size(p: _P) -> int:
@@ -2482,10 +2482,24 @@ def build_routers(app: "App") -> list[Router]:
 
     @admin.message(Command("version"))
     async def cmd_version(m: Message) -> None:
-        """Какой коммит реально запущен (Render задаёт RENDER_GIT_COMMIT)."""
+        """Какая версия запущена + есть ли распознавалка капчи."""
         import os as _os
-        sha = (_os.environ.get("RENDER_GIT_COMMIT") or "неизвестно")[:7]
-        await m.answer(f"🧾 Запущен коммит: <code>{html.escape(sha)}</code>")
+        import shutil as _sh
+        from utils.version import BUILD
+        sha = (_os.environ.get("RENDER_GIT_COMMIT") or _os.environ.get("GIT_COMMIT") or "")[:7]
+        try:
+            import pytesseract  # noqa: F401
+            py_ok = True
+        except Exception:
+            py_ok = False
+        tess = bool(_sh.which("tesseract"))
+        vision = bool(_os.environ.get("CAPTCHA_API_KEY"))
+        ocr = ("✅ есть" if (py_ok and tess) else
+               "❌ нет программы tesseract на сервере — капча решается только рандомом"
+               + (" и vision API" if vision else ""))
+        await m.answer(f"🧾 Сборка: <code>{html.escape(BUILD)}</code>"
+                       + (f" · коммит <code>{html.escape(sha)}</code>" if sha else "")
+                       + f"\n🧩 Распознавание капчи (OCR): {ocr}")
 
     @admin.message(Command("reset_speeds"))
     async def cmd_reset_speeds(m: Message) -> None:
