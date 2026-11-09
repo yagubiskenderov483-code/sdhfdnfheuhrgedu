@@ -387,6 +387,7 @@ class OwnerLookup:
         # не долбимся в него минут 10, чтобы не тратить попытки, и сразу ротируем на следующего
         # бота из LOOKUP_BOTS. См. _ask_bot_locked и _bot_pool.
         self._bot_dead_until: dict[str, float] = {}
+        self._bot_slow_until: dict[str, float] = {}   # молчал недавно → спрашиваем последним (НЕ «мёртв»)
         # Счётчик подряд идущих unresolvable-фейлов на одного бота по РАЗНЫМ сессиям.
         # Когда достигает ~половины LOOKUP_SESSIONS или 3 (меньшее) — помечаем бота как dead.
         self._bot_consec_unres: dict[str, int] = {}
@@ -489,7 +490,7 @@ class OwnerLookup:
             order.append(b)
         # Молчащего/«снесённого» бота НЕ выкидываем — просто спрашиваем его последним,
         # чтобы лоты не ждали его таймаут, пока запасной отвечает. Работа не останавливается.
-        return sorted(order, key=lambda b: now < self._bot_dead_until.get(b.lower(), 0.0))
+        return sorted(order, key=lambda b: now < self._bot_slow_until.get(b.lower(), 0.0))
 
     def _bot_cmd(self, bot: str, seller_name: str) -> str:
         """Команда для конкретного бота. Берёт per-bot из LOOKUP_CMDS, иначе общий
@@ -533,14 +534,9 @@ class OwnerLookup:
         if n < threshold:
             return
         now = time.monotonic()
-        prev_until = self._bot_dead_until.get(k, 0.0)
-        # 15 минут dead, но не продлеваем бесконечно если уже помечен (чтобы периодически пробовать)
-        new_until = max(prev_until, now + 900)
-        self._bot_dead_until[k] = new_until
-        self.stats["bot_dead_marked"] = self.stats.get("bot_dead_marked", 0) + 1
-        # Persistent: сохраняем в БД, чтобы после рестарта (деплой на Render) не терять
-        # 15-минутную блокировку и не долбить снесённого бота снова
-        self._persist_bot_dead(k, new_until)
+        # «Мёртвым» бота НЕ помечаем (просьба админа: боты не должны слетать) — только на 10 мин
+        # ставим его в конец очереди, пока отвечает запасной. Из работы он не выпадает.
+        self._bot_slow_until[k] = max(self._bot_slow_until.get(k, 0.0), now + 600)
         if k in self._bot_dead_notified:
             return
         self._bot_dead_notified.add(k)
@@ -577,6 +573,7 @@ class OwnerLookup:
             except Exception:
                 pass
         self._bot_dead_notified.discard(k)
+        self._bot_slow_until.pop(k, None)
         if k in self._bot_dead_until:
             self._bot_dead_until.pop(k, None)
             self._persist_bot_dead(k, None)  # удаляем из БД
@@ -635,10 +632,8 @@ class OwnerLookup:
                 if remaining <= 0:
                     await self.db.kv_set(f"bot_dead:{k}", None)
                     continue
-                self._bot_dead_until[k] = time.monotonic() + remaining
-                self._bot_dead_notified.add(k)   # не уведомлять повторно о том что уже алертилось до рестарта
-                count += 1
-                log.info("Lookup: восстановлена блокировка @%s dead ещё %.0f мин", k, remaining / 60)
+                # старые «dead»-метки из прошлых версий просто стираем — ботов не выключаем
+                await self.db.kv_set(f"bot_dead:{k}", None)
         except Exception as e:
             log.warning("load_persisted_bot_deads failed: %s", e)
         return count
@@ -717,9 +712,8 @@ class OwnerLookup:
                     continue
                 # mark dead immediately: liveness подтвердил что все наши сессии не видят бота
                 k = bot.lower()
-                self._bot_dead_until[k] = time.monotonic() + 900
-                self.stats["bot_dead_marked"] = self.stats.get("bot_dead_marked", 0) + 1
-                log.error("Lookup liveness: @%s — DEAD (не резолвится ни на одной из %d сессий)",
+                self._bot_slow_until[k] = time.monotonic() + 600   # не «мёртв», просто в конец очереди
+                log.warning("Lookup liveness: @%s — не резолвится на %d сессиях, спрашиваю его после запасного",
                           bot, probed)
                 if k not in self._bot_dead_notified and self.on_bot_dead:
                     self._bot_dead_notified.add(k)
@@ -1031,7 +1025,7 @@ class OwnerLookup:
                     expired_on_bot = False
                     # молчащего/«снесённого» бота спрашиваем только с одной сессии, а не со всех
                     # (иначе лот ждал бы 15 с × число сессий)
-                    b_dead = time.monotonic() < self._bot_dead_until.get(b.lower(), 0.0)
+                    b_dead = time.monotonic() < self._bot_slow_until.get(b.lower(), 0.0)
                     for session in (order[:1] if b_dead else order):
                         try:
                             cands = await self._ask_bot(session, b, seller_name, prio=prio, deadline=deadline)
