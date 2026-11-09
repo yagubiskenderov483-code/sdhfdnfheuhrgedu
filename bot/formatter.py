@@ -56,20 +56,35 @@ def seller_url(l: Listing) -> str | None:
     return None
 
 
-def _trade_offer(l: Listing) -> tuple[int | str, str] | None:
-    """Сумма и единица для оффера в торговый бот — РОВНО та цена, за которую лот висит (без скидки).
-    Для ton-only лотов — цена в TON (единица «g»), иначе — в Stars. Если цены нет — None."""
+def _trade_offer(l: Listing) -> tuple[int, str] | None:
+    """Сумма и единица для оффера в торговый бот.
+    Правила скидки от текущей цены лота (по требованию админа):
+      Stars: ≤1000 → −30; 1001–1800 → −50; 1801–2500 → −60; 2501–5000 → −100;
+             5001–10000 → −140; 10001+ → −215.
+      TON (целых): <48 → −1 g; ≥48 → −2 g.
+    Для ton-only лотов используется TON, иначе — Stars. Если ни того ни другого — None."""
     stars = l.stars_price
-    ton = l.ton_price
-    ton_amount = None
-    if ton and ton > 0:
-        ton_amount = int(ton) if float(ton).is_integer() else f"{float(ton):.2f}".rstrip("0").rstrip(".")
-    if getattr(l, "ton_only", False) and ton_amount is not None:
-        return (ton_amount, "g")
+    ton_int = int(l.ton_price) if l.ton_price else 0
+    if getattr(l, "ton_only", False) and ton_int > 0:
+        off = ton_int - (2 if ton_int >= 48 else 1)
+        return (max(1, off), "g")
     if stars and stars > 0:
-        return (int(stars), "")
-    if ton_amount is not None:
-        return (ton_amount, "g")
+        if stars <= 1000:
+            d = 30
+        elif stars <= 1800:
+            d = 50
+        elif stars <= 2500:
+            d = 60
+        elif stars <= 5000:
+            d = 100
+        elif stars <= 10000:
+            d = 140
+        else:
+            d = 215
+        return (max(1, stars - d), "")
+    if ton_int > 0:
+        off = ton_int - (2 if ton_int >= 48 else 1)
+        return (max(1, off), "g")
     return None
 
 
