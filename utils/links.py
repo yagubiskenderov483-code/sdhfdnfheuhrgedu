@@ -16,7 +16,9 @@ def gift_slug(slug: str | None, title: str | None = None, num: int | None = None
     if slug:
         return slug
     import re
-    base = re.sub(r"[^A-Za-z0-9]", "", title or "")
+    # «Jack-in-the-Box» → JackInTheBox, «Durov's Cap» → DurovsCap, «B-Day Candle» → BDayCandle
+    words = re.split(r"[^A-Za-z0-9]+", re.sub(r"['’]", "", title or ""))
+    base = "".join(w[:1].upper() + w[1:] for w in words if w)
     return f"{base}-{int(num)}" if base and num else None
 
 

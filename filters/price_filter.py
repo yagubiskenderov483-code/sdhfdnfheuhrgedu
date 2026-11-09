@@ -24,8 +24,10 @@ _MONO_WORDS = ("monochrome", "монохром")
 
 
 def _rare(value) -> bool:
-    """Редкость атрибута «1.2%» <= RARE_ATTRIBUTE_PERCENT."""
+    """Редкость атрибута «1.2%» <= RARE_ATTRIBUTE_PERCENT, либо тип редкости из нового API."""
     text = (value or "").strip().casefold()
+    if text in {"редкая", "эпическая", "легендарная", "rare", "epic", "legendary"}:
+        return True
     if not text.endswith("%"):
         return False
     try:

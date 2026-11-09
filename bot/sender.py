@@ -215,11 +215,6 @@ class TelegramSender:
                             markup = fallback_markup
                             attempt -= 1
                             continue
-                    # неизвестная ошибка: сначала пробуем без кнопки продавца, карточку NFT оставляем
-                    if fallback_markup is not None and markup is not fallback_markup:
-                        markup = fallback_markup
-                        attempt -= 1
-                        continue
                     # например, битая ссылка превью — повторяем без превью
                     if preview.is_disabled is not True:      # (у aiogram там бывает Default(...), он «истинный»)
                         preview = LinkPreviewOptions(is_disabled=True)

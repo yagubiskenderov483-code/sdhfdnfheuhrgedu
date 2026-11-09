@@ -53,7 +53,9 @@ class ResponsiveReplies(BaseMiddleware):
                 await asyncio.sleep(_STILL_AFTER - _ACK_AFTER)
                 await notice("⏳ Всё ещё выполняется — ответ придёт, повторять не нужно.")
 
-        task = asyncio.create_task(acknowledge())
+        # для inline-кнопок «⏳» не шлём: на callback можно ответить только один раз,
+        # и наш ответ сломал бы callback.answer() внутри обработчика
+        task = None if callback else asyncio.create_task(acknowledge())
         try:
             return await handler(event, data)
         except asyncio.CancelledError:
@@ -63,7 +65,8 @@ class ResponsiveReplies(BaseMiddleware):
             await notice("Ошибка команды, трекер продолжает работу. Попробуй ещё раз.")
             return None
         finally:
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
             if key is not None:
                 self.active_callbacks.discard(key)
