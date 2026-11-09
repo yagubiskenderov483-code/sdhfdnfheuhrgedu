@@ -1709,10 +1709,11 @@ class OwnerLookup:
                         return sum(1 for t in self._resolves.get(n, []) if now_r - t < 3600)
                     # только здоровые аккаунты: без FloodWait за последние 10 мин и не замедленные
                     # (раньше выбирались «простаивающие» — а простаивают как раз больные во FloodWait)
-                    pool = [w for w in self.sessions.usable(include_reserved=True)
+                    calm = [w for w in self.sessions.usable(include_reserved=True)
                             if w.is_usable() and _used(w.name) < settings.lookup_resolve_per_hour
-                            and getattr(w, "speed", 1.0) >= 0.5
                             and not any(now_r - t < 600 for t in getattr(w, "recent_floods", []))]
+                    # сначала быстрые (speed ≥ 0.5); если весь флот замедлен — любой спокойный аккаунт
+                    pool = [w for w in calm if getattr(w, "speed", 1.0) >= 0.5] or calm
                     pool.sort(key=lambda w: (-getattr(w, "speed", 1.0), _used(w.name)))
                     for w in pool[:2]:                       # максимум 2 попытки на лот
                         got = await self._input_user(w.name, trust_cand)

@@ -844,7 +844,9 @@ class ListingPipeline:
         # (раньше «владелец найден → по возрасту не бросаем», а поиск с капчей идёт до 10 мин).
         limit = settings.max_lot_age
         if ev.mode == "lookup" or getattr(l, "owner_found_via", None):
-            limit = max(limit, settings.lookup_max_age)
+            # поиск владельца сам ограничен LOOKUP_MAX_AGE; +45 с на проверку профиля и отправку,
+            # иначе владелец, найденный на 170-й секунде, выбрасывался как «старый»
+            limit = max(limit, settings.lookup_max_age + 45) if settings.lookup_max_age > 0 else limit
         try:
             age = (datetime.now(timezone.utc) - datetime.fromisoformat(l.first_seen)).total_seconds()
         except (TypeError, ValueError):
