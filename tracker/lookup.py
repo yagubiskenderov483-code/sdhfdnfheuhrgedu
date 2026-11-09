@@ -207,6 +207,15 @@ def same_name(a: str | None, b: str | None) -> bool:
     return len(short) >= 4 and short in long
 
 
+def exact_name(a: str | None, b: str | None) -> bool:
+    """Строгое совпадение имён (только буквы/цифры, без «вхождения»): 'Alex' ≠ 'Alexander'.
+    Нужно там, где владельца принимаем БЕЗ подтверждения через NFT в профиле."""
+    def keep(t: str) -> str:
+        return "".join(ch for ch in _plain(t or "") if ch.isalpha() or ch in "0123456789")
+    ca, cb = keep(a), keep(b)
+    return bool(ca) and ca == cb
+
+
 def _buttons(msg: Any) -> list[tuple[str, bytes | None]]:
     """Кнопки сообщения по порядку: (текст, callback data | None)."""
     out = []
@@ -1020,7 +1029,10 @@ class OwnerLookup:
                 expired_on_all = True
                 for b in bots:
                     expired_on_bot = False
-                    for session in order:
+                    # молчащего/«снесённого» бота спрашиваем только с одной сессии, а не со всех
+                    # (иначе лот ждал бы 15 с × число сессий)
+                    b_dead = time.monotonic() < self._bot_dead_until.get(b.lower(), 0.0)
+                    for session in (order[:1] if b_dead else order):
                         try:
                             cands = await self._ask_bot(session, b, seller_name, prio=prio, deadline=deadline)
                         except _Expired:
@@ -1611,6 +1623,15 @@ class OwnerLookup:
                 log.info("Lookup: профиль %s не прочитался: %s", c.key(), e)
                 continue
             real = " ".join(x for x in (getattr(u, "first_name", None), getattr(u, "last_name", None)) if x)
+            if getattr(u, "bot", False) or getattr(u, "deleted", False):
+                verified_rejected.add(c.key())
+                continue
+            if trust_without_nft and not exact_name(real, seller_name):
+                # без NFT-подтверждения «Alex» ≠ «Alexander» — иначе выдаём чужого человека
+                self.stats["name_mismatch"] = self.stats.get("name_mismatch", 0) + 1
+                llog("LOOKUP", f"{c.key()}: имя {real!r} не точно {seller_name!r}, NFT не проверен — не он")
+                verified_rejected.add(c.key())
+                continue
             if settings.lookup_name_check and not same_name(real, seller_name):
                 self.stats["name_mismatch"] = self.stats.get("name_mismatch", 0) + 1
                 llog("LOOKUP", f"{c.key()}: NFT есть, но имя {real!r} ≠ {seller_name!r} — не он")
@@ -1674,7 +1695,7 @@ class OwnerLookup:
                         break
                     real = " ".join(x for x in (getattr(u, "first_name", None),
                                                 getattr(u, "last_name", None)) if x)
-                    if not same_name(real, seller_name):
+                    if not exact_name(real, seller_name):
                         self.stats["name_mismatch"] = self.stats.get("name_mismatch", 0) + 1
                         llog("LOOKUP", f"{trust_cand.key()}: сейчас зовут {real!r} ≠ {seller_name!r} — не он")
                         break

@@ -840,6 +840,21 @@ class ListingPipeline:
         # Последняя проверка перед постом (сюда приходят и «доверенные» владельцы от funstat,
         # у которых профиль не прочитался — раньше они проходили с платными ЛС):
         guard = None
+        # Возраст лота с момента обнаружения — для ВСЕХ лотов, включая найденных через funstat
+        # (раньше «владелец найден → по возрасту не бросаем», а поиск с капчей идёт до 10 мин).
+        limit = settings.max_lot_age
+        if ev.mode == "lookup" or getattr(l, "owner_found_via", None):
+            limit = max(limit, settings.lookup_max_age)
+        try:
+            age = (datetime.now(timezone.utc) - datetime.fromisoformat(l.first_seen)).total_seconds()
+        except (TypeError, ValueError):
+            age = 0.0
+        if limit > 0 and age > limit:
+            l.status, l.reason = ListingStatus.ERROR, f"stale: {age:.0f}s после обнаружения (> {limit}s)"
+            self.stats["stale"] = self.stats.get("stale", 0) + 1
+            llog("FILTER", f"#{l.listing_id} skipped before send: {l.reason}")
+            await self.db.update_listing(l)
+            return
         if not l.seller_username or l.seller_type != "user" or not l.seller_id or l.seller_id <= 0:
             guard = ("NO_USERNAME", "у продавца нет @username / владелец не подтверждён")
         elif settings.require_free_messages and l.messages != "бесплатно":

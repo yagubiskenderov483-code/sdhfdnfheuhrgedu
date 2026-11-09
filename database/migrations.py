@@ -90,6 +90,7 @@ MIGRATIONS: dict[int, list[str]] = {
     2: [
         "CREATE INDEX IF NOT EXISTS ix_listings_gift_sent ON listings(gift_unique_id, sent)",
         "CREATE INDEX IF NOT EXISTS ix_listings_seller_sent ON listings(seller_key, sent, sent_at)",
+        "CREATE INDEX IF NOT EXISTS ix_listings_username_sent ON listings(lower(seller_username), sent)",
     ],
     # v3: каноническая идентичность листинга и его состояние в market_items
     3: [
