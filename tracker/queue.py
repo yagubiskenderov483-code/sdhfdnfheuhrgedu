@@ -666,7 +666,7 @@ class ListingPipeline:
         llog("FILTER", f"#{l.listing_id} seller passed ({sr.code})")
         # user: 'он перебрасывает бота а не в проф' — без @username пост не нужен,
         # tg://user?id= у большинства уходит в чат бота, а не в профиль продавца.
-        if not l.seller_username:           # без @username — никогда
+        if settings.require_username and not l.seller_username:   # REQUIRE_USERNAME=true (по умолчанию)
             await self._reject_no_username(l)
             return
         await self._send_stage(ev, l, base, t_start)
@@ -857,7 +857,8 @@ class ListingPipeline:
             llog("FILTER", f"#{l.listing_id} skipped before send: {l.reason}")
             await self.db.update_listing(l)
             return
-        if not l.seller_username or l.seller_type != "user" or not l.seller_id or l.seller_id <= 0:
+        if ((settings.require_username and not l.seller_username) or l.seller_type != "user"
+                or not l.seller_id or l.seller_id <= 0):
             guard = ("NO_USERNAME", "у продавца нет @username / владелец не подтверждён")
         elif settings.require_free_messages and l.messages != "бесплатно":
             guard = ("PAID_MESSAGES", f"ЛС: {l.messages or 'не удалось проверить'}")

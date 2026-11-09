@@ -138,6 +138,8 @@ def reset_settings():
     settings.collection_min_floor = 0
     settings.max_above_floor = 0
     settings.collection_floor_mode = "skip"
+    settings.premium_over_floor_percent = 0     # правило «+333% только редкие» проверяется отдельно
+    settings.rescue_above_top = True            # старое поведение классификации (тесты 2d)
     settings.low_priority_poll_interval, settings.low_priority_hot_min = 60.0, 10.0
     settings.fetch_full_seller = False
     settings.test_mode = False
@@ -860,7 +862,7 @@ def test_29_price_routes():
     assert st.route_chat(1000) == (-100, 62) and st.route_chat(4999) == (-100, 63)
     assert st.route_chat(5000) == (-100, 64) and st.route_chat(99999) == (-100, 64)
     assert st.route_chat(240) == (-100, 61)          # чуть ниже нижней границы (флор просел) → нижняя тема
-    assert st.route_chat(100) == (-100999, None)    # сильно ниже всех диапазонов → общий
+    assert st.route_chat(100) == (-100, 61)         # всё, что ниже нижней границы, → нижняя тема (просьба админа)
     assert st.route_chat(None) == (-100999, None)
     st.price_routes = []
     assert st.route_chat(7000) == (-100999, None)   # маршрутов нет → общий

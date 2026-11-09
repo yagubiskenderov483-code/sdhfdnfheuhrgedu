@@ -64,23 +64,25 @@ def test_bot_pool_fallback():
 
 
 def test_bot_pool_dead_excluded():
-    """Бот в _bot_dead_until (не истёкший) → исключён из пула."""
+    """Боты НИКОГДА не выпадают из пула (просьба админа): старая dead-метка игнорируется,
+    молчавший бот (_bot_slow_until) просто спрашивается последним."""
     settings.lookup_bot_username = "funstat"
     settings.lookup_bots = ["infostat"]
     lk = L.OwnerLookup(FakeSessions([]))
-    lk._bot_dead_until["funstat"] = time.monotonic() + 600       # dead ещё 10 мин
-    pool = lk._bot_pool()
-    check(pool == ["infostat"], f"bot_pool excludes dead: got {pool}")
+    lk._bot_dead_until["funstat"] = time.monotonic() + 600
+    check(lk._bot_pool() == ["funstat", "infostat"], f"dead-mark не выкидывает бота: {lk._bot_pool()}")
+    lk._bot_slow_until["funstat"] = time.monotonic() + 600
+    check(lk._bot_pool() == ["infostat", "funstat"], f"молчавший бот — последним: {lk._bot_pool()}")
 
 
 def test_bot_pool_expired_dead_included():
-    """Бот с истёкшей блокировкой → снова в пуле."""
+    """Бот с истёкшей «медленной» меткой → снова первый."""
     settings.lookup_bot_username = "funstat"
-    settings.lookup_bots = []
+    settings.lookup_bots = ["infostat"]
     lk = L.OwnerLookup(FakeSessions([]))
-    lk._bot_dead_until["funstat"] = time.monotonic() - 100       # истекла 100с назад
+    lk._bot_slow_until["funstat"] = time.monotonic() - 100
     pool = lk._bot_pool()
-    check(pool == ["funstat"], f"bot_pool includes expired dead: got {pool}")
+    check(pool == ["funstat", "infostat"], f"bot_pool after slow expired: got {pool}")
 
 
 def test_bot_cmd_default():
@@ -118,7 +120,7 @@ def test_all_bots_dead_detection():
     lk._bot_dead_until["funstat"] = time.monotonic() + 100
     check(not lk.all_bots_dead(), "not dead when only 1 of 2 is dead")
     lk._bot_dead_until["infostat"] = time.monotonic() + 100
-    check(lk.all_bots_dead(), "dead when ALL are dead")
+    check(not lk.all_bots_dead(), "боты никогда не считаются мёртвыми — поиск идёт всегда")
 
 
 def test_any_bot_configured():
