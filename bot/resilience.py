@@ -56,8 +56,14 @@ class ResponsiveReplies(BaseMiddleware):
         # для inline-кнопок «⏳» не шлём: на callback можно ответить только один раз,
         # и наш ответ сломал бы callback.answer() внутри обработчика
         task = None if callback else asyncio.create_task(acknowledge())
+        import time as _t
+        t0 = _t.monotonic()
         try:
-            return await handler(event, data)
+            res = await handler(event, data)
+            took = _t.monotonic() - t0
+            (log.warning if took > 5 else log.info)("CMD %r от %s — %.1f с", text[:40],
+                                                    getattr(event.from_user, "id", "?"), took)
+            return res
         except asyncio.CancelledError:
             raise
         except Exception as exc:

@@ -1246,6 +1246,17 @@ class OwnerLookup:
             # как absolute-time + смещение, cooldown-chek всегда "сейчас - stored < cooldown"
             # даст True пока not expired).
             elif "YOU_BLOCKED_USER" in s.upper() or "you blocked this user" in s.lower():
+                # Сначала сами разблокируем бота на этом аккаунте — без участия админа
+                try:
+                    async def _unblock(client, b=bot):
+                        from telethon.tl.functions.contacts import UnblockRequest
+                        return await client(UnblockRequest(id=b))
+                    await self._run(session, _unblock, timeout=15)
+                    log.warning("Lookup: аккаунт %s блокировал @%s — разблокировал автоматически", session, bot)
+                    self.stats["auto_unblocked"] = self.stats.get("auto_unblocked", 0) + 1
+                    return None              # следующий запрос с этой сессии уже пройдёт
+                except Exception as e3:
+                    log.warning("Lookup: авто-разблокировка @%s на %s не удалась: %s", bot, session, e3)
                 self._bot_unresolvable[(session, bot)] = time.monotonic() + _YOU_BLOCKED_COOLDOWN - _UNRESOLVABLE_COOLDOWN
                 log.error("Lookup: аккаунт %s заблокировал @%s — не пробуем %.0f ч. "
                           "Разблокируйте бота в этом аккаунте вручную.",

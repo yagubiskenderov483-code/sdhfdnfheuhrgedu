@@ -50,7 +50,25 @@ _TAG_RE = re.compile(r"<[^>]+>")
 
 async def _html_fallback(make_request, bot, method):
     """Если Telegram не принял HTML-разметку сообщения (can't parse entities), повторяем без неё,
-    чтобы команда всё равно получила ответ, а не падала молча."""
+    чтобы команда всё равно получила ответ, а не падала молча.
+    Ответы в личку (команды админа) при лимите Telegram (429) или сетевом сбое не теряем —
+    ждём и повторяем (раньше команда молча оставалась без ответа, и её писали по нескольку раз)."""
+    from aiogram.exceptions import TelegramNetworkError, TelegramRetryAfter
+    private = isinstance(getattr(method, "chat_id", None), int) and method.chat_id > 0
+    for attempt in range(3):
+        try:
+            return await _html_fallback_once(make_request, bot, method)
+        except TelegramRetryAfter as e:
+            if not private or attempt == 2 or e.retry_after > 20:
+                raise
+            await asyncio.sleep(e.retry_after + 0.5)
+        except TelegramNetworkError:
+            if not private or attempt == 2:
+                raise
+            await asyncio.sleep(1.5)
+
+
+async def _html_fallback_once(make_request, bot, method):
     try:
         return await make_request(bot, method)
     except TelegramBadRequest as e:
@@ -420,26 +438,10 @@ class App:
             await asyncio.sleep(600)   # 10 минут между проверками
 
     async def _notify_bot_dead(self, bot: str, next_bot: str | None = None, kind: str = "silent") -> None:
-        """Простое предупреждение админам: lookup-бот не отвечает / не находится / снова работает.
-        Трекер не останавливается — пока бот молчит, ищем через запасного."""
-        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
-        targets = set(settings.admin_ids or set()) | set(all_admins())
-        b = html.escape(bot)
-        alt = f" Ищу через @{html.escape(next_bot)}." if next_bot else " Запасных ботов нет — лоты со скрытым владельцем пока не шлются."
-        if kind == "back":
-            text = f"✅ Lookup-бот @{b} снова отвечает."
-        elif kind == "missing":
-            text = f"⚠️ Lookup-бот @{b} не находится — похоже, его снесли или переименовали.{alt}"
-        else:
-            text = f"⚠️ Lookup-бот @{b} не отвечает.{alt}"
-        kb_rows = [[InlineKeyboardButton(text="🤖 Пул ботов", callback_data="bots:refresh"),
-                    InlineKeyboardButton(text="🏓 Пинг", callback_data="bots:ping")]]
-        kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
-        for chat in sorted(targets):
-            try:
-                await self.bot.send_message(chat, text, reply_markup=kb)
-            except Exception as e:
-                log.debug("notify_bot_dead to %s failed: %s", chat, e)
+        """Админам про lookup-ботов НЕ пишем (просьба админа): бот всё равно остаётся в работе и
+        опрашивается дальше. Только строка в логе."""
+        log.warning("Lookup-бот @%s: %s (сообщение админам отключено, поиск продолжается)", bot,
+                    {"back": "снова отвечает", "missing": "не резолвится"}.get(kind, "не отвечает"))
 
     async def _notify_auth_error(self, w) -> None:
         """Telegram снёс сессию (выкинули из «Устройств», две копии бота, бан) — она уже не оживёт.

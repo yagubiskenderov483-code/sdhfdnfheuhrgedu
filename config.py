@@ -220,6 +220,7 @@ class Settings:
     auto_remove_dead: bool = True        # сессию, которую снёс Telegram, удалять из трекера автоматически
     max_lot_age: int = 180               # лот старше 3 мин уже не свежий — не слать (0 = выкл)
     route_by: str = "floor"              # тема по: floor (флор коллекции = цена гифта) | price (цена лота)
+    rescue_above_top: bool = False         # «спасать» незнакомые лоты выше прошлого верха без роста счётчика (давало старые лоты)
     premium_over_floor_percent: int = 333  # наценка к флору >= N%: только редкая модель/фон или Monochrome (0 = выкл)
     rare_attribute_percent: float = 1.5    # «редкая» модель/фон — редкость <= N%
     max_above_floor: int = 500           # не слать лоты дороже флора коллекции больше чем на N% (0 = выкл).
@@ -405,6 +406,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "MIN_TON": ("min_ton", lambda v: float(v.replace(",", "."))),
     "MAX_ABOVE_FLOOR": ("max_above_floor", lambda v: max(0, int(v))),
     "PREMIUM_OVER_FLOOR_PERCENT": ("premium_over_floor_percent", lambda v: max(0, int(v))),
+    "RESCUE_ABOVE_TOP": ("rescue_above_top", _bool_strict),
     "RARE_ATTRIBUTE_PERCENT": ("rare_attribute_percent", lambda v: max(0.1, min(100.0, float(v.replace(",", "."))))),
     "PRIORITY_FLOOR": ("priority_floor", lambda v: max(0, int(v))),
     "PRIORITY_SHARE": ("priority_share", lambda v: min(0.9, max(0.1, float(v.replace(",", "."))))),
@@ -494,6 +496,7 @@ def _from_env() -> Settings:
         min_ton=_float(e("MIN_TON"), 0.0),
         max_above_floor=max(0, _int(e("MAX_ABOVE_FLOOR"), 500)),
         premium_over_floor_percent=max(0, _int(e("PREMIUM_OVER_FLOOR_PERCENT"), 333)),
+        rescue_above_top=_bool(e("RESCUE_ABOVE_TOP"), False),
         rare_attribute_percent=max(0.1, min(100.0, _float(e("RARE_ATTRIBUTE_PERCENT"), 1.5))),
         priority_floor=max(0, _int(e("PRIORITY_FLOOR"), 2500)),
         priority_poll_interval=max(0.5, _float(e("PRIORITY_POLL_INTERVAL"), 1.5)),

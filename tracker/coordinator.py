@@ -559,7 +559,11 @@ class MarketplaceCoordinator:
         # 2d) «ложный якорь» без роста счётчика (перевыставили по той же цене + продажа рядом):
         #     всё, что в выдаче ВЫШЕ прошлого верхнего лота, изменилось после прошлого опроса —
         #     незнакомый лот там новый, даже если оказался под якорем.
-        if st.complete and st.last_cursor and not was_baseline and cls.silent:
+        # По умолчанию ВЫКЛ (RESCUE_ABOVE_TOP=false): счётчик коллекции не вырос, значит новых
+        # листингов нет — «незнакомый лот выше прошлого верха» почти всегда старый лот, который
+        # продавец перевыставил/переценил. Именно отсюда шли «старые лоты».
+        if (settings.rescue_above_top and st.complete and st.last_cursor and not was_baseline
+                and cls.silent):
             pos = {it.listing_id: i for i, it in enumerate(items)}
             # верхний лот прошлого опроса мог быть продан/перепродан → берём первый сохранившийся
             marks = [l for l in (st.prev_top or [st.last_cursor]) if l in pos]
