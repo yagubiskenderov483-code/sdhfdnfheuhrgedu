@@ -85,9 +85,9 @@ def listing_keyboard(l: Listing, with_seller: bool = True) -> InlineKeyboardMark
     trade_bot = (getattr(settings, "trade_bot_username", "") or "").lstrip("@")
     offer = _trade_offer(l) if trade_bot else None
     offer_text = None
-    if trade_bot and offer and l.gift_link:
-        amount, unit = offer
-        tail = f" {amount} {unit}".rstrip()
+    if trade_bot and l.gift_link:
+        # ссылка на NFT в оффере всегда, даже если цену не удалось взять
+        tail = f" {offer[0]} {offer[1]}".rstrip() if offer else ""
         offer_text = f"@{trade_bot} {l.gift_link}{tail}"
     url = None
     if with_seller and l.seller_username:

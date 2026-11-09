@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 
 from config import settings
 from database.models import Listing
@@ -19,8 +20,40 @@ class FilterResult:
     reason: str
 
 
+_MONO_WORDS = ("monochrome", "монохром")
+
+
+def _rare(value) -> bool:
+    """Редкость атрибута «1.2%» <= RARE_ATTRIBUTE_PERCENT."""
+    text = (value or "").strip().casefold()
+    if not text.endswith("%"):
+        return False
+    try:
+        r = Decimal(text[:-1].replace(",", "."))
+        return r.is_finite() and Decimal(0) < r <= Decimal(str(settings.rare_attribute_percent))
+    except (InvalidOperation, ValueError):
+        return False
+
+
+def is_monochrome(l: Listing) -> bool:
+    return any(w in (v or "").casefold() for v in (l.model, l.backdrop, getattr(l, "symbol", None))
+               for w in _MONO_WORDS)
+
+
+def premium_exception(l: Listing) -> bool:
+    """Большая наценка к флору допустима только для редкой модели, редкого фона или монохрома."""
+    return is_monochrome(l) or _rare(l.model_rarity) or _rare(l.backdrop_rarity)
+
+
 class PriceFilter:
     def check(self, l: Listing) -> FilterResult:
+        # +333% к флору и выше — только если редкая модель/фон или монохром
+        pct = settings.premium_over_floor_percent
+        if pct > 0 and l.stars_price and l.floor_stars and l.floor_stars > 0:
+            over = (l.stars_price - l.floor_stars) / l.floor_stars * 100
+            if over >= pct and not premium_exception(l):
+                return FilterResult(False, f"{l.stars_price} Stars = +{over:.0f}% к флору {l.floor_stars}; "
+                                           "нет редкой модели/фона и не монохром")
         # Один порог: если задан COLLECTION_MIN_FLOOR, лоты идут от него же (флор 3000 → лоты от 3000).
         # MIN_STARS используется, только когда флор не задан (COLLECTION_MIN_FLOOR=0).
         min_stars = settings.collection_min_floor or settings.min_stars

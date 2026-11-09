@@ -544,7 +544,7 @@ class OwnerLookup:
         if self.on_bot_dead:
             try:
                 import asyncio as _a
-                t = _a.get_running_loop().create_task(self.on_bot_dead(bot, next_bot))
+                t = _a.get_running_loop().create_task(self.on_bot_dead(bot, next_bot, "silent"))
                 # strong-ref: без него Python 3.11+ GC может собрать task до завершения
                 if not hasattr(self, "_notify_tasks"):
                     self._notify_tasks: set = set()
@@ -559,9 +559,18 @@ class OwnerLookup:
         self._bot_consec_unres.pop(k, None)
         self._bot_unres_sessions.pop(k, None)
         self._bot_unres_last_at.pop(k, None)
+        if k in self._bot_dead_notified and self.on_bot_dead:
+            try:     # предупреждали, что бот молчит — сообщаем, что он снова отвечает
+                t = asyncio.get_running_loop().create_task(self.on_bot_dead(bot, None, "back"))
+                if not hasattr(self, "_notify_tasks"):
+                    self._notify_tasks = set()
+                self._notify_tasks.add(t)
+                t.add_done_callback(self._notify_tasks.discard)
+            except Exception:
+                pass
+        self._bot_dead_notified.discard(k)
         if k in self._bot_dead_until:
             self._bot_dead_until.pop(k, None)
-            self._bot_dead_notified.discard(k)
             self._persist_bot_dead(k, None)  # удаляем из БД
             log.info("Lookup: бот @%s снова отвечает — снимаю dead-mark", bot)
 
@@ -708,7 +717,7 @@ class OwnerLookup:
                     self._bot_dead_notified.add(k)
                     next_bot = next((b for b in all_bots if b.lower() != k and results.get(b, True)), None)
                     try:
-                        t = asyncio.get_running_loop().create_task(self.on_bot_dead(bot, next_bot))
+                        t = asyncio.get_running_loop().create_task(self.on_bot_dead(bot, next_bot, "missing"))
                         # strong-ref (см. _register_bot_unresolved)
                         if not hasattr(self, "_notify_tasks"):
                             self._notify_tasks = set()
@@ -1634,36 +1643,48 @@ class OwnerLookup:
                     llog("LOOKUP", f"{trust_cand.key()}: funstat вернул {len(cands)} кандидатов, "
                                    f"один из них совпал по имени — доверяем ему")
             if trust_cand is not None and (trust_cand.user_id or trust_cand.username):
-                # Пытаемся заполнить недостающий user_id из локального кеша ЛЮБОЙ Telethon session
-                # (не только текущей — вдруг другая сессия уже видела этого юзера)
-                uid = trust_cand.user_id
-                if uid is None and trust_cand.username:
-                    for w in self.sessions.workers.values():
-                        sess = getattr(getattr(w, "client", None), "session", None)
-                        if sess is None:
-                            continue
+                # Юз из базы funstat бывает СТАРЫМ (юз мог перейти к другому человеку) — поэтому
+                # без проверки не постим. Ищем кандидата в локальном кэше сессий (без resolve-запроса,
+                # он лимитирован), читаем ТЕКУЩИЙ профиль и берём текущие имя и @username.
+                # Не смогли проверить — лот не шлём (раньше ставился псевдо-ID со старым юзом).
+                order = [session] + [n for n in self.sessions.workers if n != session]
+                for name in order:
+                    w = self.sessions.workers.get(name)
+                    sess = getattr(getattr(w, "client", None), "session", None)
+                    if sess is None:
+                        continue
+                    peer = None
+                    for k in ((trust_cand.user_id,) if trust_cand.user_id else ()) + \
+                             ((trust_cand.username,) if trust_cand.username else ()):
                         try:
-                            peer = sess.get_input_entity(trust_cand.username)
-                            if peer is not None:
-                                uid = getattr(peer, "user_id", None)
-                                if uid:
-                                    break
+                            peer = sess.get_input_entity(k)
+                            break
                         except Exception:
                             continue
-                # Если user_id всё равно нет, но есть username — делаем псевдо-ID
-                # (стабильный хеш от username) чтобы было куда прицепить seller_id/seller_key.
-                # Пост получит кнопку с t.me/<username> ссылкой.
-                if uid is None and trust_cand.username:
-                    import hashlib as _h
-                    # Отрицательный хеш чтобы не пересечься с настоящими Telegram ID (всегда положительные)
-                    uid = -(int(_h.md5(trust_cand.username.encode()).hexdigest()[:12], 16) & 0x7FFFFFFF)
-                    log.info("Lookup: trust_cand @%s без user_id → псевдо-ID %d (пост по @username)",
-                             trust_cand.username, uid)
-                if uid is None:
-                    return None   # ни username ни user_id — нечего постить
-                self.stats["trusted_match"] += 1
-                return FoundOwner(uid, trust_cand.username,
-                                  trust_cand.name or seller_name, None, None)
+                    if peer is None or not getattr(peer, "user_id", None):
+                        continue
+                    async def _full(client, peer=peer):
+                        return await client.get_entity(peer)
+                    try:
+                        u = await self._run(name, _full, timeout=10)
+                    except Exception:
+                        break
+                    if getattr(u, "bot", False) or getattr(u, "deleted", False):
+                        break
+                    real = " ".join(x for x in (getattr(u, "first_name", None),
+                                                getattr(u, "last_name", None)) if x)
+                    if not same_name(real, seller_name):
+                        self.stats["name_mismatch"] = self.stats.get("name_mismatch", 0) + 1
+                        llog("LOOKUP", f"{trust_cand.key()}: сейчас зовут {real!r} ≠ {seller_name!r} — не он")
+                        break
+                    uname = getattr(u, "username", None) or next(
+                        (x.username for x in getattr(u, "usernames", None) or []
+                         if getattr(x, "active", False)), None)
+                    if not uname:
+                        break
+                    self.stats["trusted_match"] += 1
+                    return FoundOwner(peer.user_id, uname, real, getattr(u, "premium", None), name)
+                llog("LOOKUP", f"{trust_cand.key()}: юз из funstat не подтверждён в Telegram — не шлём")
         return None
 
     async def _input_user(self, session: str, c: Candidate):

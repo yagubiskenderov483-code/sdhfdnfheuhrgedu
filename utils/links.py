@@ -10,6 +10,16 @@ Username никогда не генерируется «из головы».
 from __future__ import annotations
 
 
+def gift_slug(slug: str | None, title: str | None = None, num: int | None = None) -> str | None:
+    """slug из API; если API его не отдал — собираем по правилу Telegram: «Lol Pop» #40171 → LolPop-40171.
+    Без этого у части лотов не было ссылки на NFT (ни в посте, ни в оффере)."""
+    if slug:
+        return slug
+    import re
+    base = re.sub(r"[^A-Za-z0-9]", "", title or "")
+    return f"{base}-{int(num)}" if base and num else None
+
+
 def gift_link(slug: str | None) -> str | None:
     return f"https://t.me/nft/{slug}" if slug else None
 
