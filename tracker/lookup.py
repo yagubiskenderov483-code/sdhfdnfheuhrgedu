@@ -1485,7 +1485,10 @@ class OwnerLookup:
                     log.info("Lookup: рандом-клик %d не прошёл (%s)", idx + 1, res)
                     # Капча «неактуальна» → funstat её сменил ИЛИ прислал новую (мы её увидим в
                     # следующем _ask_bot_locked poll). Если «Неизвестная кнопка» — больше нечего пробовать.
-                    if "неактуальна" in res or "Неизвестная кнопка" in res:
+                    # «Wrong!» или DataInvalid — funstat уже заменил капчу: дальше тыкать в старую
+                    # бессмысленно (в логах: «рандом-клик 3 … DataInvalidError»), ждём новую
+                    if ("неактуальна" in res or "Неизвестная кнопка" in res
+                            or "funstat сказал" in res or "DataInvalid" in res):
                         captcha_stale = True
                         break
                     await asyncio.sleep(1.5)
