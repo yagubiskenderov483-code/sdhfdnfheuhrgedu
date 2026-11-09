@@ -63,7 +63,9 @@ def _trade_offer(l: Listing) -> tuple[int | str, str] | None:
     ton = l.ton_price
     ton_amount = None
     if ton and ton > 0:
-        ton_amount = int(ton) if float(ton).is_integer() else f"{float(ton):.2f}".rstrip("0").rstrip(".")
+        # до ближайшего целого: 7.4 → 7, 7.5 → 8, 7.7 → 8 (минимум 1)
+        from decimal import Decimal, ROUND_HALF_UP
+        ton_amount = max(1, int(Decimal(str(ton)).quantize(Decimal("1"), rounding=ROUND_HALF_UP)))
     if getattr(l, "ton_only", False) and ton_amount is not None:
         return (ton_amount, "g")
     if stars and stars > 0:

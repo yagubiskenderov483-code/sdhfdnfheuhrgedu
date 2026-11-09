@@ -2480,6 +2480,13 @@ def build_routers(app: "App") -> list[Router]:
         except Exception as e:
             log.debug("cb_lookup action %s failed: %s", action, e)
 
+    @admin.message(Command("version"))
+    async def cmd_version(m: Message) -> None:
+        """Какой коммит реально запущен (Render задаёт RENDER_GIT_COMMIT)."""
+        import os as _os
+        sha = (_os.environ.get("RENDER_GIT_COMMIT") or "неизвестно")[:7]
+        await m.answer(f"🧾 Запущен коммит: <code>{html.escape(sha)}</code>")
+
     @admin.message(Command("reset_speeds"))
     async def cmd_reset_speeds(m: Message) -> None:
         """Сброс всех замедлений аккаунтов обратно до 1.0 (как после деплоя). Используй только
