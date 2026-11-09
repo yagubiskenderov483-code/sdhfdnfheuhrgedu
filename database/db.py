@@ -309,6 +309,16 @@ class Database:
         r = await cur.fetchone()
         return dict(r) if r else None
 
+    async def username_already_sent(self, username: str) -> bool:
+        """Лот этого @username уже отправлялся (без учёта регистра и @)."""
+        assert self.conn
+        u = (username or "").lstrip("@").strip().lower()
+        if not u:
+            return False
+        cur = await self.conn.execute(
+            "SELECT 1 FROM listings WHERE lower(seller_username)=? AND sent=1 LIMIT 1", (u,))
+        return await cur.fetchone() is not None
+
     async def gift_already_sent(self, gift_unique_id: int) -> bool:
         """Этот NFT уже отправлялся в канал (любым продавцом, по любой цене)."""
         assert self.conn

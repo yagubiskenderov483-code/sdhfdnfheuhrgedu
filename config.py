@@ -218,7 +218,7 @@ class Settings:
     priority_share: float = 0.65         # какая доля мощности аккаунтов уходит на дорогие коллекции
     priority_poll_interval: float = 1.5  # ускорено (было 2.5): как часто опрашивать каждую дорогую коллекцию
     auto_remove_dead: bool = True        # сессию, которую снёс Telegram, удалять из трекера автоматически
-    max_lot_age: int = 300               # лот старше 5 мин уже не свежий — не слать (было 1800) (0 = выкл)
+    max_lot_age: int = 180               # лот старше 3 мин уже не свежий — не слать (0 = выкл)
     route_by: str = "floor"              # тема по: floor (флор коллекции = цена гифта) | price (цена лота)
     premium_over_floor_percent: int = 333  # наценка к флору >= N%: только редкая модель/фон или Monochrome (0 = выкл)
     rare_attribute_percent: float = 1.5    # «редкая» модель/фон — редкость <= N%
@@ -258,7 +258,7 @@ class Settings:
     require_username: bool = True             # слать только продавцов с @username
     gift_page_owner: bool = False             # искать скрытого владельца через страницу подарка (+1 запрос
                                               # на лот, раскрывает ~1%) — по умолчанию выкл., ищет бот поиска
-    lookup_max_age: int = 240                 # после поиска владельца лот старше 4 мин не слать (было 900)
+    lookup_max_age: int = 180                 # после поиска владельца лот старше 3 мин не слать
     lookup_check_onsale: bool = True          # после поиска проверить, что лот ещё продаётся
     lookup_lang_filter: bool = False          # найденного ботом поиска владельца проверять и по языку профиля
     lookup_required: bool = True              # скрытый владелец не найден ботом поиска → лот не слать
@@ -498,7 +498,7 @@ def _from_env() -> Settings:
         priority_floor=max(0, _int(e("PRIORITY_FLOOR"), 2500)),
         priority_poll_interval=max(0.5, _float(e("PRIORITY_POLL_INTERVAL"), 1.5)),
         priority_share=min(0.9, max(0.1, _float(e("PRIORITY_SHARE"), 0.65))),
-        max_lot_age=max(0, _int(e("MAX_LOT_AGE"), 300)),
+        max_lot_age=max(0, _int(e("MAX_LOT_AGE"), 180)),
         auto_remove_dead=_bool(e("AUTO_REMOVE_DEAD"), True),
         route_by=("price" if (e("ROUTE_BY") or "").strip().lower() == "price" else "floor"),
         allow_ton_only=_bool(e("ALLOW_TON_ONLY"), False),
@@ -517,7 +517,7 @@ def _from_env() -> Settings:
         lookup_required=_bool(e("LOOKUP_REQUIRED"), True),
         require_username=_bool(e("REQUIRE_USERNAME"), True),
         gift_page_owner=_bool(e("GIFT_PAGE_OWNER"), False),
-        lookup_max_age=max(0, min(86400, _int(e("LOOKUP_MAX_AGE"), 240))),
+        lookup_max_age=max(0, min(86400, _int(e("LOOKUP_MAX_AGE"), 180))),
         start_fresh=_bool(e("START_FRESH"), True),
         lookup_check_onsale=_bool(e("LOOKUP_CHECK_ONSALE"), True),
         lookup_lang_filter=_bool(e("LOOKUP_LANG_FILTER"), False),

@@ -459,7 +459,7 @@ class OwnerLookup:
         """Все настроенные lookup-боты в глобальном блэклисте dead → lookup физически невозможен
         на этот момент. Используется в queue.py: если lookup_required=true + все боты dead,
         не отсеиваем hidden-owner лоты, а шлём с пометкой owner_not_found."""
-        return self.any_bot_configured() and not self._bot_pool()
+        return False   # ботов никогда не выключаем — даже «снесённого» продолжаем спрашивать
 
     def _bot_pool(self) -> list[str]:
         """Порядок попыток lookup-ботов: сначала основной (LOOKUP_BOT_USERNAME), затем
@@ -477,11 +477,10 @@ class OwnerLookup:
             if k in seen:
                 continue
             seen.add(k)
-            dead = self._bot_dead_until.get(k, 0.0)
-            if dead and now < dead:
-                continue
             order.append(b)
-        return order
+        # Молчащего/«снесённого» бота НЕ выкидываем — просто спрашиваем его последним,
+        # чтобы лоты не ждали его таймаут, пока запасной отвечает. Работа не останавливается.
+        return sorted(order, key=lambda b: now < self._bot_dead_until.get(b.lower(), 0.0))
 
     def _bot_cmd(self, bot: str, seller_name: str) -> str:
         """Команда для конкретного бота. Берёт per-bot из LOOKUP_CMDS, иначе общий
@@ -968,7 +967,9 @@ class OwnerLookup:
         self.stats["lookups"] += 1
         # владельцы, уже найденные раньше под этим именем — доверяем без бота поиска, но
         # всё равно читаем профиль чтобы фильтры (PAID_MESSAGES, LEVEL_TOO_HIGH) могли сработать.
-        known = await self._known(seller_name)
+        # Память «имя → владелец» отключена: под тем же именем продаёт ДРУГОЙ человек, а юз в памяти
+        # бывает старым → отсюда «не те продавцы» и старые юзы. Каждый раз проверяем заново.
+        known = []
         # Раньше требовалось И user_id И username, иначе шли по новой к funstat. Но у многих
         # пользователей @юза нет — после первой проверки память хранит только user_id, и каждый
         # следующий лот этого продавца снова грыз лимит funstat'а. Теперь достаточно user_id

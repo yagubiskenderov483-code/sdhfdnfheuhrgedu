@@ -530,6 +530,10 @@ class ListingPipeline:
                          ).isoformat(timespec="seconds")
             if await self.db.seller_already_sent(l.seller_key, since):
                 return "this seller was already sent"
+        # тот же @username уже отправлялся (другой лот / другой ключ того же человека)
+        if settings.unique_sellers and l.seller_username:
+            if await self.db.username_already_sent(l.seller_username):
+                return "this seller was already sent"
         return None
 
     async def process(self, ev: ListingEvent) -> None:
@@ -833,6 +837,22 @@ class ListingPipeline:
         return sr
 
     async def _send_stage(self, ev: ListingEvent, l: Listing, base: float, t_start: float) -> None:
+        # Последняя проверка перед постом (сюда приходят и «доверенные» владельцы от funstat,
+        # у которых профиль не прочитался — раньше они проходили с платными ЛС):
+        guard = None
+        if not l.seller_username or l.seller_type != "user" or not l.seller_id or l.seller_id <= 0:
+            guard = ("NO_USERNAME", "у продавца нет @username / владелец не подтверждён")
+        elif settings.require_free_messages and l.messages != "бесплатно":
+            guard = ("PAID_MESSAGES", f"ЛС: {l.messages or 'не удалось проверить'}")
+        elif settings.max_seller_level > 0 and (l.level or 0) > settings.max_seller_level:
+            guard = ("LEVEL_TOO_HIGH", f"level {l.level} > {settings.max_seller_level}")
+        if guard:
+            l.seller_filter_result = guard[0]
+            l.status, l.reason = ListingStatus.FILTERED_SELLER, guard[1]
+            self.stats["filtered_seller"] += 1
+            llog("FILTER", f"#{l.listing_id} rejected before send: {guard[0]} ({guard[1]})")
+            await self.db.update_listing(l)
+            return
         # повторы: тот же NFT или тот же продавец уже отправлялись → не отправляем
         async with self._released:
             # тот же продавец / коллекция отправляется прямо сейчас — ждём, чем кончится, а не выбрасываем
