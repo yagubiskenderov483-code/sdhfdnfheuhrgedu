@@ -1107,6 +1107,16 @@ class OwnerLookup:
             llog("LOOKUP", f"@{bot} /human {seller_name!r}: кандидатов нет (кешируем на час)")
             self._track_lookup(seller_name, "no_candidates", f"@{bot}")
             return None
+        require_nft = False
+        if settings.lookup_skip_over and len(cands) >= settings.lookup_skip_over:
+            # Частое имя: среди 20 обычно 1–3 с ТОЧНО таким же ником — проверяем только их
+            # и только по NFT в профиле (без «доверия»: в списке funstat видны не все тёзки).
+            exact = [c for c in cands if c.name and exact_name(c.name, seller_name)]
+            if 1 <= len(exact) <= 3:
+                self.stats["too_many_rescued"] = self.stats.get("too_many_rescued", 0) + 1
+                llog("LOOKUP", f"/human {seller_name!r}: {len(cands)} кандидатов, точное имя у {len(exact)} — "
+                               "проверяю их по NFT в профиле")
+                cands, require_nft = exact, True
         if settings.lookup_skip_over and len(cands) >= settings.lookup_skip_over:
             # слишком частое имя — проверять всех долго, такой лот сразу пропускаем
             self.stats["not_found"] += 1
@@ -1119,7 +1129,7 @@ class OwnerLookup:
         # сначала кандидаты с @username (их бот показывает как «01. Имя (@username)»), потом голые ID
         cands = sorted(cands, key=lambda c: c.username is None)
         found = await self._verify(session, cands,
-                                   seller_name, slug, unique_id)
+                                   seller_name, slug, unique_id, require_nft=require_nft)
         if found:
             # Проставляем реально ответившего бота. В ветках cached/inflight used_bot может
             # не быть определён (UnboundLocalError на fallback'е) — тогда используем bot
@@ -1562,7 +1572,8 @@ class OwnerLookup:
                 self._captcha_by_session.pop(session, None)
 
     async def _verify(self, session: str, cands: list[Candidate], seller_name: str,
-                      slug: str | None, unique_id: int | None) -> FoundOwner | None:
+                      slug: str | None, unique_id: int | None,
+                      require_nft: bool = False) -> FoundOwner | None:
         """Проверка кандидатов: тот, у кого этот NFT открыт в профиле, и есть владелец.
 
         ВАЖНО: открыть аккаунт по @username (contacts.resolveUsername) — «дорогой» запрос:
@@ -1588,7 +1599,7 @@ class OwnerLookup:
         todo = todo[:max(1, settings.lookup_max_candidates)]
         # «есть ровно одно совпадение по имени» — доверяем funstat даже без проверки видимости NFT
         # (многие прячут подарки → profile_has_gift даёт false даже у настоящего владельца)
-        trust_without_nft = (settings.lookup_trust_name_match
+        trust_without_nft = (not require_nft and settings.lookup_trust_name_match
                              and len(matched) == 1 and todo and todo[0] is matched[0])
         resolve_blocked_matched: Candidate | None = None   # для fallback-доверия, если резолв упёрся в лимит
         # кандидаты, которых мы ТОЧНО проверили (резолв прошёл) и забраковали (NFT нет / имя не то).
@@ -1596,7 +1607,7 @@ class OwnerLookup:
         verified_rejected: set[str] = set()
 
         for c in todo:
-            peer = await self._input_user(session, c)
+            sname, peer = await self._open_peer(session, c)
             if peer is None:
                 # резолв не прошёл (лимит/флуд). Если это кандидат с совпавшим именем —
                 # запомним как fallback: доверим ему, если ничего лучше не найдём.
@@ -1608,7 +1619,7 @@ class OwnerLookup:
                 async def _check(client, peer=peer):
                     return await profile_has_gift(client, peer, slug, unique_id)
                 try:
-                    ok = await self._run(session, _check, timeout=30)
+                    ok = await self._run(sname, _check, timeout=30)
                 except ProfilePrivate as e:
                     # Профиль закрыт (USER_PRIVACY_RESTRICTED) — мы НЕ ЗНАЕМ есть у него NFT.
                     # НЕ добавляем в verified_rejected: trust-fallback снизу может решить
@@ -1634,7 +1645,7 @@ class OwnerLookup:
             async def _full(client, peer=peer):
                 return await client.get_entity(peer)
             try:
-                u = await self._run(session, _full, timeout=15)
+                u = await self._run(sname, _full, timeout=15)
             except Exception as e:
                 log.info("Lookup: профиль %s не прочитался: %s", c.key(), e)
                 continue
@@ -1655,7 +1666,7 @@ class OwnerLookup:
                 continue
             uname = getattr(u, "username", None) or next(
                 (x.username for x in getattr(u, "usernames", None) or [] if getattr(x, "active", False)), None)
-            return FoundOwner(peer.user_id, uname, real or seller_name, getattr(u, "premium", None), session)
+            return FoundOwner(peer.user_id, uname, real or seller_name, getattr(u, "premium", None), sname)
 
         # fallback: ничего не проверили (все резолвы упёрлись в лимит, или cands.name пустые).
         # Доверяем funstat если:
@@ -1665,7 +1676,7 @@ class OwnerLookup:
         # Это откроет множество лотов которые раньше терялись в 'NFT ни у кого не виден'.
         # ВАЖНО: если МЫ УЖЕ проверили хотя бы одного кандидата и ЗАБРАКОВАЛИ (NFT нет / имя не то)
         # — не доверяем funstat'у ВООБЩЕ. База funstat может быть стара, а наша проверка — свежая правда.
-        if settings.lookup_trust_name_match and not verified_rejected:
+        if settings.lookup_trust_name_match and not verified_rejected and not require_nft:
             trust_cand = resolve_blocked_matched
             if trust_cand is None and len(cands) == 1:
                 c0 = cands[0]
@@ -1683,49 +1694,57 @@ class OwnerLookup:
             if trust_cand is not None and (trust_cand.user_id or trust_cand.username):
                 # Юз из базы funstat бывает СТАРЫМ (юз мог перейти к другому человеку) — поэтому
                 # без проверки не постим: открываем аккаунт, берём ТЕКУЩИЕ имя и @username.
-                name, peer = None, None
-                # 1) локальный кэш любой сессии — бесплатно, без запросов
-                for n in [session] + [x for x in self.sessions.workers if x != session]:
-                    w = self.sessions.workers.get(n)
-                    sess = getattr(getattr(w, "client", None), "session", None)
-                    if sess is None:
-                        continue
-                    for k in ((trust_cand.user_id,) if trust_cand.user_id else ()) + \
-                             ((trust_cand.username,) if trust_cand.username else ()):
-                        try:
-                            got = sess.get_input_entity(k)
-                        except Exception:
-                            continue
-                        if getattr(got, "user_id", None):
-                            name, peer = n, got
-                            break
-                    if peer is not None:
-                        break
-                # 2) нет в кэше — открываем по @username через аккаунт, у которого ещё есть лимит
-                #    новых юзов на этот час (раньше упирались в лимит ОДНОЙ сессии и лот терялся)
-                if peer is None and trust_cand.username:
-                    now_r = time.monotonic()
-                    def _used(n):
-                        return sum(1 for t in self._resolves.get(n, []) if now_r - t < 3600)
-                    # только здоровые аккаунты: без FloodWait за последние 10 мин и не замедленные
-                    # (раньше выбирались «простаивающие» — а простаивают как раз больные во FloodWait)
-                    calm = [w for w in self.sessions.usable(include_reserved=True)
-                            if w.is_usable() and _used(w.name) < settings.lookup_resolve_per_hour
-                            and not any(now_r - t < 600 for t in getattr(w, "recent_floods", []))]
-                    # сначала быстрые (speed ≥ 0.5); если весь флот замедлен — любой спокойный аккаунт
-                    pool = [w for w in calm if getattr(w, "speed", 1.0) >= 0.5] or calm
-                    pool.sort(key=lambda w: (-getattr(w, "speed", 1.0), _used(w.name)))
-                    for w in pool[:2]:                       # максимум 2 попытки на лот
-                        got = await self._input_user(w.name, trust_cand)
-                        if got is not None:
-                            name, peer = w.name, got
-                            break
+                name, peer = await self._open_peer(session, trust_cand)
                 owner = await self._confirm_current(name, peer, seller_name) if peer is not None else None
                 if owner is not None:
                     self.stats["trusted_match"] += 1
                     return owner
                 llog("LOOKUP", f"{trust_cand.key()}: юз из funstat не подтверждён в Telegram — не шлём")
         return None
+
+    async def _open_peer(self, session: str, c: Candidate):
+        """Открыть кандидата (InputPeerUser) так, чтобы НЕ терять его из-за часового лимита одной сессии:
+          1) своя сессия: кэш или запрос в пределах её лимита;
+          2) кэш любой другой сессии — бесплатно;
+          3) по @username через здоровый аккаунт, у которого ещё есть лимит (≤2 попытки).
+        → (имя сессии, peer) или (None, None). Дальнейшие запросы делать на ЭТОЙ сессии
+        (access_hash привязан к аккаунту)."""
+        peer = await self._input_user(session, c)
+        if peer is not None:
+            return session, peer
+        for n, w in list(self.sessions.workers.items()):
+            if n == session:
+                continue
+            sess = getattr(getattr(w, "client", None), "session", None)
+            if sess is None or not w.is_usable():
+                continue
+            for k in ((c.user_id,) if c.user_id else ()) + ((c.username,) if c.username else ()):
+                try:
+                    got = sess.get_input_entity(k)
+                except Exception:
+                    continue
+                if isinstance(got, types.InputPeerUser):
+                    self._peers[(n, c.key())] = got
+                    return n, got
+        if not c.username:
+            return None, None
+        now_r = time.monotonic()
+
+        def _used(n):
+            return sum(1 for t in self._resolves.get(n, []) if now_r - t < 3600)
+        calm = [w for w in self.sessions.usable(include_reserved=True)
+                if w.name != session and w.is_usable()
+                and _used(w.name) < settings.lookup_resolve_per_hour
+                and not any(now_r - t < 600 for t in getattr(w, "recent_floods", []))]
+        # сначала быстрые (speed ≥ 0.5); если весь флот замедлен — любой спокойный аккаунт
+        pool = [w for w in calm if getattr(w, "speed", 1.0) >= 0.5] or calm
+        pool.sort(key=lambda w: (-getattr(w, "speed", 1.0), _used(w.name)))
+        for w in pool[:2]:
+            got = await self._input_user(w.name, c)
+            if got is not None:
+                self.stats["resolve_other_session"] = self.stats.get("resolve_other_session", 0) + 1
+                return w.name, got
+        return None, None
 
     async def _confirm_current(self, name: str, peer, seller_name: str) -> FoundOwner | None:
         """Открыть профиль на сессии name и вернуть владельца с ТЕКУЩИМ @username,
