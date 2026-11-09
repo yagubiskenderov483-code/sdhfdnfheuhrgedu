@@ -215,18 +215,8 @@ class TelegramSender:
                             markup = fallback_markup
                             attempt -= 1
                             continue
-                    # Превью NFT снимаем ТОЛЬКО при ошибке самого превью (раньше — при любой ошибке,
-                    # поэтому иногда пост шёл без карточки NFT)
-                    if (any(w in es.upper() for w in ("WEBPAGE", "PREVIEW", "MEDIA_EMPTY"))
-                            and preview.is_disabled is not True):
-                        preview = LinkPreviewOptions(is_disabled=True)
-                        attempt -= 1
-                        continue
-                    if fallback_markup is not None and markup is not fallback_markup:
-                        markup = fallback_markup     # неизвестная ошибка: сначала без кнопки продавца
-                        attempt -= 1
-                        continue
-                    if preview.is_disabled is not True:      # последний шанс не потерять лот
+                    # например, битая ссылка превью — повторяем без превью
+                    if preview.is_disabled is not True:      # (у aiogram там бывает Default(...), он «истинный»)
                         preview = LinkPreviewOptions(is_disabled=True)
                         attempt -= 1
                         continue

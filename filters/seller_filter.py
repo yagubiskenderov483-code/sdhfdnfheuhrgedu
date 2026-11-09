@@ -44,14 +44,6 @@ _FOREIGN_SCRIPT = re.compile(r"[\u0590-\u06FF\u0750-\u077F\u0900-\u0DFF\u0E00-\u
 # \u0422\u0443\u0440\u0435\u0446\u043A\u0438\u0435 / \u0430\u0437\u0435\u0440\u0431\u0430\u0439\u0434\u0436\u0430\u043D\u0441\u043A\u0438\u0435 / \u043D\u0435\u043C\u0435\u0446\u043A\u0438\u0435 \u0431\u0443\u043A\u0432\u044B \u0441 \u0434\u0438\u0430\u043A\u0440\u0438\u0442\u0438\u043A\u043E\u0439: \u00F6 \u00FC \u011F \u0259 \u00E7 \u015F \u0131.
 # \u0412 \u0438\u043C\u0435\u043D\u0430\u0445 \u043D\u0430\u0441\u0442\u043E\u044F\u0449\u0438\u0445 RU/UA/BY-\u043F\u0440\u043E\u0434\u0430\u0432\u0446\u043E\u0432 \u043F\u0440\u0430\u043A\u0442\u0438\u0447\u0435\u0441\u043A\u0438 \u043D\u0435 \u0432\u0441\u0442\u0440\u0435\u0447\u0430\u044E\u0442\u0441\u044F \u2014 \u0434\u043B\u044F \u0441\u043A\u0440\u044B\u0442\u044B\u0445 \u0432\u043B\u0430\u0434\u0435\u043B\u044C\u0446\u0435\u0432
 # \u044D\u0442\u043E \u0441\u0438\u043B\u044C\u043D\u044B\u0439 \u0441\u0438\u0433\u043D\u0430\u043B \u00AB\u043D\u0435 \u043D\u0430\u0448\u00BB. \u041F\u0440\u043E\u0432\u0435\u0440\u044F\u0435\u0442\u0441\u044F \u0442\u043E\u043B\u044C\u043A\u043E \u0432 hidden-owner \u0432\u0435\u0442\u043A\u0435.
-# Арабица/фарси, включая «красивые» формы из ников (FB50–FDFF, FE70–FEFF) — блок ВСЕГДА.
-_ARABIC_SCRIPT = re.compile(r"[\u0600-\u06FF\u0750-\u077F\u0870-\u089F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]")
-
-
-def has_arabic(*texts: str | None) -> bool:
-    return any(t and _ARABIC_SCRIPT.search(t) for t in texts)
-
-
 _HIDDEN_FOREIGN_LETTERS = re.compile(r"[\u00F6\u00FC\u011F\u0259\u00E7\u015F\u0131\u0130\u00D6\u00DC\u011E\u018F\u00C7\u015E]")
 
 
@@ -151,12 +143,6 @@ class SellerFilter:
     def check(self, l: Listing) -> SellerResult:
         if self._match(l, self.black_ids, self.black_names):
             return SellerResult(False, "BLACKLIST", "seller in blacklist")
-
-        # Арабы — отсеиваем всегда и до любых «пропускающих» правил (раньше имя с кириллицей
-        # и арабскими буквами проходило как русское, а найденные через funstat — перебивали отказ)
-        if has_arabic(l.seller_name, l.seller_about, l.seller_channel, l.seller_gift_text,
-                      l.seller_business, l.seller_extra_text):
-            return SellerResult(False, "ARABIC_SCRIPT", "арабские буквы в профиле продавца")
 
         # Telegram в октябре 26 начал скрывать владельцев NFT: owner_id и host_id отсутствуют,
         # видно только owner_name. Профиля нет → обычный RUSSIAN_ONLY неприменим.

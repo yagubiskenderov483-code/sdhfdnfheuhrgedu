@@ -459,9 +459,7 @@ class OwnerLookup:
         """Все настроенные lookup-боты в глобальном блэклисте dead → lookup физически невозможен
         на этот момент. Используется в queue.py: если lookup_required=true + все боты dead,
         не отсеиваем hidden-owner лоты, а шлём с пометкой owner_not_found."""
-        now = time.monotonic()
-        bots = [b.lower() for b in self._bot_pool()]
-        return bool(bots) and all(now < self._bot_dead_until.get(k, 0.0) for k in bots)
+        return self.any_bot_configured() and not self._bot_pool()
 
     def _bot_pool(self) -> list[str]:
         """Порядок попыток lookup-ботов: сначала основной (LOOKUP_BOT_USERNAME), затем
@@ -479,10 +477,11 @@ class OwnerLookup:
             if k in seen:
                 continue
             seen.add(k)
+            dead = self._bot_dead_until.get(k, 0.0)
+            if dead and now < dead:
+                continue
             order.append(b)
-        # Бот, который не отвечает, НЕ выкидываем (работа не стопается) — просто спрашиваем его
-        # последним, чтобы лоты не ждали его таймаут, пока отвечает запасной.
-        return sorted(order, key=lambda b: now < self._bot_dead_until.get(b.lower(), 0.0))
+        return order
 
     def _bot_cmd(self, bot: str, seller_name: str) -> str:
         """Команда для конкретного бота. Берёт per-bot из LOOKUP_CMDS, иначе общий
@@ -545,7 +544,7 @@ class OwnerLookup:
         if self.on_bot_dead:
             try:
                 import asyncio as _a
-                t = _a.get_running_loop().create_task(self.on_bot_dead(bot, next_bot, "silent"))
+                t = _a.get_running_loop().create_task(self.on_bot_dead(bot, next_bot))
                 # strong-ref: без него Python 3.11+ GC может собрать task до завершения
                 if not hasattr(self, "_notify_tasks"):
                     self._notify_tasks: set = set()
@@ -560,18 +559,9 @@ class OwnerLookup:
         self._bot_consec_unres.pop(k, None)
         self._bot_unres_sessions.pop(k, None)
         self._bot_unres_last_at.pop(k, None)
-        if k in self._bot_dead_notified and self.on_bot_dead:
-            try:     # предупреждали, что бот молчит — сообщаем, что он ожил
-                t = asyncio.get_running_loop().create_task(self.on_bot_dead(bot, None, "back"))
-                if not hasattr(self, "_notify_tasks"):
-                    self._notify_tasks = set()
-                self._notify_tasks.add(t)
-                t.add_done_callback(self._notify_tasks.discard)
-            except Exception:
-                pass
-        self._bot_dead_notified.discard(k)
         if k in self._bot_dead_until:
             self._bot_dead_until.pop(k, None)
+            self._bot_dead_notified.discard(k)
             self._persist_bot_dead(k, None)  # удаляем из БД
             log.info("Lookup: бот @%s снова отвечает — снимаю dead-mark", bot)
 
@@ -718,7 +708,7 @@ class OwnerLookup:
                     self._bot_dead_notified.add(k)
                     next_bot = next((b for b in all_bots if b.lower() != k and results.get(b, True)), None)
                     try:
-                        t = asyncio.get_running_loop().create_task(self.on_bot_dead(bot, next_bot, "missing"))
+                        t = asyncio.get_running_loop().create_task(self.on_bot_dead(bot, next_bot))
                         # strong-ref (см. _register_bot_unresolved)
                         if not hasattr(self, "_notify_tasks"):
                             self._notify_tasks = set()
@@ -886,9 +876,24 @@ class OwnerLookup:
         return self._pending
 
     # ---------------------------------------------------- память найденных владельцев (kv в БД)
-    async def _known(self, name: str) -> list:
-        """Память «имя → владелец» отключена: под тем же именем продаёт другой человек → старые/чужие юзы."""
-        return []
+    async def _known(self, name: str) -> list[Candidate]:
+        if self.db is None:
+            return []
+        try:
+            raw = await self.db.kv_get(f"owner:{_norm_name(name)}")
+            items = json.loads(raw) if raw else []
+        except Exception:
+            return []
+        # отрицательные id — pseudo (legacy до фикса в _remember). Фильтруем на чтении,
+        # чтобы старые записи не портили результат. Нули/негатив — тоже выкидываем из поля id.
+        out = []
+        for i in items:
+            uid = i.get("id") if (i.get("id") and i["id"] > 0) else None
+            u = i.get("u") or None
+            if u or uid:
+                out.append(Candidate(username=u, user_id=uid, name=name))
+        return out
+
     async def _remember(self, name: str, owner: FoundOwner) -> None:
         if self.db is None:
             return
@@ -1518,89 +1523,148 @@ class OwnerLookup:
             if self._captcha_by_session.get(session) == token:
                 self._captcha_by_session.pop(session, None)
 
-    async def _peer_any_session(self, session: str, c: Candidate):
-        """Открыть кандидата: на своей сессии, а если она упёрлась в лимит ресолвов — на других."""
-        peer = await self._input_user(session, c)
-        if peer is not None:
-            return peer, session
-        for other in self._pick_sessions():
-            if other != session:
-                peer = await self._input_user(other, c)
-                if peer is not None:
-                    return peer, other
-        return None, None
-
     async def _verify(self, session: str, cands: list[Candidate], seller_name: str,
                       slug: str | None, unique_id: int | None) -> FoundOwner | None:
-        """Владелец скрыт на маркете, но в профиле NFT видно:
-          1) у кандидата этот NFT в профиле — точно владелец (даже среди тёзок);
-          2) подарки скрыты/не прочитались — принимаем только однозначное совпадение:
-             один кандидат с дословным именем или вообще один похожий.
-        Имя и @username ВСЕГДА текущие из Telegram (база бота бывает старой) → без чужих юзов."""
-        unique = list({c.key(): c for c in cands}.values())
-        matched = [c for c in unique if c.name and same_name(c.name, seller_name)]
-        if not matched and len(unique) == 1:
-            matched = unique
-        if not matched:
-            return None
-        limit = max(1, settings.lookup_max_candidates)
-        checked_all = len(matched) <= limit
-        matched = sorted(matched, key=lambda c: c.user_id is None)[:limit]
-        want = _norm_name(seller_name)
-        owners: list[FoundOwner] = []
-        exact: list[FoundOwner] = []
-        for c in matched:
-            try:
-                peer, used = await self._peer_any_session(session, c)
-                if peer is None:
-                    checked_all = False
-                    continue
-                async def _full(client, peer=peer):
-                    return await client.get_entity(peer)
-                u = await self._run(used, _full, timeout=10)
-                uid = getattr(u, "id", None)
-                if (not uid or uid != peer.user_id or (c.user_id and uid != c.user_id)
-                        or getattr(u, "bot", False) or getattr(u, "deleted", False)):
-                    continue
-                real = " ".join(x for x in (getattr(u, "first_name", None), getattr(u, "last_name", None)) if x)
-                if not same_name(real, seller_name):
-                    self.stats["name_mismatch"] = self.stats.get("name_mismatch", 0) + 1
-                    continue
-                uname = getattr(u, "username", None) or next(
-                    (x.username for x in getattr(u, "usernames", None) or [] if getattr(x, "active", False)), None)
-                if not uname:
-                    continue
-                owner = FoundOwner(uid, uname, real, getattr(u, "premium", None), used)
+        """Проверка кандидатов: тот, у кого этот NFT открыт в профиле, и есть владелец.
+
+        ВАЖНО: открыть аккаунт по @username (contacts.resolveUsername) — «дорогой» запрос:
+        при частых вызовах Telegram даёт FloodWait на ~20 часов. Поэтому:
+          • проверяем только кандидатов, у которых имя в ответе бота совпало с именем продавца
+            (ни одно не совпало — не больше LOOKUP_NOMATCH_CHECK первых);
+          • не больше LOOKUP_RESOLVE_PER_HOUR новых юзов в час на аккаунт;
+          • уже открытые юзы запоминаем и повторно не открываем."""
+        # дедуп: funstat часто возвращает одного и того же дважды (разные источники — @юз и ID)
+        seen_keys: set[str] = set()
+        unique_cands: list[Candidate] = []
+        for c in cands:
+            k = c.key()
+            if k not in seen_keys:
+                seen_keys.add(k)
+                unique_cands.append(c)
+        cands = unique_cands
+
+        matched = [c for c in cands if c.name and same_name(c.name, seller_name)]
+        todo = matched if matched else cands[:max(0, settings.lookup_nomatch_check)]
+        # сначала те, кого можно открыть без resolveUsername (по ID из ответа бота)
+        todo = sorted(todo, key=lambda c: c.user_id is None)
+        todo = todo[:max(1, settings.lookup_max_candidates)]
+        # «есть ровно одно совпадение по имени» — доверяем funstat даже без проверки видимости NFT
+        # (многие прячут подарки → profile_has_gift даёт false даже у настоящего владельца)
+        trust_without_nft = (settings.lookup_trust_name_match
+                             and len(matched) == 1 and todo and todo[0] is matched[0])
+        resolve_blocked_matched: Candidate | None = None   # для fallback-доверия, если резолв упёрся в лимит
+        # кандидаты, которых мы ТОЧНО проверили (резолв прошёл) и забраковали (NFT нет / имя не то).
+        # Их НЕЛЬЗЯ брать в trust-fallback: мы уже знаем, что это не владелец.
+        verified_rejected: set[str] = set()
+
+        for c in todo:
+            peer = await self._input_user(session, c)
+            if peer is None:
+                # резолв не прошёл (лимит/флуд). Если это кандидат с совпавшим именем —
+                # запомним как fallback: доверим ему, если ничего лучше не найдём.
+                if c in matched and resolve_blocked_matched is None:
+                    resolve_blocked_matched = c
+                continue
+
+            if not trust_without_nft:
                 async def _check(client, peer=peer):
                     return await profile_has_gift(client, peer, slug, unique_id)
                 try:
-                    has = await self._run(used, _check, timeout=15)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    has = None
-                if has:
-                    self.stats["verified_nft"] = self.stats.get("verified_nft", 0) + 1
-                    llog("LOOKUP", f"{seller_name!r} → u{uid} @{uname}: NFT в профиле ✔")
-                    return owner
-                if has is False:
-                    continue                     # подарки видны, этого NFT нет → не он
-                owners.append(owner)
-                if _norm_name(real) == want:
-                    exact.append(owner)
-            except asyncio.CancelledError:
-                raise
+                    ok = await self._run(session, _check, timeout=30)
+                except ProfilePrivate as e:
+                    # Профиль закрыт (USER_PRIVACY_RESTRICTED) — мы НЕ ЗНАЕМ есть у него NFT.
+                    # НЕ добавляем в verified_rejected: trust-fallback снизу может решить
+                    # доверять ему по совпадению имени (это основной кейс для приватных).
+                    self.stats["nft_private"] = self.stats.get("nft_private", 0) + 1
+                    log.info("Lookup: %s профиль закрыт (%s) — считаем неопределённо", c.key(), e)
+                    # Если именно он единственный matched — доверяем сразу (аналог trust_without_nft)
+                    if c in matched and resolve_blocked_matched is None:
+                        resolve_blocked_matched = c
+                    continue
+                except Exception as e:
+                    log.debug("Lookup: подарки %s не прочитались: %s", c.key(), e)
+                    continue
+                if not ok:
+                    verified_rejected.add(c.key())
+                    continue
+            else:
+                self.stats["trusted_match"] += 1
+                llog("LOOKUP", f"{c.key()}: funstat вернул одного с совпавшим именем — "
+                               f"верим без проверки NFT (LOOKUP_TRUST_NAME_MATCH)")
+            # NFT у него в профиле — дополнительно сверяем НАСТОЯЩЕЕ имя аккаунта с именем владельца
+            # и берём его ТЕКУЩИЙ @юз (база бота поиска бывает старой: юз мог перейти к другому человеку)
+            async def _full(client, peer=peer):
+                return await client.get_entity(peer)
+            try:
+                u = await self._run(session, _full, timeout=15)
             except Exception as e:
-                log.debug("Lookup verify %s: %s", c.key(), e)
-                checked_all = False
-        pick = None
-        if checked_all:
-            pick = exact[0] if len(exact) == 1 else (owners[0] if len(owners) == 1 else None)
-        if pick is not None:
-            self.stats["trusted_match"] += 1
-            llog("LOOKUP", f"{seller_name!r} → u{pick.user_id} @{pick.username}: подарки скрыты, "
-                           "единственное совпадение — принимаем")
-        return pick
+                log.info("Lookup: профиль %s не прочитался: %s", c.key(), e)
+                continue
+            real = " ".join(x for x in (getattr(u, "first_name", None), getattr(u, "last_name", None)) if x)
+            if settings.lookup_name_check and not same_name(real, seller_name):
+                self.stats["name_mismatch"] = self.stats.get("name_mismatch", 0) + 1
+                llog("LOOKUP", f"{c.key()}: NFT есть, но имя {real!r} ≠ {seller_name!r} — не он")
+                verified_rejected.add(c.key())
+                continue
+            uname = getattr(u, "username", None) or next(
+                (x.username for x in getattr(u, "usernames", None) or [] if getattr(x, "active", False)), None)
+            return FoundOwner(peer.user_id, uname, real or seller_name, getattr(u, "premium", None), session)
+
+        # fallback: ничего не проверили (все резолвы упёрлись в лимит, или cands.name пустые).
+        # Доверяем funstat если:
+        #   1) есть кандидат с совпавшим именем, резолв которого упёрся в лимит, ИЛИ
+        #   2) funstat вернул ровно 1 кандидата (всего), ИЛИ
+        #   3) funstat вернул ≤3 кандидатов, из которых только ОДИН совпал по имени — берём его.
+        # Это откроет множество лотов которые раньше терялись в 'NFT ни у кого не виден'.
+        # ВАЖНО: если МЫ УЖЕ проверили хотя бы одного кандидата и ЗАБРАКОВАЛИ (NFT нет / имя не то)
+        # — не доверяем funstat'у ВООБЩЕ. База funstat может быть стара, а наша проверка — свежая правда.
+        if settings.lookup_trust_name_match and not verified_rejected:
+            trust_cand = resolve_blocked_matched
+            if trust_cand is None and len(cands) == 1:
+                c0 = cands[0]
+                if c0.user_id or c0.username:
+                    trust_cand = c0
+                    llog("LOOKUP", f"{trust_cand.key()}: funstat вернул единственного кандидата — "
+                                   f"доверяем (LOOKUP_TRUST_NAME_MATCH)")
+            elif trust_cand is None and 2 <= len(cands) <= 3:
+                # берём только из тех, кто совпал по имени
+                matched_valid = [c for c in matched if c.user_id or c.username]
+                if len(matched_valid) == 1:
+                    trust_cand = matched_valid[0]
+                    llog("LOOKUP", f"{trust_cand.key()}: funstat вернул {len(cands)} кандидатов, "
+                                   f"один из них совпал по имени — доверяем ему")
+            if trust_cand is not None and (trust_cand.user_id or trust_cand.username):
+                # Пытаемся заполнить недостающий user_id из локального кеша ЛЮБОЙ Telethon session
+                # (не только текущей — вдруг другая сессия уже видела этого юзера)
+                uid = trust_cand.user_id
+                if uid is None and trust_cand.username:
+                    for w in self.sessions.workers.values():
+                        sess = getattr(getattr(w, "client", None), "session", None)
+                        if sess is None:
+                            continue
+                        try:
+                            peer = sess.get_input_entity(trust_cand.username)
+                            if peer is not None:
+                                uid = getattr(peer, "user_id", None)
+                                if uid:
+                                    break
+                        except Exception:
+                            continue
+                # Если user_id всё равно нет, но есть username — делаем псевдо-ID
+                # (стабильный хеш от username) чтобы было куда прицепить seller_id/seller_key.
+                # Пост получит кнопку с t.me/<username> ссылкой.
+                if uid is None and trust_cand.username:
+                    import hashlib as _h
+                    # Отрицательный хеш чтобы не пересечься с настоящими Telegram ID (всегда положительные)
+                    uid = -(int(_h.md5(trust_cand.username.encode()).hexdigest()[:12], 16) & 0x7FFFFFFF)
+                    log.info("Lookup: trust_cand @%s без user_id → псевдо-ID %d (пост по @username)",
+                             trust_cand.username, uid)
+                if uid is None:
+                    return None   # ни username ни user_id — нечего постить
+                self.stats["trusted_match"] += 1
+                return FoundOwner(uid, trust_cand.username,
+                                  trust_cand.name or seller_name, None, None)
+        return None
 
     async def _input_user(self, session: str, c: Candidate):
         """InputPeerUser кандидата: из своего кэша, из кэша сессии Telethon (без запросов), и только

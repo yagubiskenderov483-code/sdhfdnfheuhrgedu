@@ -144,11 +144,6 @@ class App:
         # коллекции, выключенные админом через /mute (хранятся в резервной копии)
         self.pipeline.muted_getter = lambda: set(self.backup.flags.get("muted") or [])
         self.dp = Dispatcher(storage=MemoryStorage())
-        # команды не теряются при повторе; долгая команда сразу пишет «⏳ Выполняю…»
-        from bot.resilience import ResponsiveReplies
-        _resp = ResponsiveReplies()
-        self.dp.message.middleware(_resp)
-        self.dp.callback_query.middleware(_resp)
         self._alerts: dict[str, float] = {}
         self._bad_since: dict[str, float] = {}
         self._started_at = time.time()
@@ -419,20 +414,35 @@ class App:
                 log.warning("Lookup liveness loop: %s", e)
             await asyncio.sleep(600)   # 10 минут между проверками
 
-    async def _notify_bot_dead(self, bot: str, next_bot: str | None = None, kind: str = "silent") -> None:
-        """Просто предупреждение админам: lookup-бот не отвечает / снесён / снова в строю.
-        Трекер при этом НЕ останавливается — молчащего бота спрашиваем последним."""
-        kb = None
+    async def _notify_bot_dead(self, bot: str, next_bot: str | None) -> None:
+        """Lookup-бот @bot недоступен (помечен dead на 15 мин). Один раз на дохлого бота
+        шлём админу: 'funstat снесли, переключились на infostat'. Если запасных нет —
+        просим прописать LOOKUP_BOTS."""
+        from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
         targets = set(settings.admin_ids or set()) | set(all_admins())
-        b = html.escape(bot)
-        if kind == "back":
-            text = f"✅ Lookup-бот @{b} снова отвечает."
-        elif kind == "missing":
-            text = (f"⚠️ Lookup-бот @{b} не находится — похоже, его снесли или переименовали.\n"
-                    "Трекер работает дальше" + (f", ищу через @{html.escape(next_bot)}." if next_bot else "."))
+        if next_bot:
+            text = (f"⚠️ Lookup-бот @{html.escape(bot)} <b>не отвечает</b> ни на одной сессии "
+                    "(возможно снесли / переименовали / Telegram пока не отдаёт).\n\n"
+                    f"Автоматически переключился на запасной: @{html.escape(next_bot)}.\n\n"
+                    "Через 15 мин сам попробует снова оригинальный бот. Если @"
+                    f"{html.escape(bot)} реально мёртв — закрепи @{html.escape(next_bot)} "
+                    "как основной одной командой:\n"
+                    f"<code>/bots_set_primary {html.escape(next_bot)}</code>")
         else:
-            text = (f"⚠️ Lookup-бот @{b} не отвечает.\n"
-                    "Трекер работает дальше" + (f", пока сначала спрашиваю @{html.escape(next_bot)}." if next_bot else "."))
+            text = (f"🚨 Lookup-бот @{html.escape(bot)} <b>не отвечает</b> ни на одной сессии, "
+                    "а запасных в <code>LOOKUP_BOTS</code> нет.\n\n"
+                    "<b>Hidden-owner лоты идут в канал с пометкой без фильтра</b> пока "
+                    "бот не вернётся / пока не укажешь запасного:\n"
+                    "<code>/bots_add infostat</code> (и повторить для других)\n\n"
+                    "Через 15 мин сам попробует снова. Если бот @"
+                    f"{html.escape(bot)} реально снесён — замени его через "
+                    "<code>/bots_set_primary &lt;новый&gt;</code>.")
+        kb_rows = [[InlineKeyboardButton(text="🤖 Пул ботов", callback_data="bots:refresh"),
+                    InlineKeyboardButton(text="🏓 Пинг", callback_data="bots:ping")]]
+        if next_bot:
+            kb_rows.append([InlineKeyboardButton(text=f"🧹 Снять dead-mark с @{bot[:20]}",
+                                                 callback_data="bots:cleardead")])
+        kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
         for chat in sorted(targets):
             try:
                 await self.bot.send_message(chat, text, reply_markup=kb)

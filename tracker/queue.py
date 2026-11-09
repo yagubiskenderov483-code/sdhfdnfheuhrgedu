@@ -37,7 +37,7 @@ from sessions.manager import SessionManager
 from tracker.marketplace import (ResaleItem, SellerFull, fetch_extra_texts, fetch_full_user, fetch_gift_owner,
                                  fetch_full_user_failover, fetch_gift_texts,
                                  fetch_nft_count)
-from utils.links import gift_link, username_link, gift_slug
+from utils.links import gift_link, username_link
 from utils.logger import get_logger, llog
 
 log = get_logger("pipeline")
@@ -70,8 +70,8 @@ def build_listing(it: ResaleItem, session: str | None) -> Listing:
         gift_id=it.gift_id,
         gift_name=it.title,
         gift_num=it.num,
-        gift_slug=gift_slug(it.slug, it.title, it.num),
-        gift_link=gift_link(gift_slug(it.slug, it.title, it.num)),
+        gift_slug=it.slug,
+        gift_link=gift_link(it.slug),
         model=it.model,
         backdrop=it.backdrop,
         symbol=it.symbol,
@@ -141,7 +141,7 @@ class _Stale(Exception):
 
 
 _LANG_CODES = {"UNKNOWN_BLOCKED", "FOREIGN_TEXT", "PHONE_MISMATCH"}
-_HIDDEN_HARD_REJECT = {"BLACKLIST", "ARABIC_SCRIPT", "SHORT_NAME_HIDDEN", "FOREIGN_LETTER_HIDDEN", "FOREIGN_NAME_HIDDEN"}
+_HIDDEN_HARD_REJECT = {"BLACKLIST", "SHORT_NAME_HIDDEN", "FOREIGN_LETTER_HIDDEN", "FOREIGN_NAME_HIDDEN"}
 
 
 class ListingPipeline:
@@ -546,15 +546,6 @@ class ListingPipeline:
                 age = max(age, (datetime.now(timezone.utc) - datetime.fromisoformat(l.first_seen)).total_seconds())
             except (TypeError, ValueError):
                 pass
-        # Свежесть: трекер увидел лот позже MAX_DETECT_SECS после появления → лот уже старый
-        lag = (l.t_found - l.t_detect) if (l.t_detect is not None and l.t_found is not None) else None
-        if (ev.mode == "live" and settings.max_detect_secs > 0 and lag is not None
-                and lag > settings.max_detect_secs):
-            l.status, l.reason = ListingStatus.ERROR, f"stale: увиден через {lag:.0f}s после появления"
-            self.stats["stale"] = self.stats.get("stale", 0) + 1
-            llog("FILTER", f"#{l.listing_id} skipped: {l.reason}")
-            await self.db.update_listing(l)
-            return
         if ev.mode != "lookup" and settings.max_lot_age > 0 and age > settings.max_lot_age:
             l.status, l.reason = ListingStatus.ERROR, f"stale: found {age:.0f}s ago"
             self.stats["stale"] = self.stats.get("stale", 0) + 1
@@ -671,7 +662,9 @@ class ListingPipeline:
         llog("FILTER", f"#{l.listing_id} seller passed ({sr.code})")
         # user: 'он перебрасывает бота а не в проф' — без @username пост не нужен,
         # tg://user?id= у большинства уходит в чат бота, а не в профиль продавца.
-        if not l.seller_username:           # без @username — никогда
+        # Исключение: owner_not_found шлёт лот С ПОМЕТКОЙ (нет кнопки продавца).
+        if (settings.require_username and not l.seller_username
+                and not getattr(l, "owner_not_found", False)):
             await self._reject_no_username(l)
             return
         await self._send_stage(ev, l, base, t_start)
@@ -741,7 +734,10 @@ class ListingPipeline:
     async def _check_seller(self, l: Listing) -> SellerResult:
         if getattr(l, "owner_not_found", False) and l.seller_type is None:
             # владелец скрыт и не найден, но LOOKUP_REQUIRED=false — шлём с пометкой (blacklist всё равно)
-            return SellerResult(False, "OWNER_NOT_FOUND", "владелец не найден — без @username не шлём")
+            pre = self.seller_filter.check(l)
+            if pre.code == "BLACKLIST":
+                return pre
+            return SellerResult(True, "OWNER_NOT_FOUND_SENT", "owner hidden, not found — sent with a note")
         # Владелец от funstat по доверию имени: пробуем прочитать профиль через failover
         # (resale-страница коллекции отдаёт access_hash → профиль станет доступен). Если
         # получилось — _enrich_seller снимет флаг owner_trusted_no_resolve, и мы ПРОВАЛИМСЯ
@@ -770,8 +766,7 @@ class ListingPipeline:
         # и только если LOOKUP_LANG_FILTER=False (при True — язык проверяется даже для found).
         # LOOKUP_FAILED убрано: если enrich упал, но funstat нашёл владельца — доверяем funstat'у
         # (теряем paid-messages защиту для таких лотов, но лучше чем терять лот совсем).
-        # ARABIC_SCRIPT: раньше найденный через funstat владелец «перебивал» отказ — арабы пролезали
-        _HARD_REJECT_EVEN_IF_FOUND = {"BLACKLIST", "ARABIC_SCRIPT", "PAID_MESSAGES", "TOO_MANY_NFTS", "LEVEL_TOO_HIGH"}
+        _HARD_REJECT_EVEN_IF_FOUND = {"BLACKLIST", "PAID_MESSAGES", "TOO_MANY_NFTS", "LEVEL_TOO_HIGH"}
         # Если LOOKUP_LANG_FILTER включён, не override'им лингвистические отказы
         skip_override = sr.code in _LANG_CODES and settings.lookup_lang_filter
         if (not sr.passed and l.owner_found_via and sr.code not in _HARD_REJECT_EVEN_IF_FOUND
@@ -842,20 +837,6 @@ class ListingPipeline:
         return sr
 
     async def _send_stage(self, ev: ListingEvent, l: Listing, base: float, t_start: float) -> None:
-        # Последний рубеж перед постом: только человек с @username, ЛС бесплатно, Level <= лимита
-        guard = None
-        if not l.seller_username or l.seller_type != "user" or getattr(l, "owner_not_found", False):
-            guard = ("NO_USERNAME", "у продавца нет @username / владелец не подтверждён")
-        elif settings.require_free_messages and l.messages is not None and l.messages != "бесплатно":
-            guard = ("PAID_MESSAGES", f"сообщения: {l.messages}")
-        elif settings.max_seller_level > 0 and (l.level or 0) > settings.max_seller_level:
-            guard = ("LEVEL_TOO_HIGH", f"level {l.level} > {settings.max_seller_level}")
-        if guard:
-            l.seller_filter_result, (l.status, l.reason) = guard[0], (ListingStatus.FILTERED_SELLER, guard[1])
-            self.stats["filtered_seller"] += 1
-            llog("FILTER", f"#{l.listing_id} seller rejected before send: {guard[0]}")
-            await self.db.update_listing(l)
-            return
         # повторы: тот же NFT или тот же продавец уже отправлялись → не отправляем
         async with self._released:
             # тот же продавец / коллекция отправляется прямо сейчас — ждём, чем кончится, а не выбрасываем
@@ -980,7 +961,7 @@ class ListingPipeline:
         # пока ждали бота поиска (очередь, капча), лот мог сильно устареть.
         # НО: если владелец найден — не бросаем по возрасту, пусть lookup_check_onsale решает
         # (лот может быть ещё в продаже — он всё равно ценный).
-        if settings.lookup_max_age > 0:      # и для найденных: старый лот никому не нужен
+        if settings.lookup_max_age > 0 and not found:
             try:
                 age = (datetime.now(timezone.utc) - datetime.fromisoformat(l.first_seen)).total_seconds()
             except (TypeError, ValueError):
@@ -992,23 +973,34 @@ class ListingPipeline:
                 await self.db.update_listing(l)
                 return
         if not found:
-            # Без проверенного владельца с @username лот НЕ шлём никогда (раньше при таймауте
-            # или «мёртвом» боте уходил пост «владелец не найден» без юза).
+            # Если все lookup-боты глобально dead (бот снесли, запасных нет / тоже dead) — не
+            # отсеиваем hidden-owner лоты как «владелец не найден», а шлём с пометкой. Иначе,
+            # пока админ меняет LOOKUP_BOT_USERNAME, трекер молча глушит ВСЕ скрытые — а это
+            # большая часть дорогих лотов. С пометкой лот доходит до пользователя, и он сам
+            # принимает решение по купле.
             all_dead = (self.owner_lookup is not None and hasattr(self.owner_lookup, "all_bots_dead")
                         and self.owner_lookup.all_bots_dead())
+            # infra_failure = бот жив, но не ответил в срок (timeout/exception) — это
+            # проблема инфраструктуры, не самого лота. Шлём с пометкой, а не выбрасываем
+            # (иначе при любом залипании funstat'а пропадают все hidden-owner лоты).
+            # Maker: 'нью лоты выдавало' — не теряем лот из-за медленного бота.
+            if settings.lookup_required and not all_dead and not infra_failure:
+                l.status, l.reason = ListingStatus.FILTERED_SELLER, "владелец не найден ботом поиска"
+                l.seller_filter_result = "OWNER_NOT_FOUND"
+                self.stats["filtered_seller"] += 1
+                self.stats["owner_not_found"] = self.stats.get("owner_not_found", 0) + 1
+                llog("FILTER", f"#{l.listing_id} hidden owner not found via lookup bot — skipped")
+                await self.db.update_listing(l)
+                return
             if all_dead:
-                code, why = "OWNER_BOTS_DEAD", "боты поиска не отвечают — владелец не проверен"
+                self.stats["owner_bot_dead_bypass"] = self.stats.get("owner_bot_dead_bypass", 0) + 1
+                llog("FILTER", f"#{l.listing_id} hidden owner — все lookup-боты dead, "
+                               "шлём с пометкой без фильтра")
             elif infra_failure:
-                code, why = "OWNER_LOOKUP_TIMEOUT", "бот поиска не ответил вовремя — владелец не проверен"
-            else:
-                code, why = "OWNER_NOT_FOUND", "владелец не найден ботом поиска"
-            l.status, l.reason = ListingStatus.FILTERED_SELLER, why
-            l.seller_filter_result = code
-            self.stats["filtered_seller"] += 1
-            self.stats["owner_not_found"] = self.stats.get("owner_not_found", 0) + 1
-            llog("FILTER", f"#{l.listing_id} hidden owner not verified ({code}) — skipped")
-            await self.db.update_listing(l)
-            return
+                self.stats["owner_bot_timeout_bypass"] = self.stats.get("owner_bot_timeout_bypass", 0) + 1
+                llog("FILTER", f"#{l.listing_id} hidden owner — lookup timeout/exception, "
+                               "шлём с пометкой без фильтра")
+            l.owner_not_found = True               # шлём с пометкой «владелец не найден»
         # пока ждали бота поиска, лот могли купить или снять — проверяем, что он ещё продаётся
         if settings.lookup_check_onsale and l.gift_slug:
             on_sale = await self._still_on_sale(l)
