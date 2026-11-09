@@ -1671,48 +1671,68 @@ class OwnerLookup:
                                    f"один из них совпал по имени — доверяем ему")
             if trust_cand is not None and (trust_cand.user_id or trust_cand.username):
                 # Юз из базы funstat бывает СТАРЫМ (юз мог перейти к другому человеку) — поэтому
-                # без проверки не постим. Ищем кандидата в локальном кэше сессий (без resolve-запроса,
-                # он лимитирован), читаем ТЕКУЩИЙ профиль и берём текущие имя и @username.
-                # Не смогли проверить — лот не шлём (раньше ставился псевдо-ID со старым юзом).
-                order = [session] + [n for n in self.sessions.workers if n != session]
-                for name in order:
-                    w = self.sessions.workers.get(name)
+                # без проверки не постим: открываем аккаунт, берём ТЕКУЩИЕ имя и @username.
+                name, peer = None, None
+                # 1) локальный кэш любой сессии — бесплатно, без запросов
+                for n in [session] + [x for x in self.sessions.workers if x != session]:
+                    w = self.sessions.workers.get(n)
                     sess = getattr(getattr(w, "client", None), "session", None)
                     if sess is None:
                         continue
-                    peer = None
                     for k in ((trust_cand.user_id,) if trust_cand.user_id else ()) + \
                              ((trust_cand.username,) if trust_cand.username else ()):
                         try:
-                            peer = sess.get_input_entity(k)
-                            break
+                            got = sess.get_input_entity(k)
                         except Exception:
                             continue
-                    if peer is None or not getattr(peer, "user_id", None):
-                        continue
-                    async def _full(client, peer=peer):
-                        return await client.get_entity(peer)
-                    try:
-                        u = await self._run(name, _full, timeout=10)
-                    except Exception:
+                        if getattr(got, "user_id", None):
+                            name, peer = n, got
+                            break
+                    if peer is not None:
                         break
-                    if getattr(u, "bot", False) or getattr(u, "deleted", False):
-                        break
-                    real = " ".join(x for x in (getattr(u, "first_name", None),
-                                                getattr(u, "last_name", None)) if x)
-                    if not exact_name(real, seller_name):
-                        self.stats["name_mismatch"] = self.stats.get("name_mismatch", 0) + 1
-                        llog("LOOKUP", f"{trust_cand.key()}: сейчас зовут {real!r} ≠ {seller_name!r} — не он")
-                        break
-                    uname = getattr(u, "username", None) or next(
-                        (x.username for x in getattr(u, "usernames", None) or []
-                         if getattr(x, "active", False)), None)
-                    if not uname:
-                        break
+                # 2) нет в кэше — открываем по @username через аккаунт, у которого ещё есть лимит
+                #    новых юзов на этот час (раньше упирались в лимит ОДНОЙ сессии и лот терялся)
+                if peer is None and trust_cand.username:
+                    now_r = time.monotonic()
+                    def _used(n):
+                        return sum(1 for t in self._resolves.get(n, []) if now_r - t < 3600)
+                    pool = [w for w in self.sessions.usable(include_reserved=True)
+                            if w.is_usable() and _used(w.name) < settings.lookup_resolve_per_hour]
+                    pool.sort(key=lambda w: (_used(w.name), -getattr(w, "speed", 1.0)))
+                    for w in pool[:2]:                       # максимум 2 попытки на лот
+                        got = await self._input_user(w.name, trust_cand)
+                        if got is not None:
+                            name, peer = w.name, got
+                            break
+                owner = await self._confirm_current(name, peer, seller_name) if peer is not None else None
+                if owner is not None:
                     self.stats["trusted_match"] += 1
-                    return FoundOwner(peer.user_id, uname, real, getattr(u, "premium", None), name)
+                    return owner
                 llog("LOOKUP", f"{trust_cand.key()}: юз из funstat не подтверждён в Telegram — не шлём")
         return None
+
+    async def _confirm_current(self, name: str, peer, seller_name: str) -> FoundOwner | None:
+        """Открыть профиль на сессии name и вернуть владельца с ТЕКУЩИМ @username,
+        только если сейчас его зовут точно так же, как продавца на маркете."""
+        async def _full(client, peer=peer):
+            return await client.get_entity(peer)
+        try:
+            u = await self._run(name, _full, timeout=10)
+        except Exception as e:
+            log.info("Lookup: профиль u%s не прочитался на %s: %s", getattr(peer, "user_id", "?"), name, e)
+            return None
+        if getattr(u, "bot", False) or getattr(u, "deleted", False):
+            return None
+        real = " ".join(x for x in (getattr(u, "first_name", None), getattr(u, "last_name", None)) if x)
+        if not exact_name(real, seller_name):
+            self.stats["name_mismatch"] = self.stats.get("name_mismatch", 0) + 1
+            llog("LOOKUP", f"u{peer.user_id}: сейчас зовут {real!r} ≠ {seller_name!r} — не он")
+            return None
+        uname = getattr(u, "username", None) or next(
+            (x.username for x in getattr(u, "usernames", None) or [] if getattr(x, "active", False)), None)
+        if not uname:
+            return None
+        return FoundOwner(peer.user_id, uname, real, getattr(u, "premium", None), name)
 
     async def _input_user(self, session: str, c: Candidate):
         """InputPeerUser кандидата: из своего кэша, из кэша сессии Telethon (без запросов), и только
