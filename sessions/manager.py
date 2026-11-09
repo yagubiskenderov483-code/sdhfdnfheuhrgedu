@@ -38,6 +38,12 @@ class SessionManager:
         return sum(1 for w in self.workers.values()
                    for t in getattr(w, "recent_floods", []) if now - t < 60)
 
+    def flooding_accounts_per_minute(self) -> int:
+        """Сколько РАЗНЫХ аккаунтов ловили FloodWait за последние 60 секунд."""
+        now = time.monotonic()
+        return sum(1 for w in self.workers.values()
+                   if any(now - t < 60 for t in getattr(w, "recent_floods", [])))
+
     def apply_adaptive_throttle(self) -> None:
         """Если шторм FloodWait по всему флоту — замедляем GLOBAL RPS в 2-10x
         И превентивно даём ВСЕМ рабочим воркерам speed-штраф, чтобы те кто ещё не словил
@@ -47,7 +53,13 @@ class SessionManager:
         после жалоб на шторм, где 26/26 аккаунтов замедлены до 0.15."""
         n = self.flood_rate_per_minute()
         now = time.monotonic()
-        if n >= 5:
+        # Шторм по флоту — только если FloodWait ловят МНОГО РАЗНЫХ аккаунтов. Раньше 3 «больных»
+        # аккаунта по 20 FloodWait/час давали 5+/мин и каждую минуту зажимали ВСЕ 25 до 0.3
+        # («Мощность 1.4 из 25, замедлено 25»). Больные аккаунты и так замедляются сами по себе.
+        accounts = self.flooding_accounts_per_minute()
+        usable = max(1, len(self.usable()))
+        fleet_storm = accounts >= max(4, int(usable * 0.3 + 0.999))
+        if n >= 5 and fleet_storm:
             # более агрессивная шкала: раньше 10/мин = 0.5x, теперь уже 5/мин = 0.6x.
             # 40+/мин = 0.1x (катастрофа — замираем почти полностью, даём Telegram'у передышку)
             if n >= 40:
@@ -68,9 +80,11 @@ class SessionManager:
                 log.warning("FloodWait storm (%s/min) — global RPS → %.1f (×%.2f)", n, new_rate, factor)
             # превентив: ВСЕ ACTIVE воркеры (не flood'нувшие) тоже замедляются до speed*factor,
             # но не ниже 0.2 при обычном шторме / 0.1 при катастрофе. Это распределяет нагрузку равномерно.
-            min_speed = 0.3 if factor >= 0.5 else (0.2 if factor >= 0.2 else 0.1)
+            min_speed = 0.6 if factor >= 0.5 else (0.4 if factor >= 0.2 else 0.2)
             for w in self.workers.values():
-                if w.is_usable() and w.speed > min_speed:
+                # аккаунты без своих FloodWait за 10 мин зажимаем мягко, а не до самого дна
+                own_recent = any(now - t < 600 for t in getattr(w, "recent_floods", []))
+                if w.is_usable() and w.speed > min_speed and own_recent is False:
                     old = w.speed
                     w.speed = max(min_speed, old * factor)
                     if old - w.speed > 0.05:
