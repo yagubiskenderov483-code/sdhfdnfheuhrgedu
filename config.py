@@ -226,8 +226,6 @@ class Settings:
     max_above_floor: int = 500           # не слать лоты дороже флора коллекции больше чем на N% (0 = выкл).
     # По умолчанию 500% (6х флора): фильтрует явный overprice типа «NFT с флором 400⭐ выставлен за 20k»,
     # но пропускает редкие атрибуты (2-5х от флора — нормально). /set MAX_ABOVE_FLOOR N для изменения.
-    expensive_bypass_cap: int = 5000     # лот дороже N⭐ MAX_ABOVE_FLOOR НЕ режет — это ценный лот сам по себе
-    # (Maker: 'дорогие типа больше 5000 не постит' — уходило под cap=500% если флор был низкий).
     allow_ton_only: bool = False
 
     # --- фильтр продавца ---
@@ -407,7 +405,6 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOW_PRIORITY_POLL_INTERVAL": ("low_priority_poll_interval", _rng(5, 3600)),
     "MIN_TON": ("min_ton", lambda v: float(v.replace(",", "."))),
     "MAX_ABOVE_FLOOR": ("max_above_floor", lambda v: max(0, int(v))),
-    "EXPENSIVE_BYPASS_CAP": ("expensive_bypass_cap", lambda v: max(0, int(v))),
     "PREMIUM_OVER_FLOOR_PERCENT": ("premium_over_floor_percent", lambda v: max(0, int(v))),
     "RESCUE_ABOVE_TOP": ("rescue_above_top", _bool_strict),
     "RARE_ATTRIBUTE_PERCENT": ("rare_attribute_percent", lambda v: max(0.1, min(100.0, float(v.replace(",", "."))))),
@@ -498,7 +495,6 @@ def _from_env() -> Settings:
         low_priority_hot_min=max(1.0, _float(e("LOW_PRIORITY_HOT_MIN"), 10.0)),
         min_ton=_float(e("MIN_TON"), 0.0),
         max_above_floor=max(0, _int(e("MAX_ABOVE_FLOOR"), 500)),
-        expensive_bypass_cap=max(0, _int(e("EXPENSIVE_BYPASS_CAP"), 5000)),
         premium_over_floor_percent=max(0, _int(e("PREMIUM_OVER_FLOOR_PERCENT"), 333)),
         rescue_above_top=_bool(e("RESCUE_ABOVE_TOP"), False),
         rare_attribute_percent=max(0.1, min(100.0, _float(e("RARE_ATTRIBUTE_PERCENT"), 1.5))),
