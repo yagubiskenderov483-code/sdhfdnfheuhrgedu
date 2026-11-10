@@ -1033,9 +1033,20 @@ class ListingPipeline:
                 llog("FILTER", f"#{l.listing_id} sold/removed while looking up the owner — skipped")
                 await self.db.update_listing(l)
                 return
-        # дальше — обычная проверка и отправка; время поиска в «устаревание» лота не считаем
+        # дальше — обычная проверка и отправка; время поиска в «устаревание» лота не считаем.
+        # Таймаут 10 мин — чтобы одна зависшая сессия/sender не копили lookup-задачи вечно
+        # (без него nested process() висел без ограничения, Maker видел «process timeout 10min»
+        # через worker, но для lookup-ветки такого щита не было).
         try:
-            await self.process(ListingEvent(l, time.monotonic(), "lookup"))
+            await asyncio.wait_for(
+                self.process(ListingEvent(l, time.monotonic(), "lookup")), timeout=600)
+        except asyncio.TimeoutError:
+            log.warning("process(%s) после lookup завис > 10 мин — освобождаем", l.listing_id)
+            l.status, l.reason = ListingStatus.ERROR, "post-lookup process timeout 10min"
+            try:
+                await self.db.update_listing(l)
+            except Exception:
+                pass
         except asyncio.CancelledError:
             raise
         except Exception:

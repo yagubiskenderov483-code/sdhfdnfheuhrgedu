@@ -438,10 +438,26 @@ class App:
             await asyncio.sleep(600)   # 10 минут между проверками
 
     async def _notify_bot_dead(self, bot: str, next_bot: str | None = None, kind: str = "silent") -> None:
-        """Админам про lookup-ботов НЕ пишем (просьба админа): бот всё равно остаётся в работе и
-        опрашивается дальше. Только строка в логе."""
-        log.warning("Lookup-бот @%s: %s (сообщение админам отключено, поиск продолжается)", bot,
-                    {"back": "снова отвечает", "missing": "не резолвится"}.get(kind, "не отвечает"))
+        """Lookup-бот не отвечает / снова ожил. Шлём КОРОТКОЕ уведомление админам (Maker:
+        'просто чтоб предупреждало когда он не отвечает или снесен') — но бот из работы
+        не выбывает, лоты продолжают проверяться через запасного.
+        Дедупликация через _alert (`every=86400`) — одно уведомление в сутки на пару (bot, kind)."""
+        kind_ru = {"back": "снова отвечает", "missing": "не резолвится на сессиях",
+                   "silent": "молчит"}.get(kind, "не отвечает")
+        log.warning("Lookup-бот @%s: %s", bot, kind_ru)
+        if kind == "back":
+            text = (f"✅ Lookup-бот <b>@{html.escape(bot)}</b> снова отвечает.\n"
+                    "Всё это время поиск владельцев шёл через запасного, лоты не терялись.")
+        else:
+            fallback_line = (f"Запасной <b>@{html.escape(next_bot)}</b> уже используется — "
+                             "поиск идёт без пауз." if next_bot else
+                             "Запасных в <code>LOOKUP_BOTS</code> нет — hidden-owner лоты пока "
+                             "не отправляются. Добавить: <code>/bots_add infostat</code>.")
+            text = (f"⚠️ Lookup-бот <b>@{html.escape(bot)}</b> {kind_ru}.\n\n"
+                    + fallback_line + "\n\n"
+                    "Из пула бот не удалён — сам пробуем его позже. Чтобы заменить основного: "
+                    f"<code>/bots_set_primary {html.escape(next_bot or '<имя>')}</code>")
+        await self._alert(f"bot_{kind}:{bot.lower()}", text, every=86400)
 
     async def _notify_auth_error(self, w) -> None:
         """Telegram снёс сессию (выкинули из «Устройств», две копии бота, бан) — она уже не оживёт.
