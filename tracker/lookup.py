@@ -1695,14 +1695,33 @@ class OwnerLookup:
                     llog("LOOKUP", f"{trust_cand.key()}: funstat вернул {len(cands)} кандидатов, "
                                    f"один из них совпал по имени — доверяем ему")
             if trust_cand is not None and (trust_cand.user_id or trust_cand.username):
-                # Юз из базы funstat бывает СТАРЫМ (юз мог перейти к другому человеку) — поэтому
-                # без проверки не постим: открываем аккаунт, берём ТЕКУЩИЕ имя и @username.
+                # Юз из базы funstat бывает СТАРЫМ — пробуем открыть профиль и подтвердить
+                # текущее имя через _confirm_current. Но при исчерпанной resolve-квоте
+                # (Maker: 25 сессий × 15/час мало при большом потоке лотов) мы НЕ смогли
+                # бы ничего подтвердить и теряли бы ЛЮБОЙ hidden-owner. Поэтому:
+                #   • если resolve прошёл → confirm_current (жёсткая проверка имени),
+                #   • если нет → доверяем funstat'у НО ТОЛЬКО когда он отдал И user_id>0
+                #     И @username (обе части — вероятность устаревшей записи мала;
+                #     одна часть без другой = гадание, такое не берём).
                 name, peer = await self._open_peer(session, trust_cand)
-                owner = await self._confirm_current(name, peer, seller_name) if peer is not None else None
-                if owner is not None:
+                if peer is not None:
+                    owner = await self._confirm_current(name, peer, seller_name)
+                    if owner is not None:
+                        self.stats["trusted_match"] += 1
+                        return owner
+                    llog("LOOKUP", f"{trust_cand.key()}: имя в профиле не совпало — не шлём")
+                    return None
+                # resolve-квота исчерпана → fallback: доверяем funstat'у, если у него
+                # есть И uid И @username. Иначе пропускаем — без confirm нельзя.
+                uid = trust_cand.user_id
+                uname = trust_cand.username
+                if uid and uid > 0 and uname:
                     self.stats["trusted_match"] += 1
-                    return owner
-                llog("LOOKUP", f"{trust_cand.key()}: юз из funstat не подтверждён в Telegram — не шлём")
+                    self.stats["trusted_no_confirm"] = self.stats.get("trusted_no_confirm", 0) + 1
+                    llog("LOOKUP", f"{trust_cand.key()}: resolve-лимит, funstat отдал uid+@юз — "
+                                   "доверяем без подтверждения")
+                    return FoundOwner(uid, uname, trust_cand.name or seller_name, None, None)
+                llog("LOOKUP", f"{trust_cand.key()}: resolve-лимит и нет пары uid+@юз — не шлём")
         return None
 
     async def _open_peer(self, session: str, c: Candidate):
