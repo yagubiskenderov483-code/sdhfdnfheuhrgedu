@@ -49,13 +49,19 @@ def premium_exception(l: Listing) -> bool:
 
 class PriceFilter:
     def check(self, l: Listing) -> FilterResult:
-        # +333% к флору и выше — только если редкая модель/фон или монохром
+        # +333% к флору и выше — только если редкая модель/фон или монохром.
+        # Если редкость подтвердилась — MAX_ABOVE_FLOOR НЕ применяем (иначе 8000⭐ на флоре
+        # 929 с Wild Mango 1.2% всё равно падал по cap=450% → дорогие лоты вообще не шли).
         pct = settings.premium_over_floor_percent
+        rare_pass = False
         if pct > 0 and l.stars_price and l.floor_stars and l.floor_stars > 0:
             over = (l.stars_price - l.floor_stars) / l.floor_stars * 100
-            if over >= pct and not premium_exception(l):
-                return FilterResult(False, f"{l.stars_price} Stars = +{over:.0f}% к флору {l.floor_stars}; "
-                                           "нет редкой модели/фона и не монохром")
+            if over >= pct:
+                if premium_exception(l):
+                    rare_pass = True
+                else:
+                    return FilterResult(False, f"{l.stars_price} Stars = +{over:.0f}% к флору {l.floor_stars}; "
+                                               "нет редкой модели/фона и не монохром")
         # Один порог: если задан COLLECTION_MIN_FLOOR, лоты идут от него же (флор 3000 → лоты от 3000).
         # MIN_STARS используется, только когда флор не задан (COLLECTION_MIN_FLOOR=0).
         min_stars = settings.collection_min_floor or settings.min_stars
@@ -72,7 +78,8 @@ class PriceFilter:
             if l.stars_price is not None and l.stars_price < min_stars:
                 return FilterResult(False, f"≈{l.stars_price} Stars < {min_stars}")
             cap = settings.max_above_floor
-            if cap and l.floor_stars and l.stars_price and l.stars_price > l.floor_stars * (1 + cap / 100):
+            if (cap and not rare_pass and l.floor_stars and l.stars_price
+                    and l.stars_price > l.floor_stars * (1 + cap / 100)):
                 return FilterResult(False, f"≈{l.stars_price} Stars дороже флора {l.floor_stars} больше чем на {cap}%")
             return FilterResult(True, f"TON-only {ton:g} TON" if ton is not None else "TON-only")
 
@@ -82,7 +89,7 @@ class PriceFilter:
             if min_ton > 0 and ton is not None and ton < min_ton:
                 return FilterResult(False, f"{ton:g} TON < {min_ton:g}")
             cap = settings.max_above_floor
-            if cap and l.floor_stars and l.stars_price > l.floor_stars * (1 + cap / 100):
+            if cap and not rare_pass and l.floor_stars and l.stars_price > l.floor_stars * (1 + cap / 100):
                 over = (l.stars_price - l.floor_stars) / l.floor_stars * 100
                 return FilterResult(False, f"{l.stars_price} Stars на {over:.0f}% дороже флора {l.floor_stars}")
             return FilterResult(True, f"{l.stars_price} Stars >= {min_stars}")

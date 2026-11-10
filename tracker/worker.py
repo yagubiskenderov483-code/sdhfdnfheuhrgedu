@@ -352,12 +352,13 @@ class SessionWorker:
             ms = (time.monotonic() - t0) * 1000
             self.ping_ms = ms if self.ping_ms is None else self.ping_ms * 0.9 + ms * 0.1
             self.ok_streak += 1
-            # долго без FloodWait → понемногу разгоняем (по времени, а не по числу запросов:
-            # замедленный аккаунт делает мало запросов и иначе восстанавливался бы часами)
+            # долго без FloodWait → разгоняем. Было 180с/90с/×1.3 — после шторма акк полчаса
+            # приходил в себя, Maker: 'Мощность 2.0 из 25'. Сократил окно calm до 90с,
+            # шаг до 45с, коэффициент 1.5 → полное восстановление за ~3 мин вместо ~13.
             now = time.monotonic()
             last_flood = self.recent_floods[-1] if self.recent_floods else 0.0
-            if self.speed < 1.0 and now - last_flood > 180 and now - self._last_up > 90:
-                self.speed = min(1.0, self.speed * 1.3)
+            if self.speed < 1.0 and now - last_flood > 90 and now - self._last_up > 45:
+                self.speed = min(1.0, self.speed * 1.5)
                 self._last_up = now
             return result
         except errors.FloodError as e:
