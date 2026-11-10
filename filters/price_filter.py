@@ -49,15 +49,20 @@ def premium_exception(l: Listing) -> bool:
 
 class PriceFilter:
     def check(self, l: Listing) -> FilterResult:
+        # Абсолютно дорогие лоты (≥ EXPENSIVE_BYPASS_CAP, по умолчанию 5000⭐) — ценны сами
+        # по себе, MAX_ABOVE_FLOOR на них не применяем даже без редкости.
+        # Maker: 'дорогие типа больше 5000 не постит'.
+        expensive_bypass = bool(settings.expensive_bypass_cap
+                                and l.stars_price and l.stars_price >= settings.expensive_bypass_cap)
         # +333% к флору и выше — только если редкая модель/фон или монохром.
         # Если редкость подтвердилась — MAX_ABOVE_FLOOR НЕ применяем (иначе 8000⭐ на флоре
         # 929 с Wild Mango 1.2% всё равно падал по cap=450% → дорогие лоты вообще не шли).
         pct = settings.premium_over_floor_percent
-        rare_pass = False
+        rare_pass = expensive_bypass
         if pct > 0 and l.stars_price and l.floor_stars and l.floor_stars > 0:
             over = (l.stars_price - l.floor_stars) / l.floor_stars * 100
             if over >= pct:
-                if premium_exception(l):
+                if premium_exception(l) or expensive_bypass:
                     rare_pass = True
                 else:
                     return FilterResult(False, f"{l.stars_price} Stars = +{over:.0f}% к флору {l.floor_stars}; "
