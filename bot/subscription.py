@@ -631,7 +631,10 @@ class Subscriptions:
 
     async def new_crypto_invoice(self, uid: int, plan: str) -> str:
         """Создать персональный Crypto Bot invoice. → pay_url (https://t.me/CryptoBot?start=...).
-        Один живой invoice на (uid, plan); повторный клик отдаёт ту же ссылку."""
+        Один живой invoice на (uid, plan); повторный клик отдаёт ту же ссылку.
+        Основной путь: CRYPTO_BOT_API_TOKEN (merchant API, авто-проверка оплаты).
+        Запасной: CryptoBot user-session (inline-mode), ссылка живая, но оплату
+        придётся подтверждать админу вручную (или ждать TON-перевод по общему адресу)."""
         title, price, _secs, _stars = PLANS[plan]
         now = time.time()
         async with self._lock:
@@ -641,38 +644,69 @@ class Subscriptions:
                         and now - inv["ts"] < INVOICE_TTL):
                     return inv["pay_url"]
             code = "CRB" + secrets.token_hex(4).upper()
-        # сетевой вызов — вне лока
-        payload_json = {
-            "asset": "TON",
-            "amount": f"{price:g}",
-            "description": f"NFT Tracker — {title}",
-            "payload": code,
-            "allow_comments": False,
-            "allow_anonymous": False,
-        }
+
+        # Основной путь: merchant API — авто-доставка после оплаты
+        if settings.crypto_bot_api_token:
+            payload_json = {
+                "asset": "TON",
+                "amount": f"{price:g}",
+                "description": f"NFT Tracker — {title}",
+                "payload": code,
+                "allow_comments": False,
+                "allow_anonymous": False,
+            }
+            try:
+                res = await _crypto_pay_call("createInvoice", payload_json)
+            except Exception as e:
+                log.error("CryptoPay createInvoice failed: %s", e)
+                raise
+            pay_url = res.get("pay_url") or res.get("mini_app_invoice_url") or ""
+            invoice_id = res.get("invoice_id")
+            if not pay_url or not invoice_id:
+                raise RuntimeError(f"CryptoPay вернул неполный результат: {res}")
+            async with self._lock:
+                self.state["invoices"][code] = {
+                    "uid": uid, "plan": plan, "kind": "crypto",
+                    "nano": int(round(price * 1e9)),
+                    "pay_url": pay_url, "invoice_id": int(invoice_id),
+                    "asset": "TON", "amount": str(price),
+                    "ts": now, "paid": False,
+                }
+                await self.save()
+            if self.on_change:
+                try:
+                    await self.on_change()
+                except Exception as e:
+                    log.warning("Backup after new crypto invoice failed: %s", e)
+            return pay_url
+
+        # Запасной путь: CryptoBot user-session (inline-mode у @CryptoBot)
         try:
-            res = await _crypto_pay_call("createInvoice", payload_json)
+            from bot.cryptobot_session import create_check, has_session
         except Exception as e:
-            log.error("CryptoPay createInvoice failed: %s", e)
+            raise RuntimeError(f"CryptoBot session module недоступен: {e}")
+        if not has_session():
+            raise RuntimeError("Ни CRYPTO_BOT_API_TOKEN, ни CryptoBot-session не настроены")
+        try:
+            pay_url = await create_check(price, "TON")
+        except Exception as e:
+            log.error("CryptoBot session create_check failed: %s", e)
             raise
-        pay_url = res.get("pay_url") or res.get("mini_app_invoice_url") or ""
-        invoice_id = res.get("invoice_id")
-        if not pay_url or not invoice_id:
-            raise RuntimeError(f"CryptoPay вернул неполный результат: {res}")
         async with self._lock:
             self.state["invoices"][code] = {
                 "uid": uid, "plan": plan, "kind": "crypto",
                 "nano": int(round(price * 1e9)),
-                "pay_url": pay_url, "invoice_id": int(invoice_id),
+                "pay_url": pay_url, "invoice_id": None,
                 "asset": "TON", "amount": str(price),
                 "ts": now, "paid": False,
+                "session_mode": True,         # без merchant API — авто-доставка невозможна
             }
             await self.save()
         if self.on_change:
             try:
                 await self.on_change()
             except Exception as e:
-                log.warning("Backup after new crypto invoice failed: %s", e)
+                log.warning("Backup after new crypto invoice (session) failed: %s", e)
         return pay_url
 
     async def check_crypto_payments(self) -> int:
@@ -1290,7 +1324,13 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             return
 
         if method == "wallet":
-            if settings.crypto_bot_api_token:
+            # есть merchant API ИЛИ есть user-session — пробуем новый invoice
+            try:
+                from bot.cryptobot_session import has_session as _cb_has
+                has_cb_session = _cb_has()
+            except Exception:
+                has_cb_session = False
+            if settings.crypto_bot_api_token or has_cb_session:
                 try:
                     url = await subs.new_crypto_invoice(q.from_user.id, plan)
                 except Exception as e:
@@ -1298,18 +1338,22 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                     await q.answer("Не удалось создать счёт в Crypto Bot, попробуйте позже",
                                    show_alert=True)
                     return
+                is_session = (not settings.crypto_bot_api_token) and has_cb_session
                 kb = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text=f"👛 Оплатить {price:g} TON в Crypto Bot", url=url)],
                     back_row,
                 ])
+                note = ("Как только оплата пройдёт, бот сам пришлёт ссылку для входа."
+                        if not is_session else
+                        "После оплаты пришлите скриншот админу — выдадут доступ вручную "
+                        "(auto-проверка оплаты работает только с merchant API).")
                 await _safe_edit(q.message,
                     f"👛 <b>Тариф {title} — {price:g} TON (Crypto Bot)</b>\n\n"
-                    "Нажмите кнопку — откроется счёт в @CryptoBot на вашу сумму.\n"
-                    "Как только оплата пройдёт, бот сам пришлёт ссылку для входа.",
+                    "Нажмите кнопку — откроется чек в @CryptoBot на вашу сумму.\n" + note,
                     reply_markup=kb)
                 await q.answer()
                 return
-            # фоллбек без API-токена — статическая ссылка, выдача админом
+            # ни API-токена, ни session — статическая ссылка
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text=f"👛 Оплатить {price:g} TON в Crypto Bot",
                                       url=CRYPTO_PAY_FALLBACK_URL)],

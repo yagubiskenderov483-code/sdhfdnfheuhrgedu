@@ -139,6 +139,12 @@ class AddSession(StatesGroup):
     password = State()
 
 
+class CryptoBotSession(StatesGroup):
+    phone = State()
+    code = State()
+    password = State()
+
+
 class SetLookupBot(StatesGroup):
     waiting = State()
 
@@ -250,6 +256,8 @@ HELP = (
     "/lookup_forget &lt;имя&gt; — удалить ложного владельца из памяти\n"
     "/lookup_reset — полный сброс всех lookup-кешей\n"
     "/purge или /purge_all — кнопки удалить 50/100/500/1k/5k/20k/100k/ВСЕ последних сообщений\n"
+    "/cryptobot_connect — привязать Telegram-аккаунт для авто-генерации чеков в @CryptoBot\n"
+    "/cryptobot_disconnect — отвязать CryptoBot-аккаунт\n"
     "/sessions_stats — histogram скорости аккаунтов + топ замедленных\n"
     "/sessions_speedup — мягкий разгон (безопаснее /reset_speeds)\n"
     "/health — статус HTTP-endpoint'а (HEALTH_PORT) /health /stats /metrics\n\n"
@@ -3745,5 +3753,204 @@ def build_routers(app: "App") -> list[Router]:
         finally:
             pw = None  # noqa: F841
         await _finish(m, state)
+
+    # ------------------------------------------------------------ CryptoBot session
+    # Отдельный Telegram-аккаунт для автоматической генерации чеков через @CryptoBot
+    # inline-mode. Используется только если CRYPTO_BOT_API_TOKEN не задан.
+    cb_pending: dict[int, dict[str, Any]] = {}
+
+    async def _cb_cleanup(uid: int) -> None:
+        p = cb_pending.pop(uid, None)
+        if p is None:
+            return
+        cl = p.get("client")
+        if cl is not None:
+            try:
+                await cl.disconnect()
+            except Exception:
+                pass
+
+    @admin.message(Command("cryptobot_connect"))
+    async def cmd_cryptobot_connect(m: Message, state: FSMContext) -> None:
+        """Подключить Telegram-аккаунт для автоматической генерации чеков в @CryptoBot.
+        Нужен только если CRYPTO_BOT_API_TOKEN не настроен. Phone → code → (2FA)."""
+        from bot.cryptobot_session import has_session as _cb_has
+        if not (settings.api_id and settings.api_hash):
+            await m.answer("❌ В .env не настроены API_ID / API_HASH — без них session не поднять.")
+            return
+        await _cb_cleanup(m.from_user.id)
+        await state.clear()
+        warn = ""
+        if _cb_has():
+            warn = ("⚠️ CryptoBot-session уже подключён. Новый вход заменит старый "
+                    "(и разлогинит предыдущий аккаунт).\n\n")
+        await state.set_state(CryptoBotSession.phone)
+        await m.answer(f"{warn}➕ <b>Подключение CryptoBot-аккаунта</b>\n\n"
+                       "Шаг 1/3. Отправьте <b>номер телефона</b> аккаунта (например, +79991234567), "
+                       "который будет открывать чеки в @CryptoBot от вашего имени.\n"
+                       "/cancel — отмена")
+
+    @admin.message(Command("cryptobot_disconnect"))
+    async def cmd_cryptobot_disconnect(m: Message) -> None:
+        """Удалить сохранённый CryptoBot-session."""
+        from bot.cryptobot_session import delete_session, has_session
+        if not has_session():
+            await m.answer("ℹ️ CryptoBot-session не подключён.")
+            return
+        delete_session()
+        await m.answer("✅ CryptoBot-session удалён.\n"
+                       "В «Устройствах» того аккаунта можете вручную отключить «CryptoBotLink».")
+
+    @admin.message(CryptoBotSession.phone, F.text)
+    async def cb_phone(m: Message, state: FSMContext) -> None:
+        phone = re.sub(r"[^\d+]", "", m.text)
+        await _delete(m)
+        if not re.fullmatch(r"\+?\d{8,15}", phone):
+            await m.answer("Некорректный номер. Пример: +79991234567")
+            return
+        await _cb_cleanup(m.from_user.id)
+        await m.answer("⏳ Подключаюсь к Telegram и запрашиваю код…")
+        from bot.cryptobot_session import make_client
+        try:
+            client = await make_client(session_string="")
+            await asyncio.wait_for(client.connect(), 15)
+            sent = await asyncio.wait_for(client.send_code_request(phone), 30)
+        except errors.ApiIdInvalidError:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            await state.clear()
+            await m.answer("❌ Неверные API ID / API HASH.")
+            return
+        except (errors.PhoneNumberInvalidError, errors.PhoneNumberBannedError) as e:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            await m.answer(f"❌ {type(e).__name__}. Другой номер или /cancel")
+            return
+        except errors.FloodWaitError as e:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            await state.clear()
+            await m.answer(f"❌ Telegram просит подождать {e.seconds} сек. Попробуйте позже.")
+            return
+        except Exception as e:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+            await state.clear()
+            log.warning("cryptobot_connect send_code failed: %r", e)
+            await m.answer(f"❌ Ошибка: {html.escape(type(e).__name__)} "
+                           f"{html.escape(str(e)[:200])}")
+            return
+        uid0 = m.from_user.id
+        cb_pending[uid0] = {"client": client, "phone": phone,
+                            "hash": sent.phone_code_hash, "ts": time.monotonic()}
+
+        async def _expire() -> None:
+            await asyncio.sleep(600)
+            p = cb_pending.get(uid0)
+            if p and p.get("client") is client:
+                await _cb_cleanup(uid0)
+        _bg = asyncio.get_running_loop().create_task(_expire())
+        _login_tasks.add(_bg)
+        _bg.add_done_callback(_login_tasks.discard)
+        await state.set_state(CryptoBotSession.code)
+        await m.answer("Шаг 2/3. Отправьте <b>код входа</b> из Telegram.\n\n"
+                       "⚠️ Вводите с пробелами или дефисами: <code>1 2 3 4 5</code>, "
+                       "иначе Telegram примет это за пересылку кода и заблокирует вход.")
+
+    async def _cb_finish(m: Message, state: FSMContext) -> None:
+        from bot.cryptobot_session import save_session_string
+        p = cb_pending.pop(m.from_user.id, None)
+        if p is None:
+            return
+        cl = p["client"]
+        try:
+            me = await cl.get_me()
+            s = cl.session.save()
+        finally:
+            try:
+                await cl.disconnect()
+            except Exception:
+                pass
+        await state.clear()
+        try:
+            save_session_string(s)
+        except Exception as e:
+            await m.answer(f"❌ Не удалось сохранить session: {html.escape(str(e))}")
+            return
+        who = ""
+        if me is not None:
+            who = f"@{me.username}" if getattr(me, "username", None) else str(getattr(me, "id", ""))
+        await m.answer(
+            f"✅ CryptoBot-session подключён ({html.escape(who)}).\n\n"
+            "Теперь при выборе «Crypto Bot» в меню оплаты бот сам откроет "
+            "@CryptoBot от имени этого аккаунта и сгенерирует URL чека на нужную "
+            "сумму.\n\n"
+            "Отключить: /cryptobot_disconnect"
+        )
+
+    @admin.message(CryptoBotSession.code, F.text)
+    async def cb_code(m: Message, state: FSMContext) -> None:
+        code = re.sub(r"\D", "", m.text)
+        if not code:
+            await m.answer("Код — цифры из сообщения Telegram. Отправьте ещё раз.")
+            return
+        await _delete(m)
+        p = cb_pending.get(m.from_user.id)
+        if not p:
+            await state.clear()
+            await m.answer("Сессия входа потеряна. /cryptobot_connect")
+            return
+        try:
+            await p["client"].sign_in(phone=p["phone"], code=code, phone_code_hash=p["hash"])
+        except errors.SessionPasswordNeededError:
+            await state.set_state(CryptoBotSession.password)
+            await m.answer("Шаг 3/3. Включена 2FA. Отправьте <b>пароль</b> "
+                           "(сообщение будет удалено).")
+            return
+        except errors.PhoneCodeInvalidError:
+            await m.answer("❌ Неверный код. Отправьте ещё раз (с пробелами) или /cancel")
+            return
+        except errors.PhoneCodeExpiredError:
+            await _cb_cleanup(m.from_user.id)
+            await state.clear()
+            await m.answer("❌ Код истёк. Начните заново: /cryptobot_connect")
+            return
+        except Exception as e:
+            await _cb_cleanup(m.from_user.id)
+            await state.clear()
+            await m.answer(f"❌ Ошибка входа: {html.escape(type(e).__name__)}")
+            return
+        await _cb_finish(m, state)
+
+    @admin.message(CryptoBotSession.password, F.text)
+    async def cb_password(m: Message, state: FSMContext) -> None:
+        pw = m.text
+        await _delete(m)
+        p = cb_pending.get(m.from_user.id)
+        if not p:
+            await state.clear()
+            await m.answer("Сессия входа потеряна. /cryptobot_connect")
+            return
+        try:
+            await p["client"].sign_in(password=pw)
+        except errors.PasswordHashInvalidError:
+            await m.answer("❌ Неверный пароль. Попробуйте ещё раз или /cancel")
+            return
+        except Exception as e:
+            await _cb_cleanup(m.from_user.id)
+            await state.clear()
+            await m.answer(f"❌ Ошибка входа: {html.escape(type(e).__name__)}")
+            return
+        finally:
+            pw = None  # noqa: F841
+        await _cb_finish(m, state)
 
     return [public, admin, users]
