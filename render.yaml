@@ -23,7 +23,7 @@ services:
         sync: false
 
       - key: MIN_STARS
-        value: "5000"
+        value: "300"
       - key: MIN_TON
         value: "0"
       - key: ALLOW_TON_ONLY

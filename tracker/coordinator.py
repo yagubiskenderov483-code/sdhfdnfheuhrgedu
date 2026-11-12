@@ -666,8 +666,17 @@ class MarketplaceCoordinator:
             async with sem:
                 return await self._poll_safe(s, mode)
 
-        results = await asyncio.gather(*(one(s) for s in states))
-        return sum(r or 0 for r in results)
+        # return_exceptions=True: одно сбой poll'а (RpcMcgetFailError, FloodWait,
+        # proxy hiccup) не должен валить обход всех коллекций.
+        results = await asyncio.gather(*(one(s) for s in states), return_exceptions=True)
+        total = 0
+        for s, r in zip(states, results):
+            if isinstance(r, BaseException):
+                log.warning("Poll %s failed: %s: %s", getattr(s, "gift_id", "?"),
+                            type(r).__name__, r)
+                continue
+            total += r or 0
+        return total
 
     # ------------------------------------------------------------------ lifecycle
     async def start(self) -> None:
@@ -813,7 +822,15 @@ class MarketplaceCoordinator:
                                 self._due[st.gift_id] = time.monotonic()
 
                     try:
-                        await asyncio.gather(*(one(st) for st in pending))
+                        # return_exceptions=True: падение одной sync-операции не должно
+                        # оставить self._sync_busy=False и сломать весь цикл синхронизации.
+                        sync_results = await asyncio.gather(
+                            *(one(st) for st in pending), return_exceptions=True)
+                        for st, r in zip(pending, sync_results):
+                            if isinstance(r, BaseException):
+                                log.warning("Sync %s failed: %s: %s",
+                                            getattr(st, "gift_id", "?"),
+                                            type(r).__name__, r)
                     finally:
                         self._sync_busy = False
             except asyncio.CancelledError:

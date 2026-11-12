@@ -100,7 +100,14 @@ class SessionManager:
     async def start_all(self) -> None:
         records = self.storage.list_sessions()
         log.info("Found %s session file(s)", len(records))
-        await asyncio.gather(*(self.add_record(r) for r in records))
+        # return_exceptions=True: битая session (UserDeactivated, AuthKeyUnregistered,
+        # повреждённый файл) не должна валить старт остальных 24 сессий. Логируем виновника.
+        results = await asyncio.gather(
+            *(self.add_record(r) for r in records), return_exceptions=True)
+        for rec, res in zip(records, results):
+            if isinstance(res, BaseException):
+                log.error("Session %s failed to start: %s: %s",
+                          rec.name, type(res).__name__, res)
         log.info("Sessions: %s", self.summary_line())
 
     async def add_record(self, rec: SessionRecord) -> SessionWorker:
