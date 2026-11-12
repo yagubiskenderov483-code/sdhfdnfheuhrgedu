@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -111,6 +111,12 @@ MIGRATIONS: dict[int, list[str]] = {
     # после падения между initial sync и baseline выбросит накопленное как новое)
     5: [
         "ALTER TABLE collection_state ADD COLUMN baseline INTEGER NOT NULL DEFAULT 0",
+    ],
+    # v6: индекс для username_already_sent. GPT добавил его в v2, но v2 давно применена
+    # на существующих installs → на них индекс не создался и каждая проверка @юза была
+    # full-table scan по 33k+ записей.
+    6: [
+        "CREATE INDEX IF NOT EXISTS ix_listings_username_sent ON listings(lower(seller_username), sent)",
     ],
 }
 

@@ -1834,5 +1834,8 @@ class OwnerLookup:
             return None
         self._peers[key] = peer
         if len(self._peers) > 20000:
-            self._peers.clear()
+            # LRU-trim: 25% самых старых вместо .clear() — иначе раз в 20k lookup'ов терялись
+            # ВСЕ access_hash'и и следующие лоты шли на resolve заново, пока кэш не прогреется.
+            for k in list(self._peers)[:5000]:
+                self._peers.pop(k, None)
         return peer
