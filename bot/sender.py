@@ -144,8 +144,16 @@ class TelegramSender:
         if True:
           try:
             attempt, flood_waits = -1, 0
+            # Жёсткий потолок: один send не может есть больше 7 мин. Иначе процесс () снаружи
+            # обёрнут в wait_for 10 мин, и серия RetryAfter 60с × 8+ (с free-retries) загружала
+            # очередь так, что следующие лоты ловили «process timeout 10min».
+            send_deadline = time.monotonic() + 420
             while attempt + 1 < attempts:
                 attempt += 1
+                if time.monotonic() > send_deadline:
+                    log.warning("send: budget exhausted (chat=%s, attempts=%d, floods=%d) — giving up",
+                                chat_id, attempt, flood_waits)
+                    return SendResult(False, error=f"send budget (7m) exhausted after {flood_waits} RetryAfter")
                 wait = self._last + settings.send_interval - time.monotonic()
                 if wait > 0:
                     await asyncio.sleep(wait)

@@ -131,11 +131,14 @@ async def start_health_server(app_ref: Any, port: int) -> Any:
             try:
                 pending_cap = app_ref.lookup.pending_captchas() if hasattr(app_ref, "lookup") else 0
                 pool_size = len(app_ref.lookup._bot_pool()) if hasattr(app_ref.lookup, "_bot_pool") else 0
-                dead_cnt = sum(1 for v in (app_ref.lookup._bot_dead_until or {}).values()
-                               if v > __import__("time").monotonic())
+                now_m = __import__("time").monotonic()
+                dead_cnt = sum(1 for v in (app_ref.lookup._bot_dead_until or {}).values() if v > now_m)
+                slow_cnt = sum(1 for v in (getattr(app_ref.lookup, "_bot_slow_until", {}) or {}).values()
+                               if v > now_m)
                 lines.append(f"tracker_lookup_active_captchas {pending_cap}")
                 lines.append(f"tracker_lookup_bot_pool_size {pool_size}")
                 lines.append(f"tracker_lookup_bot_dead_count {dead_cnt}")
+                lines.append(f"tracker_lookup_bot_slow_count {slow_cnt}")
                 lines.append(f"tracker_lookup_pending {app_ref.lookup.queue_size()}")
             except Exception:
                 pass

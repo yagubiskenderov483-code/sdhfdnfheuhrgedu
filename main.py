@@ -428,9 +428,14 @@ class App:
             try:
                 res = await self.lookup.check_bots_liveness()
                 if res:
-                    dead = [b for b, ok in res.items() if not ok]
-                    log.info("Lookup liveness check: %d бот(ов) живы, %d dead",
-                             sum(1 for v in res.values() if v), len(dead))
+                    # None (inconclusive — не хватило сессий) НЕ считаем мёртвыми;
+                    # True = alive, False = подтверждённо dead.
+                    alive = sum(1 for v in res.values() if v is True)
+                    dead = [b for b, ok in res.items() if ok is False]
+                    skipped = sum(1 for v in res.values() if v is None)
+                    log.info("Lookup liveness check: alive %d, dead %d%s",
+                             alive, len(dead),
+                             f", inconclusive {skipped}" if skipped else "")
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -665,14 +670,21 @@ class App:
                     now_m = _t.monotonic()
                     dead = [b for b, until in (self.lookup._bot_dead_until or {}).items()
                             if until > now_m]
-                    if pool and not dead:
+                    # GPT: теперь молчащие боты попадают в _bot_slow_until (не выключаются из пула,
+                    # только в конец очереди). Startup-отчёт должен их тоже показать.
+                    slow = [b for b, until in (getattr(self.lookup, "_bot_slow_until", {}) or {}).items()
+                            if until > now_m]
+                    if pool and not dead and not slow:
                         lines.append(f"🤖 Lookup-боты: {len(pool)} активн. (/bots)")
-                    elif pool and dead:
-                        lines.append(f"⚠️ Lookup: {len(pool)} активн., 💀 dead: "
-                                     + ", ".join(f"@{b}" for b in dead) + " (/bots)")
+                    elif pool and (dead or slow):
+                        extras = []
+                        if dead:
+                            extras.append("💀 " + ", ".join(f"@{b}" for b in dead))
+                        if slow:
+                            extras.append("🐢 " + ", ".join(f"@{b}" for b in slow))
+                        lines.append(f"⚠️ Lookup: {len(pool)} активн., " + " · ".join(extras) + " (/bots)")
                     elif not pool and self.lookup.any_bot_configured():
-                        lines.append("🚨 Lookup: ВСЕ боты dead — hidden-owner лоты с пометкой без фильтра. "
-                                     "/bots")
+                        lines.append("🚨 Lookup: пул пуст — hidden-owner лоты отсеиваются. /bots")
                     elif not self.lookup.any_bot_configured():
                         lines.append("ℹ️ Lookup-бот не настроен — hidden-owner лоты отсеиваются. "
                                      "Настрой: /set LOOKUP_BOT_USERNAME funstat")

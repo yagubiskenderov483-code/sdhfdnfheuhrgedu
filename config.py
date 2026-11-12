@@ -198,8 +198,10 @@ class Settings:
     api_hash: str = ""
     bot_token: str = ""
     target_chat_id: int = 0
-    price_routes: list[tuple[int, int | None, int]] = field(default_factory=list)  # каналы по диапазону цены
-    backdrop_routes: list[tuple[str, int]] = field(default_factory=list)  # каналы по фону подарка (тема)
+    # (lo, hi, chat_id, thread_id) — каналы по диапазону цены. Аннотация ранее была
+    # неточной (3-tuple вместо 4-tuple) — для IDE/mypy теперь правильная.
+    price_routes: list[tuple[int, int | None, int, int | None]] = field(default_factory=list)
+    backdrop_routes: list[tuple[str, int, int | None]] = field(default_factory=list)  # (имя_фона, chat_id, thread_id)
     admin_ids: set[int] = field(default_factory=set)
     allow_all_users: bool = True
     # --- подписка на канал (оплата TON) ---
