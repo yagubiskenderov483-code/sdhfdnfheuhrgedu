@@ -79,7 +79,7 @@ _LEGACY_PLANS: dict[str, tuple[str, float, float, int | None]] = {
 def plan_info(code: str) -> tuple[str, float, float, int | None] | None:
     """PLANS + старые коды (для доставки оплат по счёту, выставленному до смены тарифов)."""
     return PLANS.get(code) or _LEGACY_PLANS.get(code)
-INVOICE_TTL = 60 * 60           # счёт ждёт оплату 1 час
+INVOICE_TTL = 30 * 60           # Maker: 'ссылка на оплату действует 30 мин'
 LINK_TTL = 24 * 3600            # ссылка на вход действует сутки
 KV_KEY = "subs_state"
 
@@ -139,6 +139,32 @@ class Subscriptions:
         self._backup_task: asyncio.Task | None = None
         self.degraded = False          # копия не восстановилась → не кикаем незнакомых, пробный час не даём
         self.on_change: Callable[[], Awaitable[Any]] | None = None   # сохранить копию после оплаты/входа
+
+    def _user_bots(self) -> list:
+        """Все боты, через которые юзеру может прийти DM со ссылкой (main + sub, если задан).
+        В таком порядке: сначала главный (он создавал invite-link), потом sub как фоллбек."""
+        bots = [self.bot]
+        sb = getattr(self.app, "sub_bot", None)
+        if sb is not None and sb is not self.bot:
+            bots.append(sb)
+        # stars_bot может быть тем же, что main — не дублируем
+        if self.stars_bot is not None and self.stars_bot not in bots:
+            bots.append(self.stars_bot)
+        return bots
+
+    async def _dm_user(self, uid: int, text: str, **kw) -> bool:
+        """Отправить DM пользователю через любой доступный бот. → True если дошло."""
+        last_err = None
+        for bot in self._user_bots():
+            try:
+                await bot.send_message(int(uid), text, **kw)
+                return True
+            except Exception as e:
+                last_err = e
+                continue
+        if last_err is not None:
+            log.info("DM to %s failed on all bots: %s", uid, last_err)
+        return False
 
     # ------------------------------------------------------------------ storage
     async def load(self) -> None:
@@ -421,7 +447,7 @@ class Subscriptions:
                 log.warning("Re-issue link to %s failed: %s", owner, e)
             return
         try:
-            await self.bot.send_message(uid, f"Вы в канале! Доступ: <b>{_fmt_left(self.user(uid)['until'])}</b>.")
+            await self._dm_user(uid, f"Вы в канале! Доступ: <b>{_fmt_left(self.user(uid)['until'])}</b>.")
         except Exception:
             pass
 
@@ -587,8 +613,12 @@ class Subscriptions:
 
     # ------------------------------------------------------------------ payments (TON)
     def invoice_url(self, code: str) -> str:
+        """Универсальный TON deep-link: открывает ЛЮБОЙ установленный кошелёк
+        (Tonkeeper, Wallet, MyTonWallet и т.д.) с заранее подставленными адресом,
+        суммой и комментом. Юзеру остаётся только подтвердить оплату — вводить
+        ничего не нужно."""
         inv = self.state["invoices"][code]
-        return (f"https://app.tonkeeper.com/transfer/{settings.sub_ton_address}"
+        return (f"ton://transfer/{settings.sub_ton_address}"
                 f"?amount={int(inv['nano'])}&text={quote(code)}")
 
     async def new_invoice(self, uid: int, plan: str) -> str:
@@ -823,34 +853,78 @@ class Subscriptions:
 
     async def _fetch_txs(self) -> list[dict]:
         """Последние входящие переводы. Листаем назад (до 6 страниц по 50), пока не дойдём до уже
-        обработанного перевода или до времени старше самого старого открытого счёта — иначе при
-        простое бота и спаме мелкими переводами настоящая оплата могла выпасть из окна."""
-        url = "https://toncenter.com/api/v2/getTransactions"
-        headers = {"X-API-Key": settings.toncenter_api_key} if settings.toncenter_api_key else {}
+        обработанного перевода или до времени старше самого старого открытого счёта.
+        Если toncenter (бесплатный, 1 rps) не отвечает — фоллбек на tonapi.io."""
         seen = set(self.state.get("seen_tx") or [])
         open_ts = [float(i.get("ts") or 0) for i in self.state["invoices"].values() if not i.get("paid")]
         oldest = min(open_ts) if open_ts else time.time()
         out: list[dict] = []
-        params = {"address": settings.sub_ton_address, "limit": "50", "archival": "false"}
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
-            for _page in range(6):
-                async with s.get(url, params=params, headers=headers) as r:
-                    data = await r.json(content_type=None)
-                if not data.get("ok"):
-                    if out:
+        tc_err: str | None = None
+        # toncenter
+        try:
+            url = "https://toncenter.com/api/v2/getTransactions"
+            headers = {"X-API-Key": settings.toncenter_api_key} if settings.toncenter_api_key else {}
+            params = {"address": settings.sub_ton_address, "limit": "50", "archival": "false"}
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
+                for _page in range(6):
+                    async with s.get(url, params=params, headers=headers) as r:
+                        data = await r.json(content_type=None)
+                    if not data.get("ok"):
+                        if out:
+                            break
+                        raise RuntimeError(str(data.get("error") or data)[:200])
+                    page = data.get("result") or []
+                    out += page
+                    if len(page) < 50:
                         break
-                    raise RuntimeError(str(data.get("error") or data)[:200])
-                page = data.get("result") or []
-                out += page
-                if len(page) < 50:
-                    break
-                last = page[-1]
-                tid = last.get("transaction_id") or {}
-                if (tid.get("hash") in seen or float(last.get("utime") or 0) < oldest
-                        or not tid.get("lt")):
-                    break
-                params = {**params, "lt": tid["lt"], "hash": tid["hash"], "archival": "true"}
-        return out
+                    last = page[-1]
+                    tid = last.get("transaction_id") or {}
+                    if (tid.get("hash") in seen or float(last.get("utime") or 0) < oldest
+                            or not tid.get("lt")):
+                        break
+                    params = {**params, "lt": tid["lt"], "hash": tid["hash"], "archival": "true"}
+            if out:
+                return out
+            tc_err = "toncenter вернул пусто"
+        except Exception as e:
+            tc_err = str(e)[:200]
+            log.warning("toncenter fetch failed, пробую tonapi: %s", tc_err)
+        # фоллбек: tonapi.io (/v2/blockchain/accounts/{addr}/transactions)
+        try:
+            tonapi_url = (f"https://tonapi.io/v2/blockchain/accounts/"
+                          f"{settings.sub_ton_address}/transactions?limit=50")
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
+                async with s.get(tonapi_url) as r:
+                    data = await r.json(content_type=None)
+            # tonapi отдаёт свою структуру — приводим к tonapi-формату совместимому с
+            # остальным кодом (in_msg.source/value/message + transaction_id.hash/lt)
+            for tx in (data.get("transactions") or []):
+                im = (tx.get("in_msg") or {})
+                src = ((im.get("source") or {}).get("address")
+                       if isinstance(im.get("source"), dict) else im.get("source"))
+                msg_text = ""
+                dec = im.get("decoded_body") or {}
+                if isinstance(dec, dict):
+                    msg_text = dec.get("text") or ""
+                normalized = {
+                    "transaction_id": {"hash": tx.get("hash"), "lt": str(tx.get("lt") or "")},
+                    "utime": tx.get("utime"),
+                    "in_msg": {
+                        "source": src,
+                        "message": msg_text,
+                        "value": im.get("value") or 0,
+                    },
+                    "out_msgs": [{
+                        "destination": ((o.get("destination") or {}).get("address")
+                                        if isinstance(o.get("destination"), dict) else o.get("destination")),
+                        "value": o.get("value") or 0,
+                    } for o in (tx.get("out_msgs") or []) if isinstance(o, dict)],
+                }
+                out.append(normalized)
+            return out
+        except Exception as e:
+            log.warning("tonapi fallback failed: %s", e)
+            raise RuntimeError(tc_err or str(e)[:200])
 
     async def check_payments(self) -> int:
         """Найти оплаченные счета по комментарию и сумме. → сколько оплачено сейчас."""
@@ -967,10 +1041,10 @@ class Subscriptions:
             await self.save()
             log.error("Grant after payment failed for %s: %s (will retry)", inv["uid"], e)
             return False
-        try:
-            await self.bot.send_message(int(inv["uid"]), text)
-        except Exception:
-            pass
+        # DM с ссылкой — пробуем ОБА бота (юзер мог /start-овать любой из них).
+        if not await self._dm_user(int(inv["uid"]), text):
+            log.warning("DM with invite link NOT delivered to %s (ни один бот не достучался)",
+                        inv.get("uid"))
         return True
 
     async def _retry_undelivered(self) -> None:
@@ -1027,13 +1101,12 @@ class Subscriptions:
                     or float(until) - float(u.get("started") or 0) <= REMIND_BEFORE):
                 continue          # пробный час и короткие сроки не напоминаем
             u["reminded"] = until
-            try:
-                await self.bot.send_message(int(k), f"Подписка закончится через {_fmt_left(float(until))}. "
-                                                    "Продлите, чтобы не потерять доступ.",
-                                            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                                                InlineKeyboardButton(text="Продлить", callback_data="sub:menu")]]))
-            except Exception:
-                pass
+            await self._dm_user(
+                int(k),
+                f"Подписка закончится через {_fmt_left(float(until))}. "
+                "Продлите, чтобы не потерять доступ.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                    InlineKeyboardButton(text="Продлить", callback_data="sub:menu")]]))
             await self.save()
 
     def stats(self) -> dict:
@@ -1078,7 +1151,7 @@ class Subscriptions:
                 # продлил прямо во время кика — выдаём новую ссылку, а не «подписка закончилась»
                 try:
                     text = await self.grant(uid, 0, "Подписка продлена, держите ссылку для входа.")
-                    await self.bot.send_message(uid, text)
+                    await self._dm_user(uid, text)
                 except Exception as e:
                     log.warning("Re-link after renewal during kick failed for %s: %s", uid, e)
                 continue
@@ -1092,11 +1165,8 @@ class Subscriptions:
                         pass
                 continue
             log.info("Subscription ended — user %s removed from channel", uid)
-            try:
-                await self.bot.send_message(uid, "Ваша подписка закончилась. Продлить можно здесь:",
-                                            reply_markup=self.main_kb())
-            except Exception:
-                pass
+            await self._dm_user(uid, "Ваша подписка закончилась. Продлить можно здесь:",
+                                reply_markup=self.main_kb())
         # старые счета и неиспользованные ссылки — чистим
         for code, i in list(self.state["invoices"].items()):
             if i.get("paid") and i.get("granted") is not True:
@@ -1203,7 +1273,11 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 u["in_chat"] = False
             try:
                 text = await subs.grant(uid, 0, "Ваш доступ ещё действует, держите новую ссылку.")
-                await subs.bot.send_message(uid, text)          # ссылка — только в личку
+                # сначала пробуем бот, в котором юзер сейчас — он точно работает
+                try:
+                    await q.bot.send_message(uid, text)
+                except Exception:
+                    await subs._dm_user(uid, text)
                 await q.answer()
             except Exception as e:
                 log.error("New link for %s failed: %s", uid, e)
@@ -1236,9 +1310,14 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             log.error("Trial link failed for %s: %s", uid, e)
             await q.answer("Не удалось создать ссылку. Попробуйте позже.", show_alert=True)
             return
+        # сначала через бот юзера, потом фоллбек через любой
+        delivered = False
         try:
-            await subs.bot.send_message(uid, text)              # ссылка — только в личку
+            await q.bot.send_message(uid, text)
+            delivered = True
         except Exception:
+            delivered = await subs._dm_user(uid, text)
+        if not delivered:
             await q.answer("Откройте бота в личке и нажмите «Старт»", show_alert=True)
             return
         await q.answer()
@@ -1313,13 +1392,12 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 await q.answer("Не удалось создать счёт в Stars, попробуйте позже", show_alert=True)
                 return
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"Оплатить {stars} Stars", url=url)],
+                [InlineKeyboardButton(text="Оплатить", url=url)],
                 back_row,
             ])
             await _safe_edit(q.message,
                 f"<b>Тариф {title} — {stars} Stars</b>\n\n"
-                "Нажмите кнопку ниже и подтвердите оплату в Telegram. "
-                "Как только Telegram подтвердит, ссылка на вход придёт сама.",
+                "Нажмите кнопку и подтвердите оплату в Telegram.",
                 reply_markup=kb)
             await q.answer()
             return
@@ -1330,19 +1408,19 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 return
             code = await subs.new_invoice(q.from_user.id, plan)
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"Оплатить {price:g} TON (Tonkeeper)",
-                                      url=subs.invoice_url(code))],
+                [InlineKeyboardButton(text="Оплатить", url=subs.invoice_url(code))],
                 [InlineKeyboardButton(text="Проверить оплату",
                                       callback_data=f"sub:check:{code}")],
                 back_row,
             ])
             await _safe_edit(q.message,
-                f"<b>Тариф {title} — {price:g} TON (Tonkeeper)</b>\n\n"
-                "Нажмите «Оплатить в Tonkeeper», сумма и комментарий подставятся сами.\n\n"
-                f"Или вручную:\nАдрес: <code>{settings.sub_ton_address}</code>\n"
-                f"Сумма: <code>{price:g}</code> TON\n"
-                f"Комментарий: <code>{code}</code> (обязательно!)\n\n"
-                "Как только оплата придёт, бот сам пришлёт ссылку для входа.",
+                f"<b>Тариф {title} — {price:g} TON</b>\n\n"
+                "Кнопка «Оплатить» откроет ваш TON-кошелёк с готовой суммой и комментарием — "
+                "остаётся только подтвердить перевод.\n\n"
+                f"Вручную: отправьте <b>{price:g} TON</b> на\n"
+                f"<code>{settings.sub_ton_address}</code>\n"
+                f"с комментарием <code>{code}</code>.\n\n"
+                f"Счёт действует 30 минут. После оплаты бот сам пришлёт ссылку.",
                 reply_markup=kb)
             await q.answer()
             return
@@ -1457,7 +1535,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if not inv or inv["uid"] != q.from_user.id:
             await q.answer("Счёт не найден", show_alert=True)
             return
-        # 1) TON — перечекиваем toncenter прямо сейчас (не ждём фоновый цикл)
+        # 1) Прочекать toncenter / CryptoPay прямо сейчас (не ждём фоновый цикл).
+        #    Ошибку НЕ прячем — показываем юзеру, чтобы было понятно, что сети лежит.
+        check_err = None
         if not inv.get("paid"):
             try:
                 if inv.get("kind") == "crypto":
@@ -1465,27 +1545,36 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 else:
                     await subs.check_payments()
             except Exception as e:
-                log.warning("Manual payment check failed: %s", e)
+                check_err = str(e)[:100]
+                log.warning("Manual payment check failed for %s: %s", code, e)
             inv = subs.state["invoices"].get(code, {})
-        # 2) Если оплачено, но доступ ещё не выдан — выдаём СИНХРОННО и возвращаем ссылку
+        # 2) Если оплачено, но доступ ещё не выдан — выдаём СИНХРОННО
         if inv.get("paid") and inv.get("granted") is not True:
             try:
                 await subs._deliver(inv)
             except Exception as e:
                 log.warning("Manual deliver failed: %s", e)
             inv = subs.state["invoices"].get(code, {})
-        # 3) Отчитаться юзеру: alert кратко + сообщение в чат с реальной ссылкой, если выдали
+        # 3) Отчитаться юзеру коротким alert-ом
         if inv.get("paid"):
             if inv.get("granted") is True:
-                await q.answer("Оплата пришла — ссылка отправлена в этот чат",
-                               show_alert=True)
+                await q.answer("Оплата пришла — ссылка в чате", show_alert=True)
             else:
                 await q.answer("Оплата пришла, выдаю доступ…", show_alert=True)
-                # повторная попытка через мгновение — если grant отвалился от rate-limit
                 asyncio.get_running_loop().create_task(subs._retry_undelivered())
+        elif inv.get("got"):
+            # пришла НЕПОЛНАЯ сумма — комментарий совпал, но меньше чем нужно
+            got_ton = int(inv.get("got") or 0) / 1e9
+            need_ton = int(inv.get("nano") or 0) / 1e9
+            await q.answer(
+                f"Пришло {got_ton:g} из {need_ton:g} TON. Доплатите остаток с тем же "
+                f"комментарием {code}.", show_alert=True)
         else:
-            await q.answer("Оплата не получена, попробуйте через минуту",
-                           show_alert=True)
+            if check_err:
+                await q.answer(f"TON-сеть не ответила: {check_err}", show_alert=True)
+            else:
+                await q.answer("Оплата не получена, попробуйте через минуту",
+                               show_alert=True)
 
     # ---------------- админам: список и ручная выдача
     # те же админы, что видят эти команды в /help (в т.ч. назначенные через /claim, если ADMIN_IDS пуст)
