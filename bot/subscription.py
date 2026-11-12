@@ -1271,8 +1271,6 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if settings.sub_ton_address:
             rows.append([InlineKeyboardButton(text=f"Tonkeeper · {price:g} TON",
                                               callback_data=f"sub:pay:{plan}:ton")])
-        rows.append([InlineKeyboardButton(text=f"Crypto Bot · {price:g} TON",
-                                          callback_data=f"sub:pay:{plan}:wallet")])
         rows.append([InlineKeyboardButton(text="« Назад", callback_data="sub:menu")])
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
         stars_part = f" или <b>{stars} Stars</b>" if stars else ""
