@@ -530,9 +530,15 @@ class ListingPipeline:
                          ).isoformat(timespec="seconds")
             if await self.db.seller_already_sent(l.seller_key, since):
                 return "this seller was already sent"
-        # тот же @username уже отправлялся (другой лот / другой ключ того же человека)
+        # тот же @username уже отправлялся (другой лот / другой ключ того же человека).
+        # Респектуем SELLER_REPEAT_HOURS как в seller_key-пути выше — иначе один раз
+        # отправленный юз никогда не вернётся, даже если admin поставил окно повтора.
         if settings.unique_sellers and l.seller_username:
-            if await self.db.username_already_sent(l.seller_username):
+            u_since = None
+            if settings.seller_repeat_hours > 0:
+                u_since = (datetime.now(timezone.utc) - timedelta(hours=settings.seller_repeat_hours)
+                           ).isoformat(timespec="seconds")
+            if await self.db.username_already_sent(l.seller_username, u_since):
                 return "this seller was already sent"
         return None
 
