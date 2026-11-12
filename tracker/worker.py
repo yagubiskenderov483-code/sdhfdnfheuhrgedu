@@ -225,6 +225,21 @@ class SessionWorker:
         self._running = False
         if self._health_task:
             self._health_task.cancel()
+            # Дожидаемся отменённого health-цикла — без этого на shutdown оставались
+            # pending-задачи и Python ругался "Task was destroyed but it is pending".
+            try:
+                await asyncio.wait_for(self._health_task, timeout=2)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
+        # То же для fire-and-forget bg-задач (on_auth_error уведомление и т.п.)
+        bg = list(self._bg_tasks)
+        for t in bg:
+            t.cancel()
+        if bg:
+            try:
+                await asyncio.wait_for(asyncio.gather(*bg, return_exceptions=True), timeout=2)
+            except asyncio.TimeoutError:
+                pass
         await self._safe_disconnect()
         if self.status != WorkerStatus.AUTH_ERROR:
             self.status = WorkerStatus.STOPPED

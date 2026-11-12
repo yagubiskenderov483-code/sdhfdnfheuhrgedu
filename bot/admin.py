@@ -1666,6 +1666,12 @@ def build_routers(app: "App") -> list[Router]:
             for k, until in dead_live.items():
                 left_min = (until - now) / 60
                 lines.append(f"  @{html.escape(k)} — ещё <b>{left_min:.1f}</b> мин")
+        slow_live = {k: v for k, v in (getattr(lk, "_bot_slow_until", {}) or {}).items() if v > now}
+        if slow_live:
+            lines += ["", f"<b>🐢 молчат (в конец очереди) ({len(slow_live)}):</b>"]
+            for k, until in slow_live.items():
+                left_min = (until - now) / 60
+                lines.append(f"  @{html.escape(k)} — ещё <b>{left_min:.1f}</b> мин")
         unres_counters = {k: v for k, v in (lk._bot_consec_unres or {}).items() if v > 0}
         if unres_counters:
             lines += ["", "<b>Подряд unresolvable (ещё не dead):</b>"]
@@ -1805,23 +1811,26 @@ def build_routers(app: "App") -> list[Router]:
         lk = app.lookup
         arg = (m.text or "").split(maxsplit=1)
         target = arg[1].lstrip("@").strip().lower() if len(arg) > 1 else None
+        # GPT переименовал: теперь dead-mark деградирует в slow-mark. Чистим обе структуры.
         dead = dict(getattr(lk, "_bot_dead_until", {}) or {})
-        if not dead:
-            await m.answer("ℹ️ Нет ботов с dead-mark.")
+        slow = dict(getattr(lk, "_bot_slow_until", {}) or {})
+        both = dict(dead); both.update(slow)
+        if not both:
+            await m.answer("ℹ️ Нет ботов с dead/slow-mark.")
             return
-        if target and target not in dead:
-            await m.answer(f"ℹ️ @{html.escape(target)} не помечен dead. Текущие: "
-                           + ", ".join(f"@{b}" for b in dead.keys()))
+        if target and target not in both:
+            await m.answer(f"ℹ️ @{html.escape(target)} без меток. Текущие: "
+                           + ", ".join(f"@{b}" for b in both.keys()))
             return
         cleared = []
-        for k in list(dead.keys()):
+        for k in list(both.keys()):
             if target is None or k == target:
                 lk._clear_bot_unresolved(k)
                 cleared.append(k)
-        await m.answer(f"✅ Снят dead-mark с: {', '.join('@' + b for b in cleared)}\n\n"
+        await m.answer(f"✅ Сняты метки с: {', '.join('@' + b for b in cleared)}\n\n"
                        "Следующие lookup-операции попытаются использовать этих ботов.\n"
-                       "Если они всё ещё не отвечают — dead-mark будет поставлен снова после "
-                       "≥3 подряд unresolvable-фейлов.")
+                       "Если они всё ещё не отвечают — slow-mark поставится снова после "
+                       "≥3 подряд unresolvable-фейлов с разных сессий.")
 
     @admin.message(Command("disk_usage"))
     async def cmd_disk_usage(m: Message) -> None:
@@ -1928,13 +1937,16 @@ def build_routers(app: "App") -> list[Router]:
         import time as _t
         done = []
 
-        # 1. Снять dead-mark с ботов
+        # 1. Снять dead-mark и slow-отметки с ботов (GPT переименовал: теперь ботов не выключают,
+        # а отодвигают в конец очереди через _bot_slow_until — /wake очищает обе структуры)
         lk = app.lookup
+        slow = list((getattr(lk, "_bot_slow_until", {}) or {}).keys())
         dead = list((getattr(lk, "_bot_dead_until", {}) or {}).keys())
-        for k in dead:
+        both = list({*slow, *dead})
+        for k in both:
             lk._clear_bot_unresolved(k)
-        if dead:
-            done.append(f"🧹 Сняты dead-mark: {', '.join('@' + b for b in dead)}")
+        if both:
+            done.append(f"🧹 Сняты метки с ботов: {', '.join('@' + b for b in both)}")
 
         # 2. Мягкий разгон
         upped = 0
@@ -2099,10 +2111,15 @@ def build_routers(app: "App") -> list[Router]:
         # lookup health
         bots_pool = []
         dead_bots = []
+        slow_bots = []
         try:
             bots_pool = app.lookup._bot_pool()
             now_m = _t.monotonic()
             dead_bots = [b for b, v in (app.lookup._bot_dead_until or {}).items() if v > now_m]
+            # GPT переименовал: боты теперь не «dead», а «slow» — отодвинуты в конец очереди.
+            # /dashboard должен показывать обе структуры.
+            slow_bots = [b for b, v in (getattr(app.lookup, "_bot_slow_until", {}) or {}).items()
+                         if v > now_m]
         except Exception:
             pass
         # health emoji
@@ -2135,12 +2152,15 @@ def build_routers(app: "App") -> list[Router]:
         lines.append(f"   ⤷ последний найден <i>{new_ago} назад</i>, отправлен <i>{sent_ago} назад</i>")
 
         # Lookup
-        if bots_pool or dead_bots:
+        if bots_pool or dead_bots or slow_bots:
             bot_str = ", ".join(f"@{b}" for b in bots_pool[:3])
             if len(bots_pool) > 3:
                 bot_str += f" +{len(bots_pool) - 3}"
             if dead_bots:
                 bot_str += " · 💀 " + ", ".join(f"@{b}" for b in dead_bots)
+            if slow_bots:
+                # «молчит» — спрашиваем последним, но из пула не убираем
+                bot_str += " · 🐢 " + ", ".join(f"@{b}" for b in slow_bots)
             lines.append(f"🔍 <b>Lookup</b>: {bot_str}")
             lines.append(f"   ⤷ попыток {lk.get('lookups', 0)} · найдено {lk.get('found', 0)} · "
                          f"из памяти {lk.get('from_memory', 0)} · не найдено {lk.get('not_found', 0)}")
