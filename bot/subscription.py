@@ -243,18 +243,27 @@ class Subscriptions:
         return u
 
     # ------------------------------------------------------------------ keyboards
+    # Maker: 'на других кнопках кастомные эмодзи работают, у нас — нет, просто попробуй'.
+    # Bot API сам не парсит entities в тексте кнопок, но Telegram-клиенты c Premium иногда
+    # отображают <tg-emoji>…</tg-emoji>. Пробуем — fallback-эмодзи стоят внутри тега,
+    # так что если не отработает, не-Premium юзер увидит обычный ⭐/💎, а не голый тег.
     def main_kb(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="💎 Подписка", callback_data="sub:menu")],
+            [InlineKeyboardButton(text=f'{_tg_emoji(EMOJI_DIAMOND, "💎")} Подписка',
+                                  callback_data="sub:menu")],
             [InlineKeyboardButton(text="📊 Моя подписка", callback_data="sub:my")],
         ])
 
     def plans_kb(self, uid: int) -> InlineKeyboardMarkup:
         rows = []
         if not self.user(uid).get("trial"):
-            rows.append([InlineKeyboardButton(text="🎁 30 минут бесплатно", callback_data="sub:trial")])
+            rows.append([InlineKeyboardButton(
+                text=f'{_tg_emoji(EMOJI_GIFT, "🎁")} 30 минут бесплатно',
+                callback_data="sub:trial")])
         for code, (title, price, _, stars) in PLANS.items():
-            label = f"{title} · {price:g} TON" + (f" / {stars}⭐" if stars else "")
+            ton = f'{price:g} {_tg_emoji(EMOJI_TON, "TON")}'
+            stars_part = f' / {stars} {_tg_emoji(EMOJI_STAR, "⭐")}' if stars else ''
+            label = f"{title} · {ton}{stars_part}"
             rows.append([InlineKeyboardButton(text=label, callback_data=f"sub:buy:{code}")])
         rows.append([InlineKeyboardButton(text="« Назад", callback_data="sub:home")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1255,13 +1264,16 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         # Поэтому в кнопках обычные ⭐/TON, а в тексте сверху — кастомки от Maker.
         rows: list[list[InlineKeyboardButton]] = []
         if stars:
-            rows.append([InlineKeyboardButton(text=f"Stars · {stars} ⭐",
-                                              callback_data=f"sub:pay:{plan}:stars")])
+            rows.append([InlineKeyboardButton(
+                text=f'Stars · {stars} {_tg_emoji(EMOJI_STAR, "⭐")}',
+                callback_data=f"sub:pay:{plan}:stars")])
         if settings.sub_ton_address:
-            rows.append([InlineKeyboardButton(text=f"Tonkeeper · {price:g} TON",
-                                              callback_data=f"sub:pay:{plan}:ton")])
-        rows.append([InlineKeyboardButton(text=f"Crypto Bot · {price:g} TON",
-                                          callback_data=f"sub:pay:{plan}:wallet")])
+            rows.append([InlineKeyboardButton(
+                text=f'Tonkeeper · {price:g} {_tg_emoji(EMOJI_TON, "TON")}',
+                callback_data=f"sub:pay:{plan}:ton")])
+        rows.append([InlineKeyboardButton(
+            text=f'Crypto Bot · {price:g} {_tg_emoji(EMOJI_TON, "TON")}',
+            callback_data=f"sub:pay:{plan}:wallet")])
         rows.append([InlineKeyboardButton(text="« Назад", callback_data="sub:menu")])
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
         ton_price = f"<b>{price:g}</b> {_tg_emoji(EMOJI_TON, 'TON')}"
