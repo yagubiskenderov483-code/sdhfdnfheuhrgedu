@@ -248,7 +248,7 @@ class Settings:
     # «нет @username», «короткое имя» — Maker хочет, чтобы дорогие (1500+⭐) активно выдавались,
     # пусть и без явного контакта с продавцом. 0 = выкл (старый жёсткий фильтр для всех).
     # Платные ЛС и «только Premium» — всё равно отсеиваем независимо от цены.
-    soft_filter_stars: int = 1500
+    soft_filter_stars: int = 1000             # Maker: 300-1000 — строго, всё остальное мягче
                                               # (RUSSIAN_ONLY к ним неприменим — профиля просто нет)
     lookup_bot_username: str = ""             # @username бота ручного поиска (напр. "funstat") —
                                               # для лотов со скрытым владельцем в пост добавится
@@ -532,7 +532,7 @@ def _from_env() -> Settings:
         seller_name_signal=_bool(e("SELLER_NAME_SIGNAL"), False),
         phone_mismatch_blocks=_bool(e("PHONE_MISMATCH_BLOCKS"), True),
         allow_hidden_owner=_bool(e("ALLOW_HIDDEN_OWNER"), False),
-        soft_filter_stars=max(0, _int(e("SOFT_FILTER_STARS"), 1500)),
+        soft_filter_stars=max(0, _int(e("SOFT_FILTER_STARS"), 1000)),
         lookup_bot_username=_lookup_bot_username(e("LOOKUP_BOT_USERNAME")),
         lookup_bots=_bot_list(e("LOOKUP_BOTS")),
         lookup_cmd_template=((e("LOOKUP_CMD_TEMPLATE") or "/human {name}").strip() or "/human {name}"),

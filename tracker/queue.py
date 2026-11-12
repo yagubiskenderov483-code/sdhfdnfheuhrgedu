@@ -597,14 +597,23 @@ class ListingPipeline:
             # Скрытый владелец. Сначала то, что не стоит ни одного запроса в Telegram:
             #  • имя, которое фильтр и так отсеет (короткое, чужой алфавит, blacklist) — сразу мимо;
             #  • этот NFT / продавец уже отправлялся — сразу мимо.
+            # ИСКЛЮЧЕНИЕ: дорогие лоты (>= SOFT_FILTER_STARS) не отсекаем по короткому имени и
+            # чужому алфавиту ДО lookup: имя может сложиться нормально после открытия профиля,
+            # а если нет — soft-путь в _check_seller всё равно пропустит с пометкой.
+            soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
+            soft_applies = bool(soft and l.stars_price and l.stars_price >= soft)
             pre = self.seller_filter.check(l)
             if pre.code in _HIDDEN_HARD_REJECT:
-                l.seller_filter_result = pre.code
-                l.status, l.reason = ListingStatus.FILTERED_SELLER, pre.reason
-                self.stats["filtered_seller"] += 1
-                llog("FILTER", f"#{l.listing_id} seller rejected: {pre.code}")
-                await self.db.update_listing(l)
-                return
+                # blacklist режем всегда — это заведомо нежелательный продавец, цена роли не играет.
+                if pre.code == "BLACKLIST" or not soft_applies:
+                    l.seller_filter_result = pre.code
+                    l.status, l.reason = ListingStatus.FILTERED_SELLER, pre.reason
+                    self.stats["filtered_seller"] += 1
+                    llog("FILTER", f"#{l.listing_id} seller rejected: {pre.code}")
+                    await self.db.update_listing(l)
+                    return
+                llog("FILTER", f"#{l.listing_id} {pre.code}, но цена "
+                               f"{l.stars_price}⭐ ≥ SOFT_FILTER_STARS={soft} — не режем до lookup")
             early = await self._sent_before(l)
             if early:
                 l.status, l.reason = ListingStatus.FILTERED_DUPLICATE, early
@@ -619,8 +628,14 @@ class ListingPipeline:
             # Имена, которые фильтр и так отсеет (короткие, чужой алфавит, blacklist), боту не шлём.
             # Поиск идёт ОТДЕЛЬНО от обработчиков: он медленный (ответ бота, капча), а остальные
             # лоты в это время должны идти дальше как обычно.
+            # Для дорогих лотов (>= SOFT_FILTER_STARS) шлём в lookup даже с короткими именами /
+            # чужим алфавитом — на той стороне профиль может вернуть нормальное имя.
             pre = self.seller_filter.check(l)
-            if pre.code not in _HIDDEN_HARD_REJECT:
+            soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
+            soft_applies = bool(soft and l.stars_price and l.stars_price >= soft)
+            can_lookup = (pre.code not in _HIDDEN_HARD_REJECT
+                          or (soft_applies and pre.code != "BLACKLIST"))
+            if can_lookup:
                 t = asyncio.get_running_loop().create_task(self._lookup_then_process(l))
                 self._lookup_tasks.add(t)
                 t.add_done_callback(self._lookup_tasks.discard)
