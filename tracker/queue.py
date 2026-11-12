@@ -887,7 +887,12 @@ class ListingPipeline:
             age = (datetime.now(timezone.utc) - datetime.fromisoformat(l.first_seen)).total_seconds()
         except (TypeError, ValueError):
             age = 0.0
-        if limit > 0 and age > limit:
+        # Rescue-путь (owner_not_found=True — bosh ответил пустотой или инфра сдохла, лот
+        # дорогой) НЕ режем по возрасту. При массовом FloodWait сессий lookup занимает
+        # 30-60s + 45s буфер, и всё равно второй stale на this месте резал их. Для rescue
+        # поздний пост лучше чем потерянный: лот ещё может быть на маркете.
+        rescue_bypass = bool(getattr(l, "owner_not_found", False))
+        if not rescue_bypass and limit > 0 and age > limit:
             l.status, l.reason = ListingStatus.ERROR, f"stale: {age:.0f}s после обнаружения (> {limit}s)"
             self.stats["stale"] = self.stats.get("stale", 0) + 1
             llog("FILTER", f"#{l.listing_id} skipped before send: {l.reason}")
@@ -1041,20 +1046,11 @@ class ListingPipeline:
             infra_failure = True
             self.stats["lookup_exception"] = self.stats.get("lookup_exception", 0) + 1
         l.lookup_done = True
-        # пока ждали бота поиска (очередь, капча), лот мог сильно устареть.
-        # НО: если владелец найден — не бросаем по возрасту, пусть lookup_check_onsale решает
-        # (лот может быть ещё в продаже — он всё равно ценный).
-        if settings.lookup_max_age > 0 and not found:
-            try:
-                age = (datetime.now(timezone.utc) - datetime.fromisoformat(l.first_seen)).total_seconds()
-            except (TypeError, ValueError):
-                age = 0.0
-            if age > settings.lookup_max_age:
-                l.status, l.reason = ListingStatus.ERROR, f"stale: owner lookup took {age:.0f}s"
-                self.stats["stale"] = self.stats.get("stale", 0) + 1
-                llog("FILTER", f"#{l.listing_id} skipped: lookup finished {age:.0f}s after detection")
-                await self.db.update_listing(l)
-                return
+        # Порядок проверок после lookup: СНАЧАЛА rescue дорогих лотов (не терять их когда
+        # инфра сломана), ПОТОМ stale-check для оставшихся. Раньше stale стоял первым —
+        # при массовом FloodWait всех 25 сессий lookup висел до таймаута, возраст лота
+        # перепрыгивал lookup_max_age, и stale убивал его ДО того как rescue мог вмешаться.
+        # В логе 22:06 были 25 FloodWait, 87 найденных лотов, 0 отправок именно из-за этого.
         if not found:
             # SOFT-FILTER RESCUE: селективное смягчение в зоне "дорогих" лотов.
             # Логика Maker: 400-1000⭐ — строгие фильтры (там скам чаще), 1000+ — мягкие.
@@ -1067,7 +1063,9 @@ class ListingPipeline:
                     self.stats.get("owner_not_found_soft_rescued", 0) + 1
                 llog("FILTER", f"#{l.listing_id} владелец не найден, но цена "
                                f"{l.stars_price}⭐ ≥ SOFT_FILTER_STARS={soft} — шлём с пометкой")
-                # НЕ return — проваливаемся дальше в lookup_check_onsale и обычный flow
+                # НЕ return — проваливаемся дальше в lookup_check_onsale и обычный flow.
+                # Stale-check намеренно НЕ применяется для rescue-пути: если лот дорогой и
+                # инфра сдохла, лучше поздний пост чем потерять.
             else:
                 # Без подтверждённого владельца с @username лот НЕ шлём (раньше при молчащем боте
                 # уходил пост «⚠️ владелец не найден» без юза).
@@ -1079,6 +1077,16 @@ class ListingPipeline:
                     code, why = "OWNER_LOOKUP_TIMEOUT", "бот поиска не ответил вовремя — владелец не проверен"
                 else:
                     code, why = "OWNER_NOT_FOUND", "владелец не найден ботом поиска"
+                # Stale для дешёвых лотов которые rescue не вытянул: если возраст большой —
+                # пишем это в reason (понятнее чем просто OWNER_NOT_FOUND), но всё равно режем.
+                if settings.lookup_max_age > 0:
+                    try:
+                        age = (datetime.now(timezone.utc) - datetime.fromisoformat(l.first_seen)).total_seconds()
+                    except (TypeError, ValueError):
+                        age = 0.0
+                    if age > settings.lookup_max_age:
+                        why = f"{why} (возраст {age:.0f}s > {settings.lookup_max_age}s)"
+                        self.stats["stale"] = self.stats.get("stale", 0) + 1
                 l.status, l.reason = ListingStatus.FILTERED_SELLER, why
                 l.seller_filter_result = code
                 self.stats["filtered_seller"] += 1

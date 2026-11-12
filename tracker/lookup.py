@@ -1028,34 +1028,38 @@ class OwnerLookup:
             cands = None
             used_bot = bot                 # для логов — какой бот в итоге ответил (default = primary)
             try:
-                # Мульти-бот fallback: сначала primary (funstat), затем запасные из LOOKUP_BOTS.
-                # Если бот снесён и попал в _bot_dead_until, он выпадает из _bot_pool и мы его
-                # не пробуем — сразу идём на следующего. Пробуем каждую сессию на каждом боте.
+                # Round-robin через БОТОВ: Maker — "если на 1 нет ответа то пусть идут на другой
+                # и так по кругу". Схема:
+                #   круг 1: bot_A/sess_0 → bot_B/sess_0 → bot_C/sess_0 (один тык на бота)
+                #   круг 2: bot_A/sess_1 → bot_B/sess_1 → bot_C/sess_1 (другая сессия, если первая завалила)
+                #   ...до min(3, len(order)) кругов или пока не ответит
+                # Раньше было for b in bots: for session in order — долбил ВСЕ сессии на одном
+                # боте перед переходом к следующему, лот ждал до 15с×N_сессий на мёртвом боте.
                 expired_on_all = True
-                for b in bots:
-                    expired_on_bot = False
-                    # молчащего/«снесённого» бота спрашиваем только с одной сессии, а не со всех
-                    # (иначе лот ждал бы 15 с × число сессий)
-                    b_dead = time.monotonic() < self._bot_slow_until.get(b.lower(), 0.0)
-                    for session in (order[:1] if b_dead else order):
+                max_rounds = min(3, len(order)) if order else 1
+                found_match = False
+                for round_idx in range(max_rounds):
+                    for b in bots:
+                        b_dead = time.monotonic() < self._bot_slow_until.get(b.lower(), 0.0)
+                        # Снесённого бота даже на втором круге не тычем лишний раз
+                        if b_dead and round_idx > 0:
+                            continue
+                        sess_idx = min(round_idx, len(order) - 1)
+                        session = order[sess_idx]
                         try:
                             cands = await self._ask_bot(session, b, seller_name, prio=prio, deadline=deadline)
                         except _Expired:
-                            # Дедлайн истёк. Если есть ещё бот/сессия — пробуем их.
-                            # Полностью expired только если ВСЕ пары (bot, session) истекли.
-                            expired_on_bot = True
-                            continue
+                            continue   # следующий бот/круг пробуем
                         expired_on_all = False
                         if cands is not None:
                             used_bot = b
+                            found_match = True
                             break
-                    if cands is not None:
+                        # None — бот молчит / сессия подвисла → сразу следующий бот (fast-fail)
+                        if b.lower() in self._bot_dead_until:
+                            log.warning("Lookup: бот @%s помечен как недоступный — fallback на следующий", b)
+                    if found_match:
                         break
-                    if not expired_on_bot:
-                        expired_on_all = False
-                    # Все сессии провалились на этом боте — если он теперь в блеклисте, пишем лог
-                    if b.lower() in self._bot_dead_until:
-                        log.warning("Lookup: бот @%s помечен как недоступный — fallback на следующий", b)
                 bot = used_bot
                 # Если дедлайн истёк на ВСЕХ попытках и cands всё равно None — пробрасываем _Expired
                 # чтобы _find увидел его и не кешировал результат как negative.
