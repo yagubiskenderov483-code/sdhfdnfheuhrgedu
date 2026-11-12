@@ -109,11 +109,17 @@ class IsAdmin(Filter):
         return is_manager(message.from_user.id if message.from_user else None)
 
 
-# Кнопки под полем ввода
-BTN_STATUS, BTN_PAUSE, BTN_RESUME = "Статус", "⏸ Пауза", "▶Продолжить"
-BTN_SESSIONS, BTN_ADD, BTN_STATS = "Аккаунты", "Добавить аккаунт", "Статистика"
-BTN_LAST = "Последние лоты"
-BTN_COLLECTIONS = "Коллекции"
+# Кнопки под полем ввода.
+# Maker ранее попросил убрать эмодзи из UI — после этого reply-клавиатура у юзеров
+# осталась в кеше со СТАРЫМИ значениями ('📊 Статус', '📈 Статистика' и т.д.).
+# Когда юзер тапает старый вариант, Telegram шлёт его текст, а наш фильтр ждал
+# новый — mismatch → бот молчит. Эмодзи восстановлены ИМЕННО в текстах кнопок
+# (чтобы матчилось для кеша), остальной админ-интерфейс (статус, алерты,
+# дашборд) эмодзи не содержит.
+BTN_STATUS, BTN_PAUSE, BTN_RESUME = "📊 Статус", "⏸ Пауза", "▶️ Продолжить"
+BTN_SESSIONS, BTN_ADD, BTN_STATS = "👥 Аккаунты", "➕ Добавить аккаунт", "📈 Статистика"
+BTN_LAST = "🕘 Последние лоты"
+BTN_COLLECTIONS = "📚 Коллекции"
 MAIN_KB = ReplyKeyboardMarkup(keyboard=[
     [KeyboardButton(text=BTN_STATUS), KeyboardButton(text=BTN_STATS)],
     [KeyboardButton(text=BTN_PAUSE), KeyboardButton(text=BTN_RESUME)],

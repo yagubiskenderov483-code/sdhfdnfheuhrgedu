@@ -332,7 +332,9 @@ class Subscriptions:
             if st is None:
                 raise RuntimeError("get_chat_member failed")
             if st in ("member", "administrator", "creator", "restricted"):
-                # уже в канале (в т.ч. зашёл не по нашей ссылке) — просто продлеваем, ссылка не нужна
+                # уже в канале — продлеваем. Но ссылку ВСЁ РАВНО даём (Maker: 'жмёшь
+                # 30 мин, пишет что активировано, а ссылку не даёт'). Админ/действующий
+                # член может пригодиться для теста / поделиться с другом.
                 pend = u.get("pending") or 0
                 if seconds == FOREVER or u["until"] == FOREVER or pend == FOREVER:
                     u["until"] = FOREVER
@@ -341,8 +343,18 @@ class Subscriptions:
                 u["pending"], u["in_chat"] = 0, True
                 if inv is not None:
                     inv["granted"] = True      # отметка «выдано» — в том же сохранении, что и время
+                # попытка создать ссылку — если не получилось, просто возвращаем подтверждение
+                link_text = ""
+                try:
+                    link = await self.bot.create_chat_invite_link(
+                        sub_chat_id(), name=f"sub {uid}"[:32], member_limit=1,
+                        expire_date=int(time.time() + LINK_TTL))
+                    self.state["links"][link.invite_link] = {"uid": uid, "ts": time.time()}
+                    link_text = f"\n\nСсылка для входа:\n{link.invite_link}"
+                except Exception as e:
+                    log.info("extend-only grant: invite link creation skipped (%s)", e)
                 await self.save(backup=True)
-                return f"{reason}\nПодписка продлена: осталось <b>{_fmt_left(u['until'])}</b>."
+                return f"{reason}\nПодписка продлена: осталось <b>{_fmt_left(u['until'])}</b>." + link_text
             # сначала ссылка: если создать не вышло — ничего не меняем (повтор не накрутит время)
             link = await self.bot.create_chat_invite_link(
                 sub_chat_id(), name=f"sub {uid}"[:32], member_limit=1,
@@ -613,12 +625,12 @@ class Subscriptions:
 
     # ------------------------------------------------------------------ payments (TON)
     def invoice_url(self, code: str) -> str:
-        """Универсальный TON deep-link: открывает ЛЮБОЙ установленный кошелёк
-        (Tonkeeper, Wallet, MyTonWallet и т.д.) с заранее подставленными адресом,
-        суммой и комментом. Юзеру остаётся только подтвердить оплату — вводить
-        ничего не нужно."""
+        """Tonkeeper universal link — открывает Tonkeeper с подставленными адресом,
+        суммой и комментом. ВНИМАНИЕ: Bot API inline-кнопки принимают ТОЛЬКО http/https
+        URL — custom-scheme (ton://) Telegram обрабатывает как «контент временно
+        недоступен» и кнопка не работает. Поэтому только https://app.tonkeeper.com/."""
         inv = self.state["invoices"][code]
-        return (f"ton://transfer/{settings.sub_ton_address}"
+        return (f"https://app.tonkeeper.com/transfer/{settings.sub_ton_address}"
                 f"?amount={int(inv['nano'])}&text={quote(code)}")
 
     async def new_invoice(self, uid: int, plan: str) -> str:
