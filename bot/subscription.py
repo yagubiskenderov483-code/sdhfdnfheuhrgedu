@@ -46,6 +46,19 @@ CLOSED_TEXT = "🔒 Парсер закрыт"
 
 TRIAL_SECONDS = 30 * 60          # Maker: пробный час → 30 минут
 REMIND_BEFORE = 60 * 60          # напомнить о продлении за час до конца
+
+# Кастомные Premium-эмодзи Telegram. В inline-кнопках Bot API custom emoji не
+# поддерживает (всегда plain text), поэтому emoji_id-эмодзи только в тексте
+# сообщений, через HTML-тег <tg-emoji emoji-id="…">fallback</tg-emoji>
+# (Premium-юзеры видят кастомку, остальные — fallback). Maker прислал ID:
+EMOJI_DIAMOND = "6032742198179532882"     # 💎 — для 'Подписка', 'Тариф'
+EMOJI_STAR    = "6028338546736107668"     # ⭐ — цена в Stars
+EMOJI_TON     = "5377620962390857342"     # цена в TON
+EMOJI_GIFT    = "6032644646587338669"     # 🎁 — '30 минут бесплатно'
+
+
+def _tg_emoji(eid: str, fallback: str) -> str:
+    return f'<tg-emoji emoji-id="{eid}">{fallback}</tg-emoji>'
 FOREVER = -1.0
 # код тарифа → (название, цена TON, длительность в секундах или FOREVER, цена в Stars или None)
 # Stars=None → тариф не оплачивается звёздами (например, «навсегда» — только TON).
@@ -1145,10 +1158,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             await q.answer(CLOSED_TEXT, show_alert=True)
             return
         await subs.load()
-        await _safe_edit(q.message, "💎 <b>Подписка</b>\n\nВыберите тариф. Платите в TON через Tonkeeper, "
-                                  "в Crypto Bot или в Stars — ссылка на вход придёт сама сразу "
-                                  "после оплаты.",
-                                  reply_markup=subs.plans_kb(q.from_user.id))
+        await _safe_edit(q.message,
+            f"{_tg_emoji(EMOJI_DIAMOND, '💎')} <b>Подписка</b>\n\nВыберите тариф",
+            reply_markup=subs.plans_kb(q.from_user.id))
         await q.answer()
 
     @r.callback_query(F.data == "sub:my")
@@ -1239,19 +1251,24 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             return
         subs._remember_who(subs.user(q.from_user.id), q.from_user)
         # Шаг 1: выбор валюты. Карточку оплаты (URL) рисуем ТОЛЬКО когда способ уже выбран.
+        # Bot API не поддерживает custom emoji в тексте кнопок — только в сообщении.
+        # Поэтому в кнопках обычные ⭐/TON, а в тексте сверху — кастомки от Maker.
         rows: list[list[InlineKeyboardButton]] = []
         if stars:
-            rows.append([InlineKeyboardButton(text=f"⭐ Stars ({stars}⭐)",
+            rows.append([InlineKeyboardButton(text=f"Stars · {stars} ⭐",
                                               callback_data=f"sub:pay:{plan}:stars")])
         if settings.sub_ton_address:
-            rows.append([InlineKeyboardButton(text=f"💎 Tonkeeper ({price:g} TON)",
+            rows.append([InlineKeyboardButton(text=f"Tonkeeper · {price:g} TON",
                                               callback_data=f"sub:pay:{plan}:ton")])
-        rows.append([InlineKeyboardButton(text=f"👛 Crypto Bot ({price:g} TON)",
+        rows.append([InlineKeyboardButton(text=f"Crypto Bot · {price:g} TON",
                                           callback_data=f"sub:pay:{plan}:wallet")])
         rows.append([InlineKeyboardButton(text="« Назад", callback_data="sub:menu")])
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
-        txt = (f"💎 <b>Тариф {title}</b>\n"
-               f"Цена: <b>{price:g} TON</b>" + (f" или <b>{stars}⭐</b>" if stars else "") + "\n\n"
+        ton_price = f"<b>{price:g}</b> {_tg_emoji(EMOJI_TON, 'TON')}"
+        stars_price = f"<b>{stars}</b> {_tg_emoji(EMOJI_STAR, '⭐')}" if stars else ""
+        price_line = ton_price + (f" или {stars_price}" if stars_price else "")
+        txt = (f"{_tg_emoji(EMOJI_DIAMOND, '💎')} <b>Тариф {title}</b>\n"
+               f"Цена: {price_line}\n\n"
                "Выберите способ оплаты:")
         await _safe_edit(q.message, txt, reply_markup=kb)
         await q.answer()

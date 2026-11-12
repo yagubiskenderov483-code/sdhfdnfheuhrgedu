@@ -4,11 +4,25 @@ import asyncio
 import logging
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message
+from config import settings
 
 log = logging.getLogger(__name__)
 
 _ACK_AFTER = 1.2      # команда дольше 1.2 с — пишем «выполняю», чтобы было видно что бот жив
 _STILL_AFTER = 15.0   # дольше 15 с — ещё одно сообщение, что команда жива
+
+
+def _is_admin(uid: int | None) -> bool:
+    """Админ (из .env ADMIN_IDS или подтверждённый через /claim)."""
+    if not uid:
+        return False
+    if uid in settings.admin_ids:
+        return True
+    try:
+        from bot.admin import all_admins
+        return uid in all_admins()
+    except Exception:
+        return False
 
 
 class ResponsiveReplies(BaseMiddleware):
@@ -46,6 +60,11 @@ class ResponsiveReplies(BaseMiddleware):
                 return None
             self.active_callbacks.add(key)
 
+        # «⏳ Выполняю…» — только админам. Обычному пользователю такое сообщение
+        # лишнее (Maker: 'обычному пользователю такой писать не должно').
+        uid = getattr(event.from_user, "id", None)
+        show_ack = _is_admin(uid)
+
         async def acknowledge():
             await asyncio.sleep(_ACK_AFTER)
             await notice("⏳ Выполняю…")
@@ -55,7 +74,7 @@ class ResponsiveReplies(BaseMiddleware):
 
         # для inline-кнопок «⏳» не шлём: на callback можно ответить только один раз,
         # и наш ответ сломал бы callback.answer() внутри обработчика
-        task = None if callback else asyncio.create_task(acknowledge())
+        task = None if callback or not show_ack else asyncio.create_task(acknowledge())
         import time as _t
         t0 = _t.monotonic()
         try:
