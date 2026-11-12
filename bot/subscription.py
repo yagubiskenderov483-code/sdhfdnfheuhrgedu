@@ -1479,8 +1479,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 # повторная попытка через мгновение — если grant отвалился от rate-limit
                 asyncio.get_running_loop().create_task(subs._retry_undelivered())
         else:
-            await q.answer("Оплата пока не пришла. Если уже оплатили, подождите "
-                           "~минуту (toncenter) и нажмите ещё раз.",
+            await q.answer("Оплата не получена, попробуйте через минуту",
                            show_alert=True)
 
     # ---------------- админам: список и ручная выдача
