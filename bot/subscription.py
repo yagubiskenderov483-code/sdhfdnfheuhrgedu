@@ -56,6 +56,7 @@ EMOJI_STAR    = "6028338546736107668"     # — цена в Stars
 EMOJI_TON     = "5377620962390857342"     # цена в TON
 EMOJI_GIFT    = "6032644646587338669"     # — '30 минут бесплатно'
 EMOJI_PAID    = "6039486778597970865"     # — 'Оплата получена, ожидайте.'
+EMOJI_SUB     = "5927118708873892465"     # — 'Подписка' (меню)
 
 
 def _tg_emoji(eid: str, fallback: str) -> str:
@@ -1273,7 +1274,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             return
         await subs.load()
         await _safe_edit(q.message,
-            "<b>Подписка</b>\n\nВыберите тариф",
+            f'{_tg_emoji(EMOJI_SUB, "💎")} <b>Подписка</b>\n\nВыберите тариф',
             reply_markup=subs.plans_kb(q.from_user.id))
         await q.answer()
 
@@ -1448,12 +1449,11 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             ])
             await _safe_edit(q.message,
                 f"<b>Тариф {title} — {price:g} TON</b>\n\n"
-                "Кнопка «Оплатить» откроет ваш TON-кошелёк с готовой суммой и комментарием — "
-                "остаётся только подтвердить перевод.\n\n"
                 f"Вручную: отправьте <b>{price:g} TON</b> на\n"
                 f"<code>{settings.sub_ton_address}</code>\n"
                 f"с комментарием <code>{code}</code>.\n\n"
-                f"Счёт действует 30 минут. После оплаты бот сам пришлёт ссылку.",
+                "Либо оплатите через инлайн кнопку.\n\n\n"
+                "Счёт действует 30 минут, После оплаты бот сам пришлёт ссылку.",
                 reply_markup=kb)
             await q.answer()
             return
