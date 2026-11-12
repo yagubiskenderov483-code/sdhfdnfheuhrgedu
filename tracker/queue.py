@@ -675,8 +675,15 @@ class ListingPipeline:
         # user: 'он перебрасывает бота а не в проф' — без @username пост не нужен,
         # tg://user?id= у большинства уходит в чат бота, а не в профиль продавца.
         if settings.require_username and not l.seller_username:   # REQUIRE_USERNAME=true (по умолчанию)
-            await self._reject_no_username(l)
-            return
+            # Maker: дорогие лоты (>= SOFT_FILTER_STARS) пропускаем даже без @юза —
+            # пост уйдёт с пометкой профиля, а не отфильтруется
+            soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
+            if soft and l.stars_price and l.stars_price >= soft:
+                llog("FILTER", f"#{l.listing_id} no @username, но цена {l.stars_price}⭐ ≥ "
+                               f"SOFT_FILTER_STARS={soft} — пропускаем")
+            else:
+                await self._reject_no_username(l)
+                return
         await self._send_stage(ev, l, base, t_start)
 
     async def _reject_no_username(self, l: Listing) -> None:
@@ -743,7 +750,13 @@ class ListingPipeline:
 
     async def _check_seller(self, l: Listing) -> SellerResult:
         if getattr(l, "owner_not_found", False) and l.seller_type is None:
-            # владелец скрыт и не найден, но LOOKUP_REQUIRED=false — шлём с пометкой (blacklist всё равно)
+            # Maker: дорогие лоты (>= SOFT_FILTER_STARS) шлём даже с ненайденным владельцем,
+            # с пометкой profile hidden. Платные ЛС / фильтр языка не трогаются (они срабатывают
+            # только когда профиль прочитан, а здесь профиля нет — значит и этих рисков тоже нет).
+            soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
+            if soft and l.stars_price and l.stars_price >= soft:
+                return SellerResult(True, "OWNER_NOT_FOUND_SENT",
+                                    "скрытый владелец — пост с пометкой (soft filter)")
             return SellerResult(False, "OWNER_NOT_FOUND", "владелец не найден — без @username не шлём")
         # Владелец от funstat по доверию имени: пробуем прочитать профиль через failover
         # (resale-страница коллекции отдаёт access_hash → профиль станет доступен). Если

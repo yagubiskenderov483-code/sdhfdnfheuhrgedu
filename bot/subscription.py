@@ -70,10 +70,26 @@ INVOICE_TTL = 60 * 60           # счёт ждёт оплату 1 час
 LINK_TTL = 24 * 3600            # ссылка на вход действует сутки
 KV_KEY = "subs_state"
 
-# «@Wallet» ссылка — кнопка оплаты через Crypto Bot / @Wallet. Один общий invoice-id
-# на всех (Maker выдал через @send merchant panel). После оплаты человек присылает
-# скриншот админу — тот выдаёт /grant вручную (у @Wallet нет вебхука на нашу сторону).
-WALLET_INVOICE_URL = "https://t.me/send?start=IVxOhr7KT8WT"
+# Crypto Bot (CryptoPay) — https://help.crypt.bot/crypto-pay-api
+# Если задан CRYPTO_BOT_API_TOKEN — создаём личный invoice на пользователя (через
+# createInvoice), получаем pay_url (https://t.me/CryptoBot?start=…). Опрашиваем
+# getInvoices в фоне и ловим оплату автоматически. Без токена — фоллбек на статическую
+# ссылку (ручная выдача админом).
+CRYPTO_PAY_API = "https://pay.crypt.bot/api/"
+CRYPTO_PAY_FALLBACK_URL = "https://t.me/send?start=IVxOhr7KT8WT"
+
+
+async def _crypto_pay_call(method: str, payload: dict) -> dict:
+    token = settings.crypto_bot_api_token
+    if not token:
+        raise RuntimeError("CRYPTO_BOT_API_TOKEN не задан")
+    headers = {"Crypto-Pay-API-Token": token, "Content-Type": "application/json"}
+    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
+        async with s.post(CRYPTO_PAY_API + method, json=payload, headers=headers) as r:
+            data = await r.json(content_type=None)
+    if not data.get("ok"):
+        raise RuntimeError(f"CryptoPay {method}: {data.get('error') or data}")
+    return data.get("result") or {}
 
 
 def sub_chat_id() -> int:
@@ -613,6 +629,108 @@ class Subscriptions:
                 log.warning("Backup after new stars invoice failed: %s", e)
         return url
 
+    async def new_crypto_invoice(self, uid: int, plan: str) -> str:
+        """Создать персональный Crypto Bot invoice. → pay_url (https://t.me/CryptoBot?start=...).
+        Один живой invoice на (uid, plan); повторный клик отдаёт ту же ссылку."""
+        title, price, _secs, _stars = PLANS[plan]
+        now = time.time()
+        async with self._lock:
+            for code, inv in self.state["invoices"].items():
+                if (inv.get("kind") == "crypto" and inv["uid"] == uid and inv["plan"] == plan
+                        and not inv.get("paid") and inv.get("pay_url")
+                        and now - inv["ts"] < INVOICE_TTL):
+                    return inv["pay_url"]
+            code = "CRB" + secrets.token_hex(4).upper()
+        # сетевой вызов — вне лока
+        payload_json = {
+            "asset": "TON",
+            "amount": f"{price:g}",
+            "description": f"NFT Tracker — {title}",
+            "payload": code,
+            "allow_comments": False,
+            "allow_anonymous": False,
+        }
+        try:
+            res = await _crypto_pay_call("createInvoice", payload_json)
+        except Exception as e:
+            log.error("CryptoPay createInvoice failed: %s", e)
+            raise
+        pay_url = res.get("pay_url") or res.get("mini_app_invoice_url") or ""
+        invoice_id = res.get("invoice_id")
+        if not pay_url or not invoice_id:
+            raise RuntimeError(f"CryptoPay вернул неполный результат: {res}")
+        async with self._lock:
+            self.state["invoices"][code] = {
+                "uid": uid, "plan": plan, "kind": "crypto",
+                "nano": int(round(price * 1e9)),
+                "pay_url": pay_url, "invoice_id": int(invoice_id),
+                "asset": "TON", "amount": str(price),
+                "ts": now, "paid": False,
+            }
+            await self.save()
+        if self.on_change:
+            try:
+                await self.on_change()
+            except Exception as e:
+                log.warning("Backup after new crypto invoice failed: %s", e)
+        return pay_url
+
+    async def check_crypto_payments(self) -> int:
+        """Опрос getInvoices у CryptoPay: любой активный crypto-invoice сменивший статус
+        на paid — доставляется. → число оплат, обработанных в этот проход."""
+        if not settings.crypto_bot_api_token:
+            return 0
+        pending = [(code, int(i["invoice_id"])) for code, i in self.state["invoices"].items()
+                   if i.get("kind") == "crypto" and not i.get("paid") and i.get("invoice_id")]
+        if not pending:
+            return 0
+        ids = [str(iid) for _, iid in pending[:100]]      # Crypto Bot ограничивает 100 id за раз
+        try:
+            res = await _crypto_pay_call("getInvoices", {"invoice_ids": ",".join(ids), "count": len(ids)})
+        except Exception as e:
+            log.warning("CryptoPay getInvoices failed: %s", e)
+            return 0
+        items = res.get("items") or []
+        by_id = {int(x.get("invoice_id") or 0): x for x in items if isinstance(x, dict)}
+        paid: list[dict] = []
+        async with self._lock:
+            for code, iid in pending:
+                row = by_id.get(iid)
+                if not row or row.get("status") != "paid":
+                    continue
+                inv = self.state["invoices"].get(code)
+                if not inv or inv.get("paid"):
+                    continue
+                inv["paid"] = True
+                inv["paid_at"] = time.time()
+                inv["granted"] = "inflight"
+                inv["crypto_hash"] = row.get("hash")
+                # фактически оплачено TON (на случай если asset был пересмотрен)
+                try:
+                    paid_ton = float(row.get("paid_amount") or row.get("amount") or 0)
+                except Exception:
+                    paid_ton = float(inv.get("amount") or 0)
+                inv["paid_nano"] = int(round(paid_ton * 1e9))
+                self.state["revenue_nano"] = int(self.state.get("revenue_nano") or 0) + inv["paid_nano"]
+                self.state["paid_count"] = int(self.state.get("paid_count") or 0) + 1
+                paid.append(inv)
+            if paid:
+                await self.save(backup=True)
+        await self.flush_backup()
+        for inv in paid:
+            title, price, _secs, _stars = PLANS.get(inv["plan"], ("?", 0, 0, None))
+            log.info("CryptoPay payment received: user=%s plan=%s", inv["uid"], inv["plan"])
+            ok = await self._deliver(inv)
+            for admin in settings.admin_ids:
+                try:
+                    await self.bot.send_message(admin,
+                        f"💰 Crypto Bot: {inv.get('paid_nano', 0) / 1e9:g} TON, "
+                        f"тариф {title}, пользователь <code>{inv['uid']}</code>"
+                        + ("" if ok else "\n⚠️ Ссылку выдать не удалось, повторим автоматически."))
+                except Exception:
+                    pass
+        return len(paid)
+
     async def on_stars_paid(self, payload: str, uid: int, total_amount: int,
                             charge_id: str | None = None) -> None:
         """successful_payment.invoice_payload (= наш code) → отметить оплату и выдать доступ."""
@@ -833,6 +951,11 @@ class Subscriptions:
                     await self.check_payments()
                 except Exception as e:
                     log.warning("TON payment check failed: %s", e)
+                if settings.crypto_bot_api_token:
+                    try:
+                        await self.check_crypto_payments()
+                    except Exception as e:
+                        log.warning("CryptoPay check failed: %s", e)
             tick += 1
             await asyncio.sleep(10)
 
@@ -989,7 +1112,8 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             return
         await subs.load()
         await _safe_edit(q.message, "💎 <b>Подписка</b>\n\nВыберите тариф. Платите в TON через Tonkeeper, "
-                                  "ссылка на вход придёт сама сразу после оплаты.",
+                                  "в Crypto Bot или в Stars — ссылка на вход придёт сама сразу "
+                                  "после оплаты.",
                                   reply_markup=subs.plans_kb(q.from_user.id))
         await q.answer()
 
@@ -1088,7 +1212,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if settings.sub_ton_address:
             rows.append([InlineKeyboardButton(text=f"💎 Tonkeeper ({price:g} TON)",
                                               callback_data=f"sub:pay:{plan}:ton")])
-        rows.append([InlineKeyboardButton(text=f"👛 @Wallet ({price:g} TON)",
+        rows.append([InlineKeyboardButton(text=f"👛 Crypto Bot ({price:g} TON)",
                                           callback_data=f"sub:pay:{plan}:wallet")])
         rows.append([InlineKeyboardButton(text="« Назад", callback_data="sub:menu")])
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
@@ -1166,16 +1290,36 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             return
 
         if method == "wallet":
+            if settings.crypto_bot_api_token:
+                try:
+                    url = await subs.new_crypto_invoice(q.from_user.id, plan)
+                except Exception as e:
+                    log.error("Create crypto invoice failed for %s: %s", q.from_user.id, e)
+                    await q.answer("Не удалось создать счёт в Crypto Bot, попробуйте позже",
+                                   show_alert=True)
+                    return
+                kb = InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text=f"👛 Оплатить {price:g} TON в Crypto Bot", url=url)],
+                    back_row,
+                ])
+                await _safe_edit(q.message,
+                    f"👛 <b>Тариф {title} — {price:g} TON (Crypto Bot)</b>\n\n"
+                    "Нажмите кнопку — откроется счёт в @CryptoBot на вашу сумму.\n"
+                    "Как только оплата пройдёт, бот сам пришлёт ссылку для входа.",
+                    reply_markup=kb)
+                await q.answer()
+                return
+            # фоллбек без API-токена — статическая ссылка, выдача админом
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"👛 Оплатить {price:g} TON в @Wallet",
-                                      url=WALLET_INVOICE_URL)],
+                [InlineKeyboardButton(text=f"👛 Оплатить {price:g} TON в Crypto Bot",
+                                      url=CRYPTO_PAY_FALLBACK_URL)],
                 back_row,
             ])
             await _safe_edit(q.message,
-                f"👛 <b>Тариф {title} — {price:g} TON (@Wallet)</b>\n\n"
-                "Нажмите кнопку — откроется встроенный кошелёк Telegram.\n"
+                f"👛 <b>Тариф {title} — {price:g} TON (Crypto Bot)</b>\n\n"
+                "Нажмите кнопку — откроется встроенный кошелёк.\n"
                 "Отправьте точную сумму и пришлите скриншот оплаты админу — "
-                "выдадут доступ вручную (у @Wallet нет вебхука к нам).",
+                "выдадут доступ вручную.",
                 reply_markup=kb)
             await q.answer()
             return

@@ -121,8 +121,9 @@ def listing_keyboard(l: Listing, with_seller: bool = True, with_offer: bool = Fa
     elif offer_text:
         url = f"https://t.me/{trade_bot}?text={quote(offer_text, safe='/')}"
     if url:
-        btn_text = "С оффером" if with_offer else "Написать без оффера"
-        second.append(InlineKeyboardButton(text=btn_text, url=url))
+        # Maker: кнопка всегда «Написать». Без админской команды — пустой ЛС, после
+        # '/<юз> оффер' тот же URL уже содержит заполненный оффер в поле ввода.
+        second.append(InlineKeyboardButton(text="Написать", url=url))
     if second:
         rows.append(second)
     return InlineKeyboardMarkup(inline_keyboard=rows)

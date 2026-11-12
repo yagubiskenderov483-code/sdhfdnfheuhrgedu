@@ -212,6 +212,10 @@ class Settings:
     sub_chat_id: int = 0                 # куда пускать подписчиков (0 = TARGET_CHAT_ID)
     sub_ton_address: str = ""            # кошелёк для оплаты
     toncenter_api_key: str = ""          # необязательно: снимает лимит 1 запрос/сек у toncenter
+    # Crypto Bot (CryptoPay) — https://help.crypt.bot/crypto-pay-api. Если задан — оплата
+    # через @send/@CryptoBot создаёт персональный invoice и ловится автоматически по API.
+    # Без токена кнопка «Crypto Bot» ведёт на статическую ссылку и выдаётся вручную.
+    crypto_bot_api_token: str = ""
 
     # --- фильтр цены ---
     min_stars: int = 5000
@@ -240,6 +244,11 @@ class Settings:
     seller_name_signal: bool = False          # имя/фамилия кириллицей = русскоязычный продавец (по умолчанию выкл.)
     phone_mismatch_blocks: bool = True        # чужой телефон отсеивает сразу; false — решают тексты профиля
     allow_hidden_owner: bool = False          # true: лоты, у которых Telegram скрыл владельца, идут в канал
+    # Дорогие лоты фильтруются мягче: если цена >= этого значения, пропускаем «скрытого владельца»,
+    # «нет @username», «короткое имя» — Maker хочет, чтобы дорогие (1500+⭐) активно выдавались,
+    # пусть и без явного контакта с продавцом. 0 = выкл (старый жёсткий фильтр для всех).
+    # Платные ЛС и «только Premium» — всё равно отсеиваем независимо от цены.
+    soft_filter_stars: int = 1500
                                               # (RUSSIAN_ONLY к ним неприменим — профиля просто нет)
     lookup_bot_username: str = ""             # @username бота ручного поиска (напр. "funstat") —
                                               # для лотов со скрытым владельцем в пост добавится
@@ -368,7 +377,8 @@ class Settings:
 
     def public_view(self) -> dict[str, Any]:
         """Настройки без секретов — для /settings."""
-        hidden = {"api_hash", "bot_token", "sub_bot_token", "session_backup_key", "old_bot_token"}
+        hidden = {"api_hash", "bot_token", "sub_bot_token", "crypto_bot_api_token",
+                  "session_backup_key", "old_bot_token"}
         out = {}
         for f in fields(self):
             if f.name in hidden:
@@ -377,11 +387,13 @@ class Settings:
         out["api_hash"] = "***" if self.api_hash else "(не задан)"
         out["bot_token"] = "***" if self.bot_token else "(не задан)"
         out["sub_bot_token"] = "***" if self.sub_bot_token else "(не задан — Stars/подписка идут через BOT_TOKEN)"
+        out["crypto_bot_api_token"] = "***" if self.crypto_bot_api_token else "(не задан — Crypto Bot оплата ручная)"
         return out
 
     def secrets(self) -> list[str]:
         olds = [t.strip() for t in (self.old_bot_token or "").split(",")]
-        return [s for s in (self.api_hash, self.bot_token, self.sub_bot_token, self.session_backup_key, self.old_bot_token, *olds) if s]
+        return [s for s in (self.api_hash, self.bot_token, self.sub_bot_token, self.crypto_bot_api_token,
+                            self.session_backup_key, self.old_bot_token, *olds) if s]
 
 
 def _rng(lo: float, hi: float, cast=float):
@@ -426,6 +438,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "SELLER_NAME_SIGNAL": ("seller_name_signal", _bool_strict),
     "PHONE_MISMATCH_BLOCKS": ("phone_mismatch_blocks", _bool_strict),
     "ALLOW_HIDDEN_OWNER": ("allow_hidden_owner", _bool_strict),
+    "SOFT_FILTER_STARS": ("soft_filter_stars", lambda v: max(0, int(v))),
     "LOOKUP_BOT_USERNAME": ("lookup_bot_username", _lookup_bot_username),
     "LOOKUP_BOTS": ("lookup_bots", _bot_list),
     "LOOKUP_CMD_TEMPLATE": ("lookup_cmd_template",
@@ -488,6 +501,7 @@ def _from_env() -> Settings:
         api_hash=(e("API_HASH") or "").strip().strip('"'),
         bot_token=(e("BOT_TOKEN") or "").strip().strip('"'),
         sub_bot_token=(e("SUB_BOT_TOKEN") or "").strip().strip('"'),
+        crypto_bot_api_token=(e("CRYPTO_BOT_API_TOKEN") or "").strip().strip('"'),
         target_chat_id=_int(e("TARGET_CHAT_ID"), 0),
         price_routes=_safe_parse(_price_routes, e("PRICE_ROUTES"), "PRICE_ROUTES"),
         backdrop_routes=_safe_parse(_backdrop_routes, e("BACKDROP_ROUTES"), "BACKDROP_ROUTES"),
@@ -518,6 +532,7 @@ def _from_env() -> Settings:
         seller_name_signal=_bool(e("SELLER_NAME_SIGNAL"), False),
         phone_mismatch_blocks=_bool(e("PHONE_MISMATCH_BLOCKS"), True),
         allow_hidden_owner=_bool(e("ALLOW_HIDDEN_OWNER"), False),
+        soft_filter_stars=max(0, _int(e("SOFT_FILTER_STARS"), 1500)),
         lookup_bot_username=_lookup_bot_username(e("LOOKUP_BOT_USERNAME")),
         lookup_bots=_bot_list(e("LOOKUP_BOTS")),
         lookup_cmd_template=((e("LOOKUP_CMD_TEMPLATE") or "/human {name}").strip() or "/human {name}"),
