@@ -67,10 +67,10 @@ class ResponsiveReplies(BaseMiddleware):
 
         async def acknowledge():
             await asyncio.sleep(_ACK_AFTER)
-            await notice("⏳ Выполняю…")
+            await notice("Выполняю…")
             if not callback:
                 await asyncio.sleep(_STILL_AFTER - _ACK_AFTER)
-                await notice("⏳ Всё ещё выполняется — ответ придёт, повторять не нужно.")
+                await notice("Всё ещё выполняется — ответ придёт, повторять не нужно.")
 
         # для inline-кнопок «⏳» не шлём: на callback можно ответить только один раз,
         # и наш ответ сломал бы callback.answer() внутри обработчика

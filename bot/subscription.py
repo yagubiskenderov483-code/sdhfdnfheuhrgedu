@@ -1,7 +1,7 @@
 """
 Подписка на канал с лотами (для всех, кроме ADMIN_IDS).
 
-• /start → приветствие и кнопка «💎 Подписка».
+• /start → приветствие и кнопка «Подписка».
 • Пробный период: 60 минут, один раз на человека.
 • Платные тарифы — оплата в TON через Tonkeeper на SUB_TON_ADDRESS с уникальным комментарием.
   Бот сам проверяет входящие переводы (toncenter) и, как только оплата пришла, выдаёт ссылку.
@@ -42,7 +42,7 @@ log = get_logger("subs")
 WELCOME = ("<b>Добро Пожаловать в лучший Telegram Tracker NFT</b>\n\n"
            "Tracker - отслеживает все лоты выставленные в настоящее время")
 
-CLOSED_TEXT = "🔒 Парсер закрыт"
+CLOSED_TEXT = "Парсер закрыт"
 
 TRIAL_SECONDS = 30 * 60          # Maker: пробный час → 30 минут
 REMIND_BEFORE = 60 * 60          # напомнить о продлении за час до конца
@@ -51,10 +51,10 @@ REMIND_BEFORE = 60 * 60          # напомнить о продлении за
 # поддерживает (всегда plain text), поэтому emoji_id-эмодзи только в тексте
 # сообщений, через HTML-тег <tg-emoji emoji-id="…">fallback</tg-emoji>
 # (Premium-юзеры видят кастомку, остальные — fallback). Maker прислал ID:
-EMOJI_DIAMOND = "6032742198179532882"     # 💎 — для 'Подписка', 'Тариф'
-EMOJI_STAR    = "6028338546736107668"     # ⭐ — цена в Stars
+EMOJI_DIAMOND = "6032742198179532882"     # — для 'Подписка', 'Тариф'
+EMOJI_STAR    = "6028338546736107668"     # — цена в Stars
 EMOJI_TON     = "5377620962390857342"     # цена в TON
-EMOJI_GIFT    = "6032644646587338669"     # 🎁 — '30 минут бесплатно'
+EMOJI_GIFT    = "6032644646587338669"     # — '30 минут бесплатно'
 
 
 def _tg_emoji(eid: str, fallback: str) -> str:
@@ -243,27 +243,22 @@ class Subscriptions:
         return u
 
     # ------------------------------------------------------------------ keyboards
-    # Maker: 'на других кнопках кастомные эмодзи работают, у нас — нет, просто попробуй'.
-    # Bot API сам не парсит entities в тексте кнопок, но Telegram-клиенты c Premium иногда
-    # отображают <tg-emoji>…</tg-emoji>. Пробуем — fallback-эмодзи стоят внутри тега,
-    # так что если не отработает, не-Premium юзер увидит обычный ⭐/💎, а не голый тег.
+    # Maker: 'убери все эмодзи вообще кроме того что в группе' — в UI подписки
+    # эмодзи нет, кастомные остались только в постах лотов (formatter.py).
     def main_kb(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f'{_tg_emoji(EMOJI_DIAMOND, "💎")} Подписка',
-                                  callback_data="sub:menu")],
-            [InlineKeyboardButton(text="📊 Моя подписка", callback_data="sub:my")],
+            [InlineKeyboardButton(text="Подписка", callback_data="sub:menu")],
+            [InlineKeyboardButton(text="Моя подписка", callback_data="sub:my")],
         ])
 
     def plans_kb(self, uid: int) -> InlineKeyboardMarkup:
         rows = []
         if not self.user(uid).get("trial"):
-            rows.append([InlineKeyboardButton(
-                text=f'{_tg_emoji(EMOJI_GIFT, "🎁")} 30 минут бесплатно',
-                callback_data="sub:trial")])
+            rows.append([InlineKeyboardButton(text="30 минут бесплатно",
+                                              callback_data="sub:trial")])
         for code, (title, price, _, stars) in PLANS.items():
-            ton = f'{price:g} {_tg_emoji(EMOJI_TON, "TON")}'
-            stars_part = f' / {stars} {_tg_emoji(EMOJI_STAR, "⭐")}' if stars else ''
-            label = f"{title} · {ton}{stars_part}"
+            stars_part = f" / {stars} Stars" if stars else ""
+            label = f"{title} · {price:g} TON{stars_part}"
             rows.append([InlineKeyboardButton(text=label, callback_data=f"sub:buy:{code}")])
         rows.append([InlineKeyboardButton(text="« Назад", callback_data="sub:home")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -316,7 +311,7 @@ class Subscriptions:
                 if inv is not None:
                     inv["granted"] = True      # отметка «выдано» — в том же сохранении, что и время
                 await self.save(backup=True)
-                return f"✅ {reason}\nПодписка продлена: осталось <b>{_fmt_left(u['until'])}</b>."
+                return f"{reason}\nПодписка продлена: осталось <b>{_fmt_left(u['until'])}</b>."
             # сначала ссылка: если создать не вышло — ничего не меняем (повтор не накрутит время)
             link = await self.bot.create_chat_invite_link(
                 sub_chat_id(), name=f"sub {uid}"[:32], member_limit=1,
@@ -336,8 +331,8 @@ class Subscriptions:
                             + max(0.0, float(u.get("until") or 0) - time.time()))
         starts = ("время пойдёт с момента входа" if u["pending"] and float(u.get("until") or 0) <= time.time()
                   else "время уже идёт")
-        return (f"✅ {reason}\n\n"
-                f"🔗 Ваша одноразовая ссылка для входа:\n{link.invite_link}\n\n"
+        return (f"{reason}\n\n"
+                f"Ваша одноразовая ссылка для входа:\n{link.invite_link}\n\n"
                 f"Доступ: <b>{dur}</b>, {starts}.\n"
                 "Ссылка работает один раз и удаляется сразу после входа.")
 
@@ -421,7 +416,7 @@ class Subscriptions:
                 log.warning("Re-issue link to %s failed: %s", owner, e)
             return
         try:
-            await self.bot.send_message(uid, f"🎉 Вы в канале! Доступ: <b>{_fmt_left(self.user(uid)['until'])}</b>.")
+            await self.bot.send_message(uid, f"Вы в канале! Доступ: <b>{_fmt_left(self.user(uid)['until'])}</b>.")
         except Exception:
             pass
 
@@ -491,7 +486,7 @@ class Subscriptions:
             log.warning("User %s (%s) joined without subscription — kicked", uid, who)
             for admin in settings.admin_ids:
                 try:
-                    await self.bot.send_message(admin, f"🚫 Зашёл без подписки и выкинут: "
+                    await self.bot.send_message(admin, f"Зашёл без подписки и выкинут: "
                                                        f"{html.escape(str(who))} (<code>{uid}</code>)")
                 except Exception:
                     pass
@@ -780,9 +775,9 @@ class Subscriptions:
             for admin in settings.admin_ids:
                 try:
                     await self.bot.send_message(admin,
-                        f"💰 Crypto Bot: {inv.get('paid_nano', 0) / 1e9:g} TON, "
+                        f"Crypto Bot: {inv.get('paid_nano', 0) / 1e9:g} TON, "
                         f"тариф {title}, пользователь <code>{inv['uid']}</code>"
-                        + ("" if ok else "\n⚠️ Ссылку выдать не удалось, повторим автоматически."))
+                        + ("" if ok else "\nСсылку выдать не удалось, повторим автоматически."))
                 except Exception:
                     pass
         return len(paid)
@@ -814,7 +809,7 @@ class Subscriptions:
         for admin in settings.admin_ids:
             try:
                 await self.bot.send_message(
-                    admin, f"💰 Оплата <b>{total_amount}⭐</b>, тариф {title}, "
+                    admin, f"Оплата <b>{total_amount} Stars</b>, тариф {title}, "
                            f"пользователь <code>{uid}</code>")
             except Exception:
                 pass
@@ -909,21 +904,21 @@ class Subscriptions:
         for uid, code, value in extra:
             for admin in settings.admin_ids:
                 try:
-                    await self.bot.send_message(admin, f"⚠️ Повторный перевод {value / 1e9:g} TON по уже оплаченному "
+                    await self.bot.send_message(admin, f"Повторный перевод {value / 1e9:g} TON по уже оплаченному "
                                                        f"счёту <code>{code}</code> от <code>{uid}</code>. "
                                                        f"Выдать время: /grant {uid} часы")
                 except Exception:
                     pass
         for uid, code, value, need in underpaid:
             try:
-                await self.bot.send_message(int(uid), f"⚠️ Пришло {value / 1e9:g} из {need / 1e9:g} TON.\n"
+                await self.bot.send_message(int(uid), f"Пришло {value / 1e9:g} из {need / 1e9:g} TON.\n"
                                                       f"Доплатите <b>{(need - value) / 1e9:g} TON</b> с тем же "
                                                       f"комментарием <code>{code}</code> — доступ придёт сам.")
             except Exception:
                 pass
             for admin in settings.admin_ids:
                 try:
-                    await self.bot.send_message(admin, f"⚠️ Недоплата по счёту <code>{code}</code> от "
+                    await self.bot.send_message(admin, f"Недоплата по счёту <code>{code}</code> от "
                                                        f"<code>{uid}</code>: пришло {value / 1e9:g} TON из "
                                                        f"{need / 1e9:g}. Выдать вручную: /grant {uid} часы")
                 except Exception:
@@ -935,9 +930,9 @@ class Subscriptions:
             ok = await self._deliver(inv)
             for admin in settings.admin_ids:
                 try:
-                    await self.bot.send_message(admin, f"💰 Оплата {price:g} TON, тариф {title}, "
+                    await self.bot.send_message(admin, f"Оплата {price:g} TON, тариф {title}, "
                                                        f"пользователь <code>{inv['uid']}</code>"
-                                                       + ("" if ok else "\n⚠️ Ссылку выдать не удалось, бот "
+                                                       + ("" if ok else "\nСсылку выдать не удалось, бот "
                                                           "повторит сам. Проверьте права бота в канале."))
                 except Exception:
                     pass
@@ -954,7 +949,7 @@ class Subscriptions:
         kind = inv.get("kind") or "ton"
         if kind == "stars":
             amount = inv.get("stars") or 0
-            reason = f"Оплата {amount}⭐ пришла, тариф {title}."
+            reason = f"Оплата {amount} Stars пришла, тариф {title}."
         else:
             reason = f"Оплата {price:g} TON пришла, тариф {title}."
         inv["granted"] = "inflight"
@@ -1026,10 +1021,10 @@ class Subscriptions:
                 continue          # пробный час и короткие сроки не напоминаем
             u["reminded"] = until
             try:
-                await self.bot.send_message(int(k), f"⏳ Подписка закончится через {_fmt_left(float(until))}. "
-                                                    "Продлите, чтобы не потерять доступ 👇",
+                await self.bot.send_message(int(k), f"Подписка закончится через {_fmt_left(float(until))}. "
+                                                    "Продлите, чтобы не потерять доступ.",
                                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                                                InlineKeyboardButton(text="💎 Продлить", callback_data="sub:menu")]]))
+                                                InlineKeyboardButton(text="Продлить", callback_data="sub:menu")]]))
             except Exception:
                 pass
             await self.save()
@@ -1085,13 +1080,13 @@ class Subscriptions:
                 log.warning("User %s joined without subscription (while backup was unread) — kicked", uid)
                 for admin in settings.admin_ids:
                     try:
-                        await self.bot.send_message(admin, f"🚫 Зашёл без подписки и выкинут: <code>{uid}</code>")
+                        await self.bot.send_message(admin, f"Зашёл без подписки и выкинут: <code>{uid}</code>")
                     except Exception:
                         pass
                 continue
             log.info("Subscription ended — user %s removed from channel", uid)
             try:
-                await self.bot.send_message(uid, "⌛ Ваша подписка закончилась. Продлить можно здесь 👇",
+                await self.bot.send_message(uid, "Ваша подписка закончилась. Продлить можно здесь:",
                                             reply_markup=self.main_kb())
             except Exception:
                 pass
@@ -1139,7 +1134,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if closed():
             # закрыто для новых, но у кого подписка есть — должен иметь возможность взять новую ссылку
             await m.answer(CLOSED_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="📊 Моя подписка", callback_data="sub:my")]]))
+                InlineKeyboardButton(text="Моя подписка", callback_data="sub:my")]]))
             return
         await m.answer(WELCOME, reply_markup=subs.main_kb())
 
@@ -1153,7 +1148,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
     async def cb_home(q: CallbackQuery) -> None:
         if closed():
             await _safe_edit(q.message, CLOSED_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="📊 Моя подписка", callback_data="sub:my")]]))
+                InlineKeyboardButton(text="Моя подписка", callback_data="sub:my")]]))
         else:
             await _safe_edit(q.message, WELCOME, reply_markup=subs.main_kb())
         await q.answer()
@@ -1161,21 +1156,21 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
     @r.callback_query(F.data == "sub:menu")
     async def cb_menu(q: CallbackQuery) -> None:
         if not subs.ready.is_set():
-            await q.answer("⏳ Бот перезапускается, попробуйте через минуту", show_alert=True)
+            await q.answer("Бот перезапускается, попробуйте через минуту", show_alert=True)
             return
         if closed():
             await q.answer(CLOSED_TEXT, show_alert=True)
             return
         await subs.load()
         await _safe_edit(q.message,
-            f"{_tg_emoji(EMOJI_DIAMOND, '💎')} <b>Подписка</b>\n\nВыберите тариф",
+            "<b>Подписка</b>\n\nВыберите тариф",
             reply_markup=subs.plans_kb(q.from_user.id))
         await q.answer()
 
     @r.callback_query(F.data == "sub:my")
     async def cb_my(q: CallbackQuery) -> None:
         if not subs.ready.is_set():
-            await q.answer("⏳ Бот перезапускается, попробуйте через минуту", show_alert=True)
+            await q.answer("Бот перезапускается, попробуйте через минуту", show_alert=True)
             return
         await subs.load()
         uid = q.from_user.id
@@ -1188,9 +1183,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             return
         if status in ("member", "administrator", "creator", "restricted"):
             if u and not subs._has_access(u) and not u.get("pending") and uid not in settings.admin_ids:
-                await q.answer("⌛ Подписка закончилась — продлить можно в «💎 Подписка»", show_alert=True)
+                await q.answer("Подписка закончилась — продлить можно в «Подписка»", show_alert=True)
             elif u and u.get("in_chat"):
-                await q.answer(f"✅ Подписка активна, осталось: {_fmt_left(left)}"[:200], show_alert=True)
+                await q.answer(f"Подписка активна, осталось: {_fmt_left(left)}"[:200], show_alert=True)
             else:
                 await q.answer("Вы в канале" + (f", осталось: {_fmt_left(left)}" if left else ""), show_alert=True)
             return
@@ -1212,7 +1207,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
     @r.callback_query(F.data == "sub:trial")
     async def cb_trial(q: CallbackQuery) -> None:
         if not subs.ready.is_set():
-            await q.answer("⏳ Бот перезапускается, попробуйте через минуту", show_alert=True)
+            await q.answer("Бот перезапускается, попробуйте через минуту", show_alert=True)
             return
         if closed():
             await q.answer(CLOSED_TEXT, show_alert=True)
@@ -1244,7 +1239,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
     @r.callback_query(F.data.startswith("sub:buy:"))
     async def cb_buy(q: CallbackQuery) -> None:
         if not subs.ready.is_set():
-            await q.answer("⏳ Бот перезапускается, попробуйте через минуту", show_alert=True)
+            await q.answer("Бот перезапускается, попробуйте через минуту", show_alert=True)
             return
         if closed():
             await q.answer(CLOSED_TEXT, show_alert=True)
@@ -1261,26 +1256,21 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         subs._remember_who(subs.user(q.from_user.id), q.from_user)
         # Шаг 1: выбор валюты. Карточку оплаты (URL) рисуем ТОЛЬКО когда способ уже выбран.
         # Bot API не поддерживает custom emoji в тексте кнопок — только в сообщении.
-        # Поэтому в кнопках обычные ⭐/TON, а в тексте сверху — кастомки от Maker.
+        # Поэтому в кнопках обычные /TON, а в тексте сверху — кастомки от Maker.
         rows: list[list[InlineKeyboardButton]] = []
         if stars:
-            rows.append([InlineKeyboardButton(
-                text=f'Stars · {stars} {_tg_emoji(EMOJI_STAR, "⭐")}',
-                callback_data=f"sub:pay:{plan}:stars")])
+            rows.append([InlineKeyboardButton(text=f"Stars · {stars}",
+                                              callback_data=f"sub:pay:{plan}:stars")])
         if settings.sub_ton_address:
-            rows.append([InlineKeyboardButton(
-                text=f'Tonkeeper · {price:g} {_tg_emoji(EMOJI_TON, "TON")}',
-                callback_data=f"sub:pay:{plan}:ton")])
-        rows.append([InlineKeyboardButton(
-            text=f'Crypto Bot · {price:g} {_tg_emoji(EMOJI_TON, "TON")}',
-            callback_data=f"sub:pay:{plan}:wallet")])
+            rows.append([InlineKeyboardButton(text=f"Tonkeeper · {price:g} TON",
+                                              callback_data=f"sub:pay:{plan}:ton")])
+        rows.append([InlineKeyboardButton(text=f"Crypto Bot · {price:g} TON",
+                                          callback_data=f"sub:pay:{plan}:wallet")])
         rows.append([InlineKeyboardButton(text="« Назад", callback_data="sub:menu")])
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
-        ton_price = f"<b>{price:g}</b> {_tg_emoji(EMOJI_TON, 'TON')}"
-        stars_price = f"<b>{stars}</b> {_tg_emoji(EMOJI_STAR, '⭐')}" if stars else ""
-        price_line = ton_price + (f" или {stars_price}" if stars_price else "")
-        txt = (f"{_tg_emoji(EMOJI_DIAMOND, '💎')} <b>Тариф {title}</b>\n"
-               f"Цена: {price_line}\n\n"
+        stars_part = f" или <b>{stars} Stars</b>" if stars else ""
+        txt = (f"<b>Тариф {title}</b>\n"
+               f"Цена: <b>{price:g} TON</b>{stars_part}\n\n"
                "Выберите способ оплаты:")
         await _safe_edit(q.message, txt, reply_markup=kb)
         await q.answer()
@@ -1289,7 +1279,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
     async def cb_pay(q: CallbackQuery) -> None:
         """Шаг 2: карточка выбранного способа оплаты со ссылкой."""
         if not subs.ready.is_set():
-            await q.answer("⏳ Бот перезапускается, попробуйте через минуту", show_alert=True)
+            await q.answer("Бот перезапускается, попробуйте через минуту", show_alert=True)
             return
         if closed():
             await q.answer(CLOSED_TEXT, show_alert=True)
@@ -1318,11 +1308,11 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 await q.answer("Не удалось создать счёт в Stars, попробуйте позже", show_alert=True)
                 return
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"⭐ Оплатить {stars} Stars", url=url)],
+                [InlineKeyboardButton(text=f"Оплатить {stars} Stars", url=url)],
                 back_row,
             ])
             await _safe_edit(q.message,
-                f"⭐ <b>Тариф {title} — {stars}⭐</b>\n\n"
+                f"<b>Тариф {title} — {stars} Stars</b>\n\n"
                 "Нажмите кнопку ниже и подтвердите оплату в Telegram. "
                 "Как только Telegram подтвердит, ссылка на вход придёт сама.",
                 reply_markup=kb)
@@ -1335,14 +1325,14 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 return
             code = await subs.new_invoice(q.from_user.id, plan)
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"💎 Оплатить {price:g} TON (Tonkeeper)",
+                [InlineKeyboardButton(text=f"Оплатить {price:g} TON (Tonkeeper)",
                                       url=subs.invoice_url(code))],
-                [InlineKeyboardButton(text="🔄 Проверить оплату",
+                [InlineKeyboardButton(text="Проверить оплату",
                                       callback_data=f"sub:check:{code}")],
                 back_row,
             ])
             await _safe_edit(q.message,
-                f"💎 <b>Тариф {title} — {price:g} TON (Tonkeeper)</b>\n\n"
+                f"<b>Тариф {title} — {price:g} TON (Tonkeeper)</b>\n\n"
                 "Нажмите «Оплатить в Tonkeeper», сумма и комментарий подставятся сами.\n\n"
                 f"Или вручную:\nАдрес: <code>{settings.sub_ton_address}</code>\n"
                 f"Сумма: <code>{price:g}</code> TON\n"
@@ -1369,7 +1359,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                     return
                 is_session = (not settings.crypto_bot_api_token) and has_cb_session
                 kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text=f"👛 Оплатить {price:g} TON в Crypto Bot", url=url)],
+                    [InlineKeyboardButton(text=f"Оплатить {price:g} TON в Crypto Bot", url=url)],
                     back_row,
                 ])
                 note = ("Как только оплата пройдёт, бот сам пришлёт ссылку для входа."
@@ -1377,19 +1367,19 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                         "После оплаты пришлите скриншот админу — выдадут доступ вручную "
                         "(auto-проверка оплаты работает только с merchant API).")
                 await _safe_edit(q.message,
-                    f"👛 <b>Тариф {title} — {price:g} TON (Crypto Bot)</b>\n\n"
+                    f"<b>Тариф {title} — {price:g} TON (Crypto Bot)</b>\n\n"
                     "Нажмите кнопку — откроется чек в @CryptoBot на вашу сумму.\n" + note,
                     reply_markup=kb)
                 await q.answer()
                 return
             # ни API-токена, ни session — статическая ссылка
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"👛 Оплатить {price:g} TON в Crypto Bot",
+                [InlineKeyboardButton(text=f"Оплатить {price:g} TON в Crypto Bot",
                                       url=CRYPTO_PAY_FALLBACK_URL)],
                 back_row,
             ])
             await _safe_edit(q.message,
-                f"👛 <b>Тариф {title} — {price:g} TON (Crypto Bot)</b>\n\n"
+                f"<b>Тариф {title} — {price:g} TON (Crypto Bot)</b>\n\n"
                 "Нажмите кнопку — откроется встроенный кошелёк.\n"
                 "Отправьте точную сумму и пришлите скриншот оплаты админу — "
                 "выдадут доступ вручную.",
@@ -1439,14 +1429,14 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         except Exception as e:
             log.exception("Stars delivery failed")
             try:
-                await m.answer(f"⚠️ Оплата прошла, но выдача доступа споткнулась. "
+                await m.answer(f"Оплата прошла, но выдача доступа споткнулась. "
                                f"Напишите админу с чеком Stars (payload <code>{html.escape(sp.invoice_payload)}</code>).")
             except Exception:
                 pass
             for admin in settings.admin_ids:
                 try:
                     await subs.bot.send_message(admin,
-                        f"⚠️ Stars оплата от <code>{m.from_user.id}</code> пришла, но выдача упала: "
+                        f"Stars оплата от <code>{m.from_user.id}</code> пришла, но выдача упала: "
                         f"{html.escape(str(e))}\npayload <code>{html.escape(sp.invoice_payload)}</code>")
                 except Exception:
                     pass
@@ -1454,7 +1444,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
     @r.callback_query(F.data.startswith("sub:check:"))
     async def cb_check(q: CallbackQuery) -> None:
         if not subs.ready.is_set():
-            await q.answer("⏳ Бот перезапускается, попробуйте через минуту", show_alert=True)
+            await q.answer("Бот перезапускается, попробуйте через минуту", show_alert=True)
             return
         await subs.load()
         code = q.data.split(":", 2)[2]
@@ -1469,8 +1459,8 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 log.warning("Manual payment check failed: %s", e)
         inv = subs.state["invoices"].get(code, {})
         if inv.get("paid"):
-            await q.answer("✅ Оплата пришла, ссылка в чате" if inv.get("granted") is True
-                           else "✅ Оплата пришла, ссылка придёт в чат в течение пары минут", show_alert=True)
+            await q.answer("Оплата пришла, ссылка в чате" if inv.get("granted") is True
+                           else "Оплата пришла, ссылка придёт в чат в течение пары минут", show_alert=True)
         else:
             await q.answer("Оплата пока не пришла. Если уже оплатили, подождите минуту и нажмите ещё раз.",
                            show_alert=True)
@@ -1495,10 +1485,10 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         st = subs.stats()
         from bot.admin import _answer_long
         await _answer_long(m, "<b>Подписчики</b>\n" + ("\n".join(rows) or "нет") +
-                       f"\n\n👥 Активных: {st['active']} (навсегда: {st['forever']}) · пробных всего: {st['trials']}\n"
-                       f"💎 TON: {st['paid_total']:g} ({st['paid_count']} оплат) · "
+                       f"\n\nАктивных: {st['active']} (навсегда: {st['forever']}) · пробных всего: {st['trials']}\n"
+                       f"TON: {st['paid_total']:g} ({st['paid_count']} оплат) · "
                        f"сутки: {st['paid_day']:g} ({st['paid_day_count']})\n"
-                       f"⭐ Stars: {st['stars_total']} ({st['stars_count']} оплат) · "
+                       f"Stars: {st['stars_total']} ({st['stars_count']} оплат) · "
                        f"сутки: {st['stars_day']} ({st['stars_day_count']})\n"
                        "Выдать вручную: <code>/grant ID часы</code> или <code>/grant ID навсегда</code>\n"
                        "Забрать: <code>/revoke ID</code>")
@@ -1527,14 +1517,14 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         try:
             text = await subs.grant(uid, secs, "Вам выдан доступ администратором.")
         except Exception as e:
-            await m.answer(f"❌ Не удалось выдать: {html.escape(str(e))}\nПроверьте, что бот — админ в канале.")
+            await m.answer(f"Не удалось выдать: {html.escape(str(e))}\nПроверьте, что бот — админ в канале.")
             return
         try:
             await app.bot.send_message(uid, text)
-            await m.answer(f"✅ Выдано пользователю <code>{uid}</code>, ссылка отправлена ему в личку.")
+            await m.answer(f"Выдано пользователю <code>{uid}</code>, ссылка отправлена ему в личку.")
         except Exception:
             # человек ещё не писал боту — отдаём ссылку админу, чтобы переслать вручную
-            await m.answer(f"✅ Выдано <code>{uid}</code>, но написать ему бот не может (он не нажимал /start).\n"
+            await m.answer(f"Выдано <code>{uid}</code>, но написать ему бот не может (он не нажимал /start).\n"
                            f"Перешлите ему это:\n\n{text}")
 
     def _resolve_user(arg: str) -> int | None:
@@ -1581,7 +1571,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             "seen_tx": len(subs.state.get("seen_tx", [])),
         }
         await m.answer(
-            f"🧹 <b>Чистка старых invoices</b>\n\n"
+            f"<b>Чистка старых invoices</b>\n\n"
             f"Удалено: <b>{n}</b>\n\n"
             f"Было: invoices={before['invoices']}, users={before['users']}, "
             f"seen_tx={before['seen_tx']}\n"
@@ -1613,8 +1603,8 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             u.update({"until": 0 if ok else time.time(), "in_chat": not ok, "pending": 0})
             await subs.save(backup=True)
         await subs.flush_backup()
-        await m.answer(f"✅ Доступ {uid} забран" if ok else
-                       f"⚠️ Доступ {uid} снят, но выгнать из канала сейчас не вышло — бот повторит сам")
+        await m.answer(f"Доступ {uid} забран" if ok else
+                       f"Доступ {uid} снят, но выгнать из канала сейчас не вышло — бот повторит сам")
 
     # ---------------- шорткат: "<ID> а" в личке от админа → подписка навсегда
     #     (а|н|навсегда|forever|∞ — любое из этих слов). Это ускорение для /grant <id> навсегда.
@@ -1632,13 +1622,13 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         try:
             text = await subs.grant(uid, FOREVER, "Вам выдан доступ администратором.")
         except Exception as e:
-            await m.answer(f"❌ Не удалось выдать: {html.escape(str(e))}\nПроверьте, что бот — админ в канале.")
+            await m.answer(f"Не удалось выдать: {html.escape(str(e))}\nПроверьте, что бот — админ в канале.")
             return
         try:
             await app.bot.send_message(uid, text)
-            await m.answer(f"✅ Навсегда выдано <code>{uid}</code>, ссылка отправлена ему в личку.")
+            await m.answer(f"Навсегда выдано <code>{uid}</code>, ссылка отправлена ему в личку.")
         except Exception:
-            await m.answer(f"✅ Навсегда выдано <code>{uid}</code>, но написать ему бот не может (он не нажимал /start).\n"
+            await m.answer(f"Навсегда выдано <code>{uid}</code>, но написать ему бот не может (он не нажимал /start).\n"
                            f"Перешлите ему это:\n\n{text}")
 
     # ---------------- всё остальное от не-админов → приветствие

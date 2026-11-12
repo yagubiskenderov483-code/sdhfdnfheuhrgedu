@@ -215,36 +215,36 @@ class App:
     # ------------------------------------------------------------------ diagnostics
     async def run_check(self) -> tuple[str, str | None]:
         """Проверка всей цепочки без рассылки. → (отчёт HTML, пример сообщения или None)"""
-        lines = ["<b>🧪 Проверка</b>"]
+        lines = ["<b>Проверка</b>"]
         sample = None
         c = self.sessions.counts()
         lines.append(f"Sessions: {len(self.sessions.workers)} (active {c.get('ACTIVE', 0)})"
-                     + (" ✅" if c.get("ACTIVE") else " ❌"))
+                     + (" " if c.get("ACTIVE") else " "))
         try:
             await self.db.kv_get("schema_version")
-            lines.append("Database: ✅")
+            lines.append("Database: ")
         except Exception as e:
-            lines.append(f"Database: ❌ {html.escape(str(e))}")
+            lines.append(f"Database: {html.escape(str(e))}")
         try:
             me = await self.bot.get_me()
-            lines.append(f"Bot: ✅ @{me.username}")
+            lines.append(f"Bot: @{me.username}")
         except Exception as e:
-            lines.append(f"Bot: ❌ {html.escape(type(e).__name__)}")
+            lines.append(f"Bot: {html.escape(type(e).__name__)}")
         try:
             chat = await self.bot.get_chat(settings.target_chat_id)
-            lines.append(f"Target chat: ✅ {html.escape(chat.title or str(chat.id))}")
+            lines.append(f"Target chat: {html.escape(chat.title or str(chat.id))}")
         except Exception as e:
-            lines.append(f"Target chat: ❌ {html.escape(str(e))[:200]}")
+            lines.append(f"Target chat: {html.escape(str(e))[:200]}")
 
         if not self.sessions.usable():
             lines.append("Marketplace API: ⏭ нет активной session")
             return "\n".join(lines), None
         try:
             catalog, sname = await self.sessions.run(fetch_catalog, timeout=30)
-            lines.append(f"payments.getStarGifts: ✅ {len(catalog)} коллекций с маркетом (via {sname})")
+            lines.append(f"payments.getStarGifts: {len(catalog)} коллекций с маркетом (via {sname})")
             top = max(catalog, key=lambda x: x.availability_resale or 0)
             page, sname = await self.sessions.run(lambda cl: fetch_resale_page(cl, top.gift_id, "", 5), timeout=30)
-            lines.append(f"payments.getResaleStarGifts: ✅ «{html.escape(top.title)}» — "
+            lines.append(f"payments.getResaleStarGifts: «{html.escape(top.title)}» — "
                          f"{page.count} лотов, получено {len(page.items)}")
             if page.items:
                 it = page.items[0]
@@ -258,11 +258,11 @@ class App:
                              f"{l.stars_price} Stars / {l.ton_price} TON | model {html.escape(str(l.model))}")
                 lines.append(f"Seller: {html.escape(l.seller_key)} @{html.escape(str(l.seller_username))} "
                              f"level={l.level} premium={l.premium} msgs={html.escape(str(l.messages))}")
-                lines.append(f"PriceFilter: {'✅' if pr.passed else '❌'} {html.escape(pr.reason)}")
-                lines.append(f"SellerFilter: {'✅' if sr.passed else '❌'} {sr.code}")
+                lines.append(f"PriceFilter: {'' if pr.passed else ''} {html.escape(pr.reason)}")
+                lines.append(f"SellerFilter: {'' if sr.passed else ''} {sr.code}")
                 sample = self.formatter.render(l)
         except Exception as e:
-            lines.append(f"Marketplace API: ❌ {html.escape(type(e).__name__)}: {html.escape(str(e))[:300]}")
+            lines.append(f"Marketplace API: {html.escape(type(e).__name__)}: {html.escape(str(e))[:300]}")
         return "\n".join(lines), sample
 
     # ------------------------------------------------------------------ lifecycle
@@ -413,7 +413,7 @@ class App:
         row = [InlineKeyboardButton(text=t[:30] or "?", callback_data=f"cap:{token}:{i}"[:64])
                for i, t in enumerate(buttons)]
         kb = InlineKeyboardMarkup(inline_keyboard=[row[i:i + 4] for i in range(0, len(row), 4)])
-        text = (f"🧩 <b>Капча в @{html.escape(bot_u)}</b> (аккаунт {html.escape(session)})\n"
+        text = (f"<b>Капча в @{html.escape(bot_u)}</b> (аккаунт {html.escape(session)})\n"
                 "Нажмите кнопку со значком, похожим на картинку — поиск владельцев продолжится.\n"
                 f"Пока капча не пройдена, этот аккаунт не ищет (ждёт до {settings.lookup_captcha_wait:.0f} с).")
         # всем админам + владельцу аккаунта поиска (тот, кто добавил session) — в личку
@@ -446,7 +446,7 @@ class App:
         targets = set(settings.admin_ids or set()) | set(all_admins())
         if owner:
             targets.add(owner)
-        text = (f"⚠️ Аккаунт <b>{html.escape(session)}</b> заблокировал @{html.escape(bot)}.\n"
+        text = (f"Аккаунт <b>{html.escape(session)}</b> заблокировал @{html.escape(bot)}.\n"
                 f"Пока он в блоке, через эту сессию funstat не работает (мы её не используем 6 ч).\n\n"
                 f"Войдите в этот Telegram аккаунт → откройте чат с @{html.escape(bot)} → "
                 "«Разблокировать» внизу экрана. После этого /reload.")
@@ -488,14 +488,14 @@ class App:
                    "silent": "молчит"}.get(kind, "не отвечает")
         log.warning("Lookup-бот @%s: %s", bot, kind_ru)
         if kind == "back":
-            text = (f"✅ Lookup-бот <b>@{html.escape(bot)}</b> снова отвечает.\n"
+            text = (f"Lookup-бот <b>@{html.escape(bot)}</b> снова отвечает.\n"
                     "Всё это время поиск владельцев шёл через запасного, лоты не терялись.")
         else:
             fallback_line = (f"Запасной <b>@{html.escape(next_bot)}</b> уже используется — "
                              "поиск идёт без пауз." if next_bot else
                              "Запасных в <code>LOOKUP_BOTS</code> нет — hidden-owner лоты пока "
                              "не отправляются. Добавить: <code>/bots_add infostat</code>.")
-            text = (f"⚠️ Lookup-бот <b>@{html.escape(bot)}</b> {kind_ru}.\n\n"
+            text = (f"Lookup-бот <b>@{html.escape(bot)}</b> {kind_ru}.\n\n"
                     + fallback_line + "\n\n"
                     "Из пула бот не удалён — сам пробуем его позже. Чтобы заменить основного: "
                     f"<code>/bots_set_primary {html.escape(next_bot or '<имя>')}</code>")
@@ -519,9 +519,9 @@ class App:
                     log.warning("Session %s removed automatically: %s", w.name, w.reason)
             except Exception as e:
                 log.warning("Auto-remove of %s failed: %s", w.name, e)
-        text = (f"⚠️ Аккаунт <b>{html.escape(w.name)}</b> отключён Telegram.\n"
+        text = (f"Аккаунт <b>{html.escape(w.name)}</b> отключён Telegram.\n"
                 f"Причина: {html.escape(w.reason or '—')}\n\n"
-                + ("🗑 Удалён из трекера автоматически. Если это ошибка — /removed, вернуть: /revive ИМЯ."
+                + ("Удалён из трекера автоматически. Если это ошибка — /removed, вернуть: /revive ИМЯ."
                    if removed else "Удалите его в /sessions и добавьте заново через /add_session."))
         for chat in targets:
             try:
@@ -639,7 +639,7 @@ class App:
                     log.warning("After background restore: %s", e)
                 for admin in (settings.admin_ids or all_admins()) if found else ():
                     try:
-                        await self.bot.send_message(admin, "✅ Резервная копия прочитана — аккаунты и подписки "
+                        await self.bot.send_message(admin, "Резервная копия прочитана — аккаунты и подписки "
                                                            "восстановлены, копия снова сохраняется.")
                     except Exception:
                         pass
@@ -679,16 +679,16 @@ class App:
             c = self.sessions.counts()
             live, total = self.coordinator.sync_progress()
             ok = c.get("ACTIVE", 0)
-            head = "✅ <b>Бот запущен</b>" if ok and live else "⚠️ <b>Бот запущен, но есть проблемы</b>"
+            head = "<b>Бот запущен</b>" if ok and live else "<b>Бот запущен, но есть проблемы</b>"
             lines = [head, "",
-                     f"👥 Аккаунтов: {len(self.sessions.workers)} · работают: {ok}"
+                     f"Аккаунтов: {len(self.sessions.workers)} · работают: {ok}"
                      + (f" · FloodWait: {c.get('FLOOD_WAIT', 0)}" if c.get("FLOOD_WAIT") else "")
                      + (f" · ошибки: {c.get('ERROR', 0) + c.get('AUTH_ERROR', 0)}"
                         if c.get("ERROR") or c.get("AUTH_ERROR") else ""),
-                     f"📚 Коллекций в работе: {live}/{total}",
-                     "⏸ Парсер выключен (/on)" if self.coordinator.paused else "🟢 Парсер работает"]
+                     f"Коллекций в работе: {live}/{total}",
+                     "⏸ Парсер выключен (/on)" if self.coordinator.paused else "Парсер работает"]
             if getattr(self, "users_closed", False):
-                lines.append("🔒 Для пользователей закрыто (/open)")
+                lines.append("Для пользователей закрыто (/open)")
             strict = []
             if settings.russian_only and settings.unknown_seller_policy == "block":
                 strict.append("только русские продавцы")
@@ -698,7 +698,7 @@ class App:
                 strict.append("продавец один раз" + (f" за {settings.seller_repeat_hours:g} ч"
                                                       if settings.seller_repeat_hours else " навсегда"))
             if strict:
-                lines.append("🧹 Фильтры: " + ", ".join(strict) + " · почему отсеяно: /why")
+                lines.append("Фильтры: " + ", ".join(strict) + " · почему отсеяно: /why")
             # Статус lookup-ботов: если есть мёртвые — показать сразу в startup-отчёте
             try:
                 if hasattr(self.lookup, "_bot_pool"):
@@ -712,27 +712,27 @@ class App:
                     slow = [b for b, until in (getattr(self.lookup, "_bot_slow_until", {}) or {}).items()
                             if until > now_m]
                     if pool and not dead and not slow:
-                        lines.append(f"🤖 Lookup-боты: {len(pool)} активн. (/bots)")
+                        lines.append(f"Lookup-боты: {len(pool)} активн. (/bots)")
                     elif pool and (dead or slow):
                         extras = []
                         if dead:
-                            extras.append("💀 " + ", ".join(f"@{b}" for b in dead))
+                            extras.append("" + ", ".join(f"@{b}" for b in dead))
                         if slow:
-                            extras.append("🐢 " + ", ".join(f"@{b}" for b in slow))
-                        lines.append(f"⚠️ Lookup: {len(pool)} активн., " + " · ".join(extras) + " (/bots)")
+                            extras.append("" + ", ".join(f"@{b}" for b in slow))
+                        lines.append(f"Lookup: {len(pool)} активн., " + " · ".join(extras) + " (/bots)")
                     elif not pool and self.lookup.any_bot_configured():
-                        lines.append("🚨 Lookup: пул пуст — hidden-owner лоты отсеиваются. /bots")
+                        lines.append("Lookup: пул пуст — hidden-owner лоты отсеиваются. /bots")
                     elif not self.lookup.any_bot_configured():
-                        lines.append("ℹ️ Lookup-бот не настроен — hidden-owner лоты отсеиваются. "
+                        lines.append("ℹLookup-бот не настроен — hidden-owner лоты отсеиваются. "
                                      "Настрой: /set LOOKUP_BOT_USERNAME funstat")
             except Exception:
                 pass
             try:
                 rights = await self._chat_rights_report()
             except Exception as e:
-                rights = [f"⚠️ Не удалось проверить права бота: {html.escape(str(e)[:120])}"]
+                rights = [f"Не удалось проверить права бота: {html.escape(str(e)[:120])}"]
             if rights:
-                lines[0] = "⚠️ <b>Бот запущен, но есть проблемы</b>"
+                lines[0] = "<b>Бот запущен, но есть проблемы</b>"
                 lines += [""] + rights
             for admin in (settings.admin_ids or all_admins()):
                 try:
@@ -762,23 +762,23 @@ class App:
             if st == "SEND_FAILED" and reason:
                 last_fail = reason
         found = sum(by_status.values())
-        names = {"SENT": "✅ отправлено", "FILTERED_PRICE": "💰 отсеяно по цене",
-                 "FILTERED_SELLER": "👤 отсеяно по продавцу", "FILTERED_DUPLICATE": "🔁 повторы",
-                 "SEND_FAILED": "❌ не отправилось", "ERROR": "⌛ устарели/ошибка", "NEW": "⏳ в очереди",
-                 "SENDING": "📤 отправляются", "TEST_ONLY": "🧪 тест"}
+        names = {"SENT": "отправлено", "FILTERED_PRICE": "отсеяно по цене",
+                 "FILTERED_SELLER": "отсеяно по продавцу", "FILTERED_DUPLICATE": "повторы",
+                 "SEND_FAILED": "не отправилось", "ERROR": "⌛ устарели/ошибка", "NEW": "⏳ в очереди",
+                 "SENDING": "отправляются", "TEST_ONLY": "тест"}
         span = f"{hours:g} ч"
-        lines = [f"🔎 <b>Почему нет постов — за {span}</b>", ""]
+        lines = [f"<b>Почему нет постов — за {span}</b>", ""]
         c = self.sessions.counts()
         if self.coordinator.paused:
             lines.append("⏸ <b>Парсер выключен</b> — включить: /on")
         if not self.sessions.workers:
-            lines.append("🚨 <b>Нет ни одного аккаунта</b> — добавьте: /add_session")
+            lines.append("<b>Нет ни одного аккаунта</b> — добавьте: /add_session")
         elif not self.sessions.usable():
-            lines.append(f"🚨 <b>Нет рабочих аккаунтов</b> ({len(self.sessions.workers)} всего) — /sessions")
-        lines.append(f"👥 Аккаунтов работает: {c.get('ACTIVE', 0)} из {len(self.sessions.workers)}")
+            lines.append(f"<b>Нет рабочих аккаунтов</b> ({len(self.sessions.workers)} всего) — /sessions")
+        lines.append(f"Аккаунтов работает: {c.get('ACTIVE', 0)} из {len(self.sessions.workers)}")
         live, total = self.coordinator.sync_progress()
-        lines.append(f"📚 Коллекций в работе: {live}/{total}")
-        lines.append(f"🎁 Найдено новых лотов: <b>{found}</b>")
+        lines.append(f"Коллекций в работе: {live}/{total}")
+        lines.append(f"Найдено новых лотов: <b>{found}</b>")
         for st, n in sorted(by_status.items(), key=lambda x: -x[1]):
             lines.append(f"  {names.get(st, st)}: {n}")
         top = sorted(((n, st, r) for (st, r), n in reasons.items() if st not in ("SENT", "TEST_ONLY")), reverse=True)[:6]
@@ -786,7 +786,7 @@ class App:
             lines += ["", "<b>Главные причины отсева:</b>"]
             lines += [f"  {n} × {html.escape(r)}" for n, st, r in top]
         if last_fail:
-            lines += ["", f"❌ Последняя ошибка отправки: <code>{html.escape(last_fail[:300])}</code>",
+            lines += ["", f"Последняя ошибка отправки: <code>{html.escape(last_fail[:300])}</code>",
                       "Проверьте, что бот — админ группы с правом писать и управлять темами (/test channel)."]
         # Адаптивный throttle: если шторм FloodWait, пишем причину явно
         try:
@@ -794,7 +794,7 @@ class App:
             base = getattr(self.sessions, "_base_rps", 0)
             cur = self.sessions.limiter.rate
             if fpm >= 10 or (base and cur < base):
-                lines += ["", f"⚠️ <b>Шторм FloodWait</b>: {fpm}/мин. Трекер превентивно замедлен "
+                lines += ["", f"<b>Шторм FloodWait</b>: {fpm}/мин. Трекер превентивно замедлен "
                               f"(GLOBAL_RPS {cur:.0f} из {base:.0f}). Аккаунты получают передышку, "
                               f"как шторм утихнет — скорость восстановится автоматически.",
                               "Проверьте /sessions — скорее всего нужны прокси (USE_PROXIES=1 → /proxies)."]
@@ -808,7 +808,7 @@ class App:
             cap_fail = lk.get("captcha_auto_fail", 0)
             if cap_total > 0:
                 pct = (cap_auto / cap_total * 100) if cap_total else 0
-                lines += ["", f"🧩 Капч: {cap_total} · авто-решено {cap_auto} ({pct:.0f}%) · "
+                lines += ["", f"Капч: {cap_total} · авто-решено {cap_auto} ({pct:.0f}%) · "
                               f"не смог {cap_fail}" + (f" · активных {self.lookup.pending_captchas()}"
                                                        if self.lookup.pending_captchas() else "")]
         except Exception:
@@ -816,13 +816,13 @@ class App:
         # Lookup диагностика: если все боты dead или вообще не настроены — явное предупреждение
         try:
             if hasattr(self.lookup, "all_bots_dead") and self.lookup.all_bots_dead():
-                lines += ["", "🚨 <b>Lookup: ВСЕ боты dead</b> — hidden-owner лоты идут с пометкой "
+                lines += ["", "<b>Lookup: ВСЕ боты dead</b> — hidden-owner лоты идут с пометкой "
                               "без фильтра. Проверь: /bots, добавь запасных: /bots_add @infostat"]
             elif hasattr(self.lookup, "any_bot_configured") and not self.lookup.any_bot_configured():
-                lines += ["", "ℹ️ Lookup-бот не настроен — hidden-owner лоты отсеиваются. "
+                lines += ["", "ℹLookup-бот не настроен — hidden-owner лоты отсеиваются. "
                               "Задай: <code>/set LOOKUP_BOT_USERNAME funstat</code>"]
             elif lk.get("no_bot_pool", 0) > 0 or lk.get("bot_dead_marked", 0) > 0:
-                lines += ["", f"⚠️ Lookup: dead-marks за запуск {lk.get('bot_dead_marked', 0)}, "
+                lines += ["", f"Lookup: dead-marks за запуск {lk.get('bot_dead_marked', 0)}, "
                               f"прошло без бота {lk.get('no_bot_pool', 0)} лотов — /bots"]
         except Exception:
             pass
@@ -842,11 +842,11 @@ class App:
             try:
                 m = await self.bot.get_chat_member(chat, me.id)
             except Exception as e:
-                out.append(f"❌ Группа <code>{chat}</code>: бот не видит её ({html.escape(str(e)[:120])}) — добавьте бота")
+                out.append(f"Группа <code>{chat}</code>: бот не видит её ({html.escape(str(e)[:120])}) — добавьте бота")
                 continue
             st = getattr(m, "status", "")
             if st not in ("administrator", "creator"):
-                out.append(f"❌ Группа <code>{chat}</code>: бот не админ (статус {html.escape(str(st))}) — выдайте права")
+                out.append(f"Группа <code>{chat}</code>: бот не админ (статус {html.escape(str(st))}) — выдайте права")
             elif st == "administrator":
                 miss = []
                 if getattr(m, "can_manage_topics", None) is False:
@@ -856,7 +856,7 @@ class App:
                 if chat == sub and getattr(m, "can_restrict_members", None) is False:
                     miss.append("бан (для подписок)")
                 if miss:
-                    out.append(f"⚠️ Группа <code>{chat}</code>: нет прав — {', '.join(miss)}")
+                    out.append(f"Группа <code>{chat}</code>: нет прав — {', '.join(miss)}")
         return out
 
     async def _alert(self, kind: str, text: str, every: float = 3600) -> None:
@@ -892,9 +892,9 @@ class App:
             return now - self._bad_since[kind] >= secs
 
         if lasting("no_accounts", usable == 0 and not getattr(self, "booting", False), 180):
-            text = (f"🚨 <b>Нет рабочих аккаунтов</b> ({total} всего: FloodWait/ошибки).\n"
+            text = (f"<b>Нет рабочих аккаунтов</b> ({total} всего: FloodWait/ошибки).\n"
                     "Лоты сейчас не ищутся. Подробнее: /sessions") if total else (
-                    "🚨 <b>В трекере не осталось ни одного аккаунта</b> — лоты не ищутся.\n"
+                    "<b>В трекере не осталось ни одного аккаунта</b> — лоты не ищутся.\n"
                     "Добавьте аккаунт: /add_session")
             await self._alert("no_accounts", text, 1800)
         # Шторм FloodWait: 15+/мин 5 минут подряд — это уже не кратковременное, а фон. Сигнал раз в час.
@@ -903,16 +903,16 @@ class App:
             n_min = getattr(self.sessions, "flood_rate_per_minute", lambda: 0)()
             slow = sum(1 for w in self.sessions.workers.values() if getattr(w, "speed", 1.0) < 0.5)
             hint = ("" if os.getenv("USE_PROXIES", "0").strip().lower() in ("1", "true", "yes", "on") else
-                    "\n\n💡 Сильнее всего поможет прокси: USE_PROXIES=1 + /proxies")
+                    "\n\nСильнее всего поможет прокси: USE_PROXIES=1 + /proxies")
             await self._alert("flood_storm",
-                              f"🌩 <b>Шторм FloodWait</b>: {n_min}/мин уже 5+ минут.\n"
+                              f"<b>Шторм FloodWait</b>: {n_min}/мин уже 5+ минут.\n"
                               f"Замедлено {slow} из {total} аккаунтов. Трекер сам снизил скорость.\n"
                               "Деталь: /flood" + hint, 3600)
         elif lasting("few_accounts", total >= 4 and usable < total * 0.4, 600):
             hint = ("" if os.getenv("USE_PROXIES", "0").strip().lower() in ("1", "true", "yes", "on") else
                     "\nСовет: все аккаунты на одном IP — подключите прокси (USE_PROXIES=1 и /proxies), "
                     "это сильнее всего снижает FloodWait.")
-            await self._alert("few_accounts", f"⚠️ Работает только <b>{usable} из {total}</b> аккаунтов уже 10+ минут.\n"
+            await self._alert("few_accounts", f"Работает только <b>{usable} из {total}</b> аккаунтов уже 10+ минут.\n"
                                               "Лоты идут медленнее. Подробнее: /sessions" + hint, 3600)
         last_new = self.pipeline.last_new_at
         quiet = time.time() - (last_new or self._started_at)
@@ -923,7 +923,7 @@ class App:
                 why = "\n\n" + await self.why_report(1)
             except Exception:
                 why = ""
-            await self._alert("no_lots", f"⚠️ <b>{int(quiet // 60)} минут ни одного нового лота.</b>"
+            await self._alert("no_lots", f"<b>{int(quiet // 60)} минут ни одного нового лота.</b>"
                                          + (why or "\nОбычно лоты идут каждые несколько минут — проверьте /status"), 3600)
 
     async def _watchdog_conflict(self) -> None:
@@ -933,7 +933,7 @@ class App:
         # тревога — если конфликт идёт дольше 3 минут подряд
         if w.count >= 3 and time.time() - w.last < 300 and w.last - w.first > 180:
             await self._alert("token_conflict",
-                              "🚨 <b>Этим токеном бота пользуется кто-то ещё</b> (Telegram: Conflict).\n"
+                              "<b>Этим токеном бота пользуется кто-то ещё</b> (Telegram: Conflict).\n"
                               "Либо запущена вторая копия бота, либо токен утёк. Если второй копии нет — "
                               "@BotFather → /revoke, новый токен в BOT_TOKEN, репозиторий — приватный.", 3600)
 
@@ -950,7 +950,7 @@ class App:
             why = await self.why_report(1)
         except Exception as e:
             why = f"(не удалось собрать причины: {html.escape(str(e)[:100])})"
-        await self._alert("no_sent", f"⚠️ <b>Лоты находятся, но за {int((time.time() - last_sent) // 60)} мин "
+        await self._alert("no_sent", f"<b>Лоты находятся, но за {int((time.time() - last_sent) // 60)} мин "
                                      f"ни один не отправлен.</b>\n\n" + why, 3600)
 
     async def _daily_report(self) -> None:
@@ -972,11 +972,11 @@ class App:
         found = sum(day.values())
         ws = list(self.sessions.workers.values())
         sub = self.subs.stats()
-        lines = [f"📊 <b>Итоги за сутки</b> · {local.strftime('%d.%m.%Y')}", "",
-                 f"🎁 Найдено лотов: {found} · отправлено: {day.get('SENT', 0)}",
-                 f"👤 Отсеяно по продавцу: {day.get('FILTERED_SELLER', 0)} · повторы: {day.get('FILTERED_DUPLICATE', 0)}",
-                 f"💰 Оплат: {sub['paid_day_count']} на {sub['paid_day']:g} TON · активных подписчиков: {sub['active']}",
-                 f"👥 Аккаунтов: {len(ws)} · сейчас работают: {len(self.sessions.usable())}"]
+        lines = [f"<b>Итоги за сутки</b> · {local.strftime('%d.%m.%Y')}", "",
+                 f"Найдено лотов: {found} · отправлено: {day.get('SENT', 0)}",
+                 f"Отсеяно по продавцу: {day.get('FILTERED_SELLER', 0)} · повторы: {day.get('FILTERED_DUPLICATE', 0)}",
+                 f"Оплат: {sub['paid_day_count']} на {sub['paid_day']:g} TON · активных подписчиков: {sub['active']}",
+                 f"Аккаунтов: {len(ws)} · сейчас работают: {len(self.sessions.usable())}"]
         tot = sorted(t for t, e in getattr(self.pipeline, "totals", []) if e)
         if len(tot) >= 3:
             lines.append(f"⏱ Дорогие лоты: обычно {tot[len(tot) // 2]:.1f} с до поста, "
@@ -996,28 +996,28 @@ class App:
                 captcha_auto = lk_st.get("captcha_auto", 0) + lk_st.get("captcha_random", 0)
                 bot_dead_cnt = lk_st.get("bot_dead_marked", 0)
                 success_rate = int(100 * (found_cnt + from_mem) / max(1, total_lookups))
-                lines.append(f"🔍 Lookup: {total_lookups} попыток · {success_rate}% успех "
+                lines.append(f"Lookup: {total_lookups} попыток · {success_rate}% успех "
                              f"({found_cnt} найдено, {from_mem} из памяти)")
                 if captcha_cnt > 0:
                     captcha_rate = int(100 * captcha_auto / captcha_cnt)
-                    lines.append(f"🧩 Капч: {captcha_cnt} · авто-решено {captcha_auto} ({captcha_rate}%)")
+                    lines.append(f"Капч: {captcha_cnt} · авто-решено {captcha_auto} ({captcha_rate}%)")
                 if bot_dead_cnt > 0:
-                    lines.append(f"💀 Боты помечались dead: {bot_dead_cnt} раз(а) — /bots")
+                    lines.append(f"Боты помечались dead: {bot_dead_cnt} раз(а) — /bots")
                 bypass = (getattr(getattr(self, "pipeline", None), "stats", {}) or {}) \
                     .get("owner_bot_dead_bypass", 0)
                 if bypass > 0:
-                    lines.append(f"🔓 Hidden-owner bypass (все боты dead): {bypass} лот(ов)")
+                    lines.append(f"Hidden-owner bypass (все боты dead): {bypass} лот(ов)")
         except Exception:
             pass
         if found >= 10 and day.get("SENT", 0) < found * 0.2:
-            lines.append("🧹 Больше 80% найденных лотов отсеяно — причины: /why 24 · фильтры кнопками: /panel")
+            lines.append("Больше 80% найденных лотов отсеяно — причины: /why 24 · фильтры кнопками: /panel")
         muted = self.backup.flags.get("muted") if hasattr(self.backup, "flags") else None
         if muted:
-            lines.append(f"🔇 Выключено коллекций: {len(muted)} (/mute)")
+            lines.append(f"Выключено коллекций: {len(muted)} (/mute)")
         if self.backup.graveyard:
             fresh = [g for g in self.backup.graveyard.values() if time.time() - g.get("ts", 0) < 86400]
             if fresh:
-                lines.append(f"🗑 Удалено аккаунтов за сутки: {len(fresh)} (/removed)")
+                lines.append(f"Удалено аккаунтов за сутки: {len(fresh)} (/removed)")
         for admin in (settings.admin_ids or all_admins()):
             try:
                 await self.bot.send_message(admin, "\n".join(lines))
@@ -1028,13 +1028,13 @@ class App:
         """Команды в синей кнопке «Меню» рядом с полем ввода."""
         cmds = [
             BotCommand(command="start", description="Главное меню"),
-            BotCommand(command="dashboard", description="📊 Единая сводка (главный экран админа)"),
+            BotCommand(command="dashboard", description="Единая сводка (главный экран админа)"),
             BotCommand(command="add_session", description="Добавить аккаунт"),
             BotCommand(command="sessions", description="Мои аккаунты / удалить"),
             BotCommand(command="status", description="Состояние трекера"),
             BotCommand(command="why", description="Почему нет постов"),
             BotCommand(command="panel", description="Фильтры кнопками"),
-            BotCommand(command="bots", description="🤖 Пул lookup-ботов"),
+            BotCommand(command="bots", description="Пул lookup-ботов"),
             BotCommand(command="help_lookup", description="Все команды lookup одной строкой"),
             BotCommand(command="lookup", description="Проверить бота поиска: /lookup имя"),
             BotCommand(command="lot", description="Почему не пришёл лот (ссылка t.me/nft/…)"),
@@ -1097,7 +1097,7 @@ class App:
                     for chat in all_admins():
                         try:
                             await self.bot.send_message(
-                                chat, "⚠️ Другая программа использует токен этого бота и включила вебхук "
+                                chat, "Другая программа использует токен этого бота и включила вебхук "
                                       f"(<code>{html.escape(host)}</code>). Из-за этого бот переставал отвечать "
                                       "на команды. Я его снял, но она включит его снова — остановите её "
                                       "(например, второй бот с этим токеном на Bothost) или смените токен.")
