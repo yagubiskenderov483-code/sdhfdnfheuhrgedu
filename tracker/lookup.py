@@ -21,6 +21,7 @@ import asyncio
 import heapq
 import json
 import os
+import random
 import re
 import time
 from dataclasses import dataclass
@@ -379,6 +380,7 @@ class OwnerLookup:
         # Экономит квоту и капчи: 'Maria' на разных лотах не долбим в funstat.
         self._neg_cache: dict[str, float] = {}
         self._started: set[tuple[str, str]] = set()      # (session, bot) — /start уже отправляли
+        self._req_count: dict[tuple[str, str], int] = {} # (session, bot) → счётчик /human запросов для warmup-ротации
         # (session, bot) → когда отметили как unresolvable. Через _UNRESOLVABLE_COOLDOWN
         # пробуем снова (сессия могла переподключиться, кеш Telegram мог обновиться).
         self._bot_unresolvable: dict[tuple[str, str], float] = {}
@@ -1230,6 +1232,22 @@ class OwnerLookup:
         if gap > 0:
             await asyncio.sleep(gap)
 
+        # WARMUP ротация: раз в N запросов подсовываем боту "невинную" команду до /human.
+        # Maker: "на /human бот не отвечает, а на /start/search тогда капча вылезает".
+        # Мы будим funstat одной из его публичных команд — он показывает меню / капчу,
+        # после чего следующий /human он уже обрабатывает нормально.
+        # Период: каждый 15-25-й запрос (рандом) — чтобы не создавать паттерна.
+        # Команды — только те что funstat реально принимает в приветствии. Если команда
+        # неверная, бот молча игнорирует — хуже не делаем.
+        _WARMUP_CMDS = ("/start", "/help", "/menu", "/search")
+        pair = (session, bot)
+        self._req_count[pair] = self._req_count.get(pair, 0) + 1
+        req_n = self._req_count[pair]
+        # первый запрос всегда делает /start-инициализацию ниже (старый код), а дальше
+        # с шагом ~20 запросов подмешиваем warmup
+        do_warmup = req_n > 1 and (req_n % random.randint(15, 25) == 0)
+        warmup_cmd = random.choice(_WARMUP_CMDS) if do_warmup else None
+
         async def _send(client):
             ent = await client.get_input_entity(bot)
             if (session, bot) not in self._started:
@@ -1238,6 +1256,12 @@ class OwnerLookup:
                     await client.send_message(ent, "/start")       # бот ещё ни разу не запускался
                     await asyncio.sleep(1.5)
                 self._started.add((session, bot))
+            elif warmup_cmd:
+                try:
+                    await client.send_message(ent, warmup_cmd)
+                    await asyncio.sleep(1.2)   # дать боту ответить (меню/капча), потом основной запрос
+                except Exception as e:
+                    log.debug("warmup %s on %s/%s failed: %s", warmup_cmd, session, bot, e)
             return await client.send_message(ent, cmd)
 
         unresolvable_since = self._bot_unresolvable.get((session, bot))
