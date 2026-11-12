@@ -184,15 +184,15 @@ class App:
         # идут через него. Основной BOT_TOKEN остаётся для админки/постинга лотов.
         if self.sub_bot is not None:
             self.subs.bot = self.sub_bot
+        # aiogram Router нельзя прикрепить к двум диспетчерам — для каждого бота
+        # build_sub_router() вызывается отдельно, роутеры шарят один `subs` (общее состояние).
         sub_router, sub_tail = build_sub_router(self, self.subs, is_manager)
         self.sub_welcome = sub_router.welcome
         self.subs.on_change = lambda: self.backup.save()
         self.backup.subs_export = self.subs.export
         self.backup.subs_import = self.subs.import_
         if self.sub_bot is not None:
-            # отдельный диспетчер для sub_bot: /start, выбор тарифа, pre_checkout_query,
-            # successful_payment приходят на sub_bot. Админ-команды подписки (/subs, /grant,
-            # /revoke) тоже живут в этом роутере — админ отдаёт их в sub_bot (siqveoabot).
+            # отдельный диспетчер для sub_bot; sub_router уже создан выше — вешаем на него.
             self.sub_dp = Dispatcher(storage=MemoryStorage())
             from bot.resilience import ResponsiveReplies as _RR
             _rr2 = _RR()
@@ -200,8 +200,14 @@ class App:
             self.sub_dp.callback_query.middleware(_rr2)
             self.sub_dp.include_router(sub_router)
             self.sub_dp.include_router(sub_tail)
+            # ВТОРОЙ набор роутеров подписки — для ОСНОВНОГО бота. Иначе юзер, пришедший на
+            # @TrackerGiftRobot, получает приветствие и кнопки, но хендлеры cb_menu/cb_buy
+            # живут только на sub_dp → клики на кнопки «проваливаются» в void.
+            sub_router2, sub_tail2 = build_sub_router(self, self.subs, is_manager)
+            self.dp.include_router(sub_router2)
             for r in build_routers(self):
                 self.dp.include_router(r)
+            self.dp.include_router(sub_tail2)     # последним: приветствие для не-админов
         else:
             self.dp.include_router(sub_router)
             for r in build_routers(self):
