@@ -180,10 +180,14 @@ class App:
         self._bad_since: dict[str, float] = {}
         self._started_at = time.time()
         self.subs = Subscriptions(self)
-        # Если задан отдельный sub_bot (SUB_BOT_TOKEN) — пользовательский UI и Stars-invoice
-        # идут через него. Основной BOT_TOKEN остаётся для админки/постинга лотов.
+        # subs.bot — для операций в канале (invite-link, kick). Это ВСЕГДА основной
+        # BOT_TOKEN: он админ в канале лотов, SUB_CHAT_ID по умолчанию = TARGET_CHAT_ID.
+        # Раньше тут было subs.bot = sub_bot — и create_chat_invite_link падал с
+        # 'chat not found / not admin', т.к. siqveoabot в канале не админ.
+        # subs.stars_bot — отдельный бот для Stars-invoice (чтоб оплата открывалась
+        # в @siqveoabot, если Maker так хочет).
         if self.sub_bot is not None:
-            self.subs.bot = self.sub_bot
+            self.subs.stars_bot = self.sub_bot
         # aiogram Router нельзя прикрепить к двум диспетчерам — для каждого бота
         # build_sub_router() вызывается отдельно, роутеры шарят один `subs` (общее состояние).
         sub_router, sub_tail = build_sub_router(self, self.subs, is_manager)

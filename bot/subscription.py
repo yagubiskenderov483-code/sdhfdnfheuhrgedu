@@ -124,7 +124,12 @@ def _fmt_left(until: float) -> str:
 class Subscriptions:
     def __init__(self, app: "App"):
         self.app = app
+        # self.bot — бот для операций в канале подписки (создание invite-ссылок, кик).
+        # Это ВСЕГДА основной BOT_TOKEN: он уже админ в канале лотов, SUB_CHAT_ID по умолчанию
+        # = TARGET_CHAT_ID, поэтому links работают. Sub-bot (siqveoabot) для Stars-invoice
+        # используется отдельно через self.stars_bot (см. main.py).
         self.bot = app.bot
+        self.stars_bot = app.bot            # перезаписывается на sub_bot в main.py если задан
         self.state: dict[str, Any] = {"users": {}, "invoices": {}, "links": {}, "seen_tx": []}
         self._lock = asyncio.Lock()
         self._loaded = False
@@ -621,8 +626,10 @@ class Subscriptions:
                         and now - inv["ts"] < INVOICE_TTL):
                     return inv["stars_url"]
             code = "STR" + secrets.token_hex(4).upper()
-        # создание ссылки — вне лока: HTTP-вызов Bot API может висеть, не держим подписки
-        url = await self.bot.create_invoice_link(
+        # создание ссылки — вне лока: HTTP-вызов Bot API может висеть, не держим подписки.
+        # Используем stars_bot (может быть sub_bot = @siqveoabot), чтобы Stars-платёж открывался
+        # в правильном боте, а pre_checkout/successful_payment приходили туда.
+        url = await self.stars_bot.create_invoice_link(
             title=f"NFT Tracker — {title}",
             description=f"Доступ к трекеру: тариф {title}",
             payload=code,
