@@ -1056,19 +1056,17 @@ class ListingPipeline:
                 await self.db.update_listing(l)
                 return
         if not found:
-            # RESCUE: когда lookup-бот честно не нашёл владельца, не режем лот —
-            # помечаем owner_not_found=True и шлём с пометкой "profile hidden".
-            # Порог rescue управляется OWNER_NOT_FOUND_MIN_STARS (default 0 = спасать все
-            # лоты, прошедшие PriceFilter). Поднять выше = жёстче (напр. /set
-            # OWNER_NOT_FOUND_MIN_STARS 1000 — только от 1000⭐).
-            # Полностью выключить rescue: /set OWNER_NOT_FOUND_MIN_STARS 999999.
-            rescue_floor = int(getattr(settings, "owner_not_found_min_stars", 0) or 0)
-            if l.stars_price is not None and l.stars_price >= rescue_floor:
+            # SOFT-FILTER RESCUE: селективное смягчение в зоне "дорогих" лотов.
+            # Логика Maker: 400-1000⭐ — строгие фильтры (там скам чаще), 1000+ — мягкие.
+            # Порог берём из SOFT_FILTER_STARS (той же настройки, что рулит рescue в
+            # SHORT_NAME_HIDDEN и NO_USERNAME ветках выше). Хочешь мягче — /set SOFT_FILTER_STARS 700.
+            soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
+            if soft and l.stars_price and l.stars_price >= soft:
                 l.owner_not_found = True
                 self.stats["owner_not_found_soft_rescued"] = \
                     self.stats.get("owner_not_found_soft_rescued", 0) + 1
                 llog("FILTER", f"#{l.listing_id} владелец не найден, но цена "
-                               f"{l.stars_price}⭐ ≥ OWNER_NOT_FOUND_MIN_STARS={rescue_floor} — шлём с пометкой")
+                               f"{l.stars_price}⭐ ≥ SOFT_FILTER_STARS={soft} — шлём с пометкой")
                 # НЕ return — проваливаемся дальше в lookup_check_onsale и обычный flow
             else:
                 # Без подтверждённого владельца с @username лот НЕ шлём (раньше при молчащем боте

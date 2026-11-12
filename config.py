@@ -218,7 +218,7 @@ class Settings:
     crypto_bot_api_token: str = ""
 
     # --- фильтр цены ---
-    min_stars: int = 5000
+    min_stars: int = 300                     # минимальная цена Stars для отправки лота (Maker: 300)
     collection_floor_mode: str = "skip"      # slow — дешёвые коллекции реже; skip — не отслеживать вовсе
     low_priority_poll_interval: float = 60.0 # страховочный обход дешёвых коллекций
     low_priority_hot_min: float = 10.0       # дешёвая коллекция опрашивается по изменению не чаще раза в N сек
@@ -249,7 +249,6 @@ class Settings:
     # пусть и без явного контакта с продавцом. 0 = выкл (старый жёсткий фильтр для всех).
     # Платные ЛС и «только Premium» — всё равно отсеиваем независимо от цены.
     soft_filter_stars: int = 1000             # Maker: 300-1000 — строго, всё остальное мягче
-    owner_not_found_min_stars: int = 0        # Порог rescue для owner_not_found: лоты с ценой >= этого значения всё равно шлются с пометкой "profile hidden" когда lookup-бот не нашёл владельца. 0 = спасать все, прошедшие PriceFilter. Отключить rescue целиком: поставить очень большое число (напр. 999999).
                                               # (RUSSIAN_ONLY к ним неприменим — профиля просто нет)
     lookup_bot_username: str = ""             # @username бота ручного поиска (напр. "funstat") —
                                               # для лотов со скрытым владельцем в пост добавится
@@ -440,7 +439,6 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "PHONE_MISMATCH_BLOCKS": ("phone_mismatch_blocks", _bool_strict),
     "ALLOW_HIDDEN_OWNER": ("allow_hidden_owner", _bool_strict),
     "SOFT_FILTER_STARS": ("soft_filter_stars", lambda v: max(0, int(v))),
-    "OWNER_NOT_FOUND_MIN_STARS": ("owner_not_found_min_stars", lambda v: max(0, int(v))),
     "LOOKUP_BOT_USERNAME": ("lookup_bot_username", _lookup_bot_username),
     "LOOKUP_BOTS": ("lookup_bots", _bot_list),
     "LOOKUP_CMD_TEMPLATE": ("lookup_cmd_template",
@@ -512,7 +510,7 @@ def _from_env() -> Settings:
         sub_chat_id=_int(e("SUB_CHAT_ID"), 0),
         sub_ton_address=(e("SUB_TON_ADDRESS") or "").strip(),
         toncenter_api_key=(e("TONCENTER_API_KEY") or "").strip(),
-        min_stars=_int(e("MIN_STARS"), 5000),
+        min_stars=_int(e("MIN_STARS"), 300),
         collection_min_floor=max(0, _int(e("COLLECTION_MIN_FLOOR"), 4500)),
         collection_floor_mode=(e("COLLECTION_FLOOR_MODE") or "skip").strip().lower(),
         low_priority_poll_interval=max(5.0, _float(e("LOW_PRIORITY_POLL_INTERVAL"), 60.0)),
@@ -535,7 +533,6 @@ def _from_env() -> Settings:
         phone_mismatch_blocks=_bool(e("PHONE_MISMATCH_BLOCKS"), True),
         allow_hidden_owner=_bool(e("ALLOW_HIDDEN_OWNER"), False),
         soft_filter_stars=max(0, _int(e("SOFT_FILTER_STARS"), 1000)),
-        owner_not_found_min_stars=max(0, _int(e("OWNER_NOT_FOUND_MIN_STARS"), 0)),
         lookup_bot_username=_lookup_bot_username(e("LOOKUP_BOT_USERNAME")),
         lookup_bots=_bot_list(e("LOOKUP_BOTS")),
         lookup_cmd_template=((e("LOOKUP_CMD_TEMPLATE") or "/human {name}").strip() or "/human {name}"),
