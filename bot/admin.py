@@ -319,6 +319,7 @@ SETTING_DESC: dict[str, str] = {
     "SYNC_MODE": "fast — коллекция начинает слать лоты сразу (база = верхние 100 лотов) | full — сперва читает ВСЕ лоты (медленно)",
     "ROUTE_BY": "в какую тему класть лот: floor (по флору коллекции = цене гифта) | price (по цене лота)",
     "MAX_ABOVE_FLOOR": "не слать лоты дороже флора коллекции больше чем на N% (0 = не проверять)",
+    "SPAM_PRICES": "цены в Stars, которые считаются спамом и отсеиваются сразу (список через запятую, напр. '300,1000'; пусто = выкл)",
     "ALLOW_TON_ONLY": "слать лоты, которые продаются только за TON (true/false)",
     "RUSSIAN_ONLY": "только русские продавцы (true/false)",
     "UNKNOWN_SELLER_POLICY": "продавец без явных данных: block (отсеять) | allow (пропускать)",
@@ -372,7 +373,7 @@ SETTING_DESC: dict[str, str] = {
     "BACKDROP_ROUTES": "каналы/темы по фону: Название:ID или ID/тема (напр. Black:-100X/67); в приоритете над ценой",
 }
 SETTING_GROUPS: list[tuple[str, list[str]]] = [
-    ("Фильтр цены", ["COLLECTION_MIN_FLOOR", "MAX_ABOVE_FLOOR", "MIN_STARS", "MIN_TON", "ALLOW_TON_ONLY"]),
+    ("Фильтр цены", ["COLLECTION_MIN_FLOOR", "MAX_ABOVE_FLOOR", "MIN_STARS", "MIN_TON", "ALLOW_TON_ONLY", "SPAM_PRICES"]),
     ("Фильтр продавца", ["REQUIRE_USERNAME", "RUSSIAN_ONLY", "UNKNOWN_SELLER_POLICY", "ALLOW_HIDDEN_OWNER",
                             "REQUIRE_FREE_MESSAGES", "MAX_SELLER_LEVEL", "MAX_SELLER_NFTS", "SELLER_PHONE_PREFIXES"]),
     ("Без повторов", ["UNIQUE_GIFTS", "UNIQUE_SELLERS", "MAX_SAME_COLLECTION_STREAK",
@@ -420,7 +421,13 @@ async def _edit_or_send(q: CallbackQuery, text: str) -> None:
 def _filters_help() -> str:
     lines = ["<b>Настройки трекера</b>",
              "Изменить: <code>/set КЛЮЧ ЗНАЧЕНИЕ</code>  (напр. <code>/set MAX_SELLER_LEVEL 10</code>)",
-             "Сохраняется и переживает деплой.", ""]
+             "Сохраняется и переживает деплой.",
+             "",
+             "<b>Быстрые команды для lookup-ботов:</b>",
+             "  <code>/set bot funstat</code> — задать основной бот поиска",
+             "  <code>/set bots infostat,findtg</code> — <b>добавить</b> в запасные (можно вызывать подряд, список растёт)",
+             "  <code>/set bots clear</code> — очистить список запасных",
+             ""]
     for title, keys in SETTING_GROUPS:
         lines.append(f"<b>{title}</b>")
         for k in keys:
@@ -3516,6 +3523,101 @@ def build_routers(app: "App") -> list[Router]:
         if len(parts) != 2:
             await _answer_long(m, _filters_help())   # /set без аргументов — весь список
             return
+
+        # ---- shortcut: /set bot <username> → primary lookup-бот (= LOOKUP_BOT_USERNAME)
+        # ---- shortcut: /set bots <u1[,u2,...]> → APPEND к LOOKUP_BOTS (не перезапись!)
+        #                можно вызывать сколько угодно раз подряд, список растёт.
+        #                /set bots clear → очистить список запасных.
+        _key_lc = parts[0].strip().lower()
+        if _key_lc == "bot":
+            new_bot = parts[1].strip().lstrip("@").strip()
+            try:
+                applied = set_runtime_value("LOOKUP_BOT_USERNAME", new_bot)
+            except Exception as e:
+                await m.answer(f"Не удалось установить: {html.escape(str(e))}")
+                return
+            if not applied:
+                await m.answer(f"Невалидный username <code>{html.escape(new_bot)}</code>.\n\n"
+                               "Нужно: 5-32 символа, [A-Za-z0-9_], начинается с буквы.")
+                return
+            if hasattr(app.lookup, "_clear_bot_unresolved"):
+                app.lookup._clear_bot_unresolved(new_bot)
+            await app.backup.save()
+            await m.answer(f"Основной бот поиска → @{html.escape(new_bot)}")
+            return
+
+        if _key_lc == "bots":
+            raw = parts[1].strip()
+            if raw.lower() in {"clear", "reset", "none", "-"}:
+                try:
+                    set_runtime_value("LOOKUP_BOTS", "")
+                except Exception as e:
+                    await m.answer(f"Не удалось очистить: {html.escape(str(e))}")
+                    return
+                await app.backup.save()
+                await m.answer("Список запасных ботов очищен.")
+                return
+
+            # append, не replace: берём текущий список и добавляем новые
+            existing = list(getattr(settings, "lookup_bots", None) or [])
+            existing_lc = {b.lower() for b in existing}
+            primary_lc = (getattr(settings, "lookup_bot_username", "") or "").strip().lower()
+
+            import re as _re
+            _TG_RE = _re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
+            added: list[str] = []
+            skipped_dup: list[str] = []
+            skipped_primary: list[str] = []
+            skipped_invalid: list[str] = []
+            for item in raw.replace(";", ",").split(","):
+                name = item.strip().lstrip("@").strip()
+                if not name:
+                    continue
+                if not _TG_RE.match(name):
+                    skipped_invalid.append(name)
+                    continue
+                if name.lower() == primary_lc:
+                    skipped_primary.append(name)
+                    continue
+                if name.lower() in existing_lc:
+                    skipped_dup.append(name)
+                    continue
+                existing.append(name)
+                existing_lc.add(name.lower())
+                added.append(name)
+
+            if not added and not skipped_dup and not skipped_primary and not skipped_invalid:
+                await m.answer("Пусто. Использование: <code>/set bots infostat,findtg</code>")
+                return
+
+            if added:
+                try:
+                    set_runtime_value("LOOKUP_BOTS", ",".join(existing))
+                except Exception as e:
+                    await m.answer(f"Не удалось сохранить: {html.escape(str(e))}")
+                    return
+                await app.backup.save()
+
+            lines = []
+            if added:
+                lines.append("Добавлены: " + ", ".join(f"@{html.escape(b)}" for b in added))
+            if skipped_dup:
+                lines.append("Уже были: " + ", ".join(f"@{html.escape(b)}" for b in skipped_dup))
+            if skipped_primary:
+                lines.append("Это primary (пропущено): " + ", ".join(f"@{html.escape(b)}" for b in skipped_primary))
+            if skipped_invalid:
+                lines.append("Невалидные (пропущено): " + ", ".join(html.escape(b) for b in skipped_invalid))
+
+            pool = [getattr(settings, "lookup_bot_username", "") or ""] + list(existing)
+            pool = [b for b in pool if b]
+            lines.append("")
+            lines.append("Пул lookup-ботов:")
+            lines += [f"  {i+1}. @{html.escape(b)}" + (" (primary)" if i == 0 else "")
+                      for i, b in enumerate(pool)]
+            await m.answer("\n".join(lines))
+            return
+        # ---- конец shortcut-блока ----
+
         try:
             value = set_runtime_value(parts[0], parts[1])
         except KeyError:
