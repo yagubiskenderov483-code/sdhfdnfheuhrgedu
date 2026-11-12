@@ -55,10 +55,14 @@ EMOJI_DIAMOND = "6032742198179532882"     # — для 'Подписка', 'Та
 EMOJI_STAR    = "6028338546736107668"     # — цена в Stars
 EMOJI_TON     = "5377620962390857342"     # цена в TON
 EMOJI_GIFT    = "6032644646587338669"     # — '30 минут бесплатно'
+EMOJI_PAID    = "6039486778597970865"     # — 'Оплата получена, ожидайте.'
 
 
 def _tg_emoji(eid: str, fallback: str) -> str:
     return f'<tg-emoji emoji-id="{eid}">{fallback}</tg-emoji>'
+
+
+PAID_WAIT_TEXT = f'{_tg_emoji(EMOJI_PAID, "⏳")} Оплата получена, ожидайте.'
 FOREVER = -1.0
 # код тарифа → (название, цена TON, длительность в секундах или FOREVER, цена в Stars или None)
 # Stars=None → тариф не оплачивается звёздами (например, «навсегда» — только TON).
@@ -366,18 +370,8 @@ class Subscriptions:
             if inv is not None:
                 inv["granted"] = True
             await self.save(backup=True)
-        if u["pending"] == FOREVER or u.get("until") == FOREVER:
-            dur = "навсегда"
-        else:
-            # при входе ожидающее время добавляется к ещё не истёкшему — показываем итог
-            dur = _fmt_left(time.time() + float(u["pending"] or 0)
-                            + max(0.0, float(u.get("until") or 0) - time.time()))
-        starts = ("время пойдёт с момента входа" if u["pending"] and float(u.get("until") or 0) <= time.time()
-                  else "время уже идёт")
         return (f"{reason}\n\n"
-                f"Ваша одноразовая ссылка для входа:\n{link.invite_link}\n\n"
-                f"Доступ: <b>{dur}</b>, {starts}.\n"
-                "Ссылка работает один раз и удаляется сразу после входа.")
+                f"Ваша одноразовая ссылка для входа:\n{link.invite_link}")
 
     async def _revoke_links(self, uid: int) -> None:
         for link in [l for l, r in self.state["links"].items() if int(r.get("uid", 0)) == uid]:
@@ -1032,31 +1026,58 @@ class Subscriptions:
         return len(paid)
 
     async def _deliver(self, inv: dict) -> bool:
-        """Выдать доступ по оплаченному счёту. Если не вышло — повторим в фоне (оплата не теряется)."""
+        """Выдать доступ по оплаченному счёту. Если не вышло — повторим в фоне (оплата не теряется).
+        Поток Maker'а:
+          1) DM «Оплата получена, ожидайте» — сразу после фиксации платежа.
+          2) grant() → ссылка на вход.
+          3) DM с текстом «тариф Xч. … ссылка …».
+          4) Реакция 🎉 на это сообщение (одна эмодзи-реакция от имени бота)."""
         pinfo = plan_info(inv["plan"])
         if pinfo is None:
             log.warning("Unknown plan %r on invoice %s; cannot deliver", inv.get("plan"),
                         inv.get("code") or inv.get("uid"))
             return False
         title, price, secs, _stars = pinfo
-        kind = inv.get("kind") or "ton"
-        if kind == "stars":
-            amount = inv.get("stars") or 0
-            reason = f"Оплата {amount} Stars пришла, тариф {title}."
-        else:
-            reason = f"Оплата {price:g} TON пришла, тариф {title}."
+        uid = int(inv["uid"])
+        # Maker: короткая строка — только «тариф 6ч.», без 'Оплата 2.2 TON пришла, '.
+        reason = f"тариф {title}."
+        # 1) «Оплата получена, ожидайте.» — pre-notice (пока создаём invite-link)
+        if not inv.get("notice_sent"):
+            try:
+                await self._dm_user(uid, PAID_WAIT_TEXT)
+                inv["notice_sent"] = True
+            except Exception as e:
+                log.info("pre-notice 'оплата получена' failed for %s: %s", uid, e)
         inv["granted"] = "inflight"
         try:
-            text = await self.grant(int(inv["uid"]), secs, reason, inv=inv)
+            text = await self.grant(uid, secs, reason, inv=inv)
         except Exception as e:
             inv["granted"] = False          # повторит _retry_undelivered
             await self.save()
-            log.error("Grant after payment failed for %s: %s (will retry)", inv["uid"], e)
+            log.error("Grant after payment failed for %s: %s (will retry)", uid, e)
             return False
-        # DM с ссылкой — пробуем ОБА бота (юзер мог /start-овать любой из них).
-        if not await self._dm_user(int(inv["uid"]), text):
-            log.warning("DM with invite link NOT delivered to %s (ни один бот не достучался)",
-                        inv.get("uid"))
+        # 2+3) DM с ссылкой — пробуем ОБА бота. Получаем (bot, Message) — нужен message_id
+        # для реакции.
+        sent_bot, sent_msg = None, None
+        for bot in self._user_bots():
+            try:
+                sent_msg = await bot.send_message(uid, text)
+                sent_bot = bot
+                break
+            except Exception as e:
+                log.info("DM via bot failed: %s", e)
+                continue
+        if sent_msg is None:
+            log.warning("DM with invite link NOT delivered to %s (ни один бот не достучался)", uid)
+            return True
+        # 4) реакция 🎉 на наше же сообщение (Bot API: setMessageReaction)
+        try:
+            from aiogram.types import ReactionTypeEmoji
+            await sent_bot.set_message_reaction(
+                chat_id=uid, message_id=sent_msg.message_id,
+                reaction=[ReactionTypeEmoji(emoji="🎉")], is_big=True)
+        except Exception as e:
+            log.info("reaction 🎉 skipped for %s: %s", uid, e)
         return True
 
     async def _retry_undelivered(self) -> None:
