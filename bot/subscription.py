@@ -44,7 +44,7 @@ WELCOME = ("<b>Добро Пожаловать в лучший Telegram Tracker 
 
 CLOSED_TEXT = "🔒 Парсер закрыт"
 
-TRIAL_SECONDS = 60 * 60
+TRIAL_SECONDS = 30 * 60          # Maker: пробный час → 30 минут
 REMIND_BEFORE = 60 * 60          # напомнить о продлении за час до конца
 FOREVER = -1.0
 # код тарифа → (название, цена TON, длительность в секундах или FOREVER, цена в Stars или None)
@@ -55,6 +55,17 @@ PLANS: dict[str, tuple[str, float, float, int | None]] = {
     "24h":     ("24ч",      4.0, 24 * 3600,  450),
     "forever": ("Навсегда", 10.0, FOREVER,   None),
 }
+# Старые тарифы (не показываются в меню). Нужны только чтобы _deliver / check_payments
+# не падали при оплате незакрытого счёта, выставленного до смены тарифов.
+_LEGACY_PLANS: dict[str, tuple[str, float, float, int | None]] = {
+    "48h":  ("48ч", 4.9, 48 * 3600, None),
+    "72h":  ("72ч", 8.0, 72 * 3600, None),
+}
+
+
+def plan_info(code: str) -> tuple[str, float, float, int | None] | None:
+    """PLANS + старые коды (для доставки оплат по счёту, выставленному до смены тарифов)."""
+    return PLANS.get(code) or _LEGACY_PLANS.get(code)
 INVOICE_TTL = 60 * 60           # счёт ждёт оплату 1 час
 LINK_TTL = 24 * 3600            # ссылка на вход действует сутки
 KV_KEY = "subs_state"
@@ -212,7 +223,7 @@ class Subscriptions:
     def plans_kb(self, uid: int) -> InlineKeyboardMarkup:
         rows = []
         if not self.user(uid).get("trial"):
-            rows.append([InlineKeyboardButton(text="🎁 Пробный час бесплатно", callback_data="sub:trial")])
+            rows.append([InlineKeyboardButton(text="🎁 30 минут бесплатно", callback_data="sub:trial")])
         for code, (title, price, _, stars) in PLANS.items():
             label = f"{title} · {price:g} TON" + (f" / {stars}⭐" if stars else "")
             rows.append([InlineKeyboardButton(text=label, callback_data=f"sub:buy:{code}")])
@@ -585,6 +596,10 @@ class Subscriptions:
             currency="XTR",
             prices=[LabeledPrice(label=title, amount=int(stars))],
         )
+        # Bot API иногда отдаёт URL без схемы — inline-кнопка на 't.me/$…' не работает,
+        # нужно 'https://t.me/$…'
+        if url and not url.startswith(("http://", "https://")):
+            url = "https://" + url.lstrip("/")
         async with self._lock:
             self.state["invoices"][code] = {
                 "uid": uid, "plan": plan, "kind": "stars", "stars": int(stars),
@@ -620,7 +635,8 @@ class Subscriptions:
             await self.save(backup=True)
         await self.flush_backup()
         await self._deliver(inv)
-        title, _price, _secs, stars = PLANS[inv["plan"]]
+        pinfo = plan_info(inv["plan"]) or ("?", 0.0, 0.0, None)
+        title = pinfo[0]
         for admin in settings.admin_ids:
             try:
                 await self.bot.send_message(
@@ -739,7 +755,8 @@ class Subscriptions:
                 except Exception:
                     pass
         for inv in paid:
-            title, price, secs, _stars = PLANS[inv["plan"]]
+            pinfo = plan_info(inv["plan"]) or ("?", 0.0, 0.0, None)
+            title, price, secs, _stars = pinfo
             log.info("Payment received: %s TON from user %s (%s)", price, inv["uid"], inv["plan"])
             ok = await self._deliver(inv)
             for admin in settings.admin_ids:
@@ -754,7 +771,12 @@ class Subscriptions:
 
     async def _deliver(self, inv: dict) -> bool:
         """Выдать доступ по оплаченному счёту. Если не вышло — повторим в фоне (оплата не теряется)."""
-        title, price, secs, _stars = PLANS[inv["plan"]]
+        pinfo = plan_info(inv["plan"])
+        if pinfo is None:
+            log.warning("Unknown plan %r on invoice %s; cannot deliver", inv.get("plan"),
+                        inv.get("code") or inv.get("uid"))
+            return False
+        title, price, secs, _stars = pinfo
         kind = inv.get("kind") or "ton"
         if kind == "stars":
             amount = inv.get("stars") or 0
@@ -1027,7 +1049,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         subs.user(uid)["trial"] = True
         subs._remember_who(subs.user(uid), q.from_user)
         try:
-            text = await subs.grant(uid, TRIAL_SECONDS, "Пробный час активирован.")
+            text = await subs.grant(uid, TRIAL_SECONDS, "Пробные 30 минут активированы.")
         except Exception as e:
             subs.user(uid)["trial"] = False
             log.error("Trial link failed for %s: %s", uid, e)
@@ -1055,46 +1077,30 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             return
         title, price, _secs, stars = PLANS[plan]
         if not stars and not settings.sub_ton_address:
-            # ни Stars, ни TON — платить вообще нечем
             await q.answer("Оплата временно недоступна", show_alert=True)
             return
         subs._remember_who(subs.user(q.from_user.id), q.from_user)
+        # Шаг 1: выбор валюты. Карточку оплаты (URL) рисуем ТОЛЬКО когда способ уже выбран.
         rows: list[list[InlineKeyboardButton]] = []
-        # 1) Stars — через встроенный invoice Telegram. Самый быстрый путь (без крипты).
         if stars:
-            rows.append([InlineKeyboardButton(text=f"⭐ Оплатить {stars} Stars",
-                                              callback_data=f"sub:stars:{plan}")])
-        # 2) TON через Tonkeeper (нативный deep-link)
+            rows.append([InlineKeyboardButton(text=f"⭐ Stars ({stars}⭐)",
+                                              callback_data=f"sub:pay:{plan}:stars")])
         if settings.sub_ton_address:
-            code = await subs.new_invoice(q.from_user.id, plan)
-            rows.append([InlineKeyboardButton(text=f"💎 Оплатить {price:g} TON (Tonkeeper)",
-                                              url=subs.invoice_url(code))])
-            rows.append([InlineKeyboardButton(text="🔄 Проверить оплату",
-                                              callback_data=f"sub:check:{code}")])
-            manual_note = (f"\nИли вручную:\nАдрес: <code>{settings.sub_ton_address}</code>\n"
-                           f"Сумма: <code>{price:g}</code> TON\n"
-                           f"Комментарий: <code>{code}</code> (обязательно!)")
-        else:
-            manual_note = ""
-        # 3) @Wallet (Crypto Bot) — после оплаты пришлите скриншот админу (webhook от @send к нам нет)
-        rows.append([InlineKeyboardButton(text="👛 Оплатить в @Wallet", url=WALLET_INVOICE_URL)])
+            rows.append([InlineKeyboardButton(text=f"💎 Tonkeeper ({price:g} TON)",
+                                              callback_data=f"sub:pay:{plan}:ton")])
+        rows.append([InlineKeyboardButton(text=f"👛 @Wallet ({price:g} TON)",
+                                          callback_data=f"sub:pay:{plan}:wallet")])
         rows.append([InlineKeyboardButton(text="« Назад", callback_data="sub:menu")])
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
         txt = (f"💎 <b>Тариф {title}</b>\n"
                f"Цена: <b>{price:g} TON</b>" + (f" или <b>{stars}⭐</b>" if stars else "") + "\n\n"
-               "Выберите способ оплаты:\n"
-               + ("• ⭐ <b>Stars</b> — оплата через Telegram в пару касаний (мгновенно).\n" if stars else "")
-               + "• 💎 <b>Tonkeeper</b> — классическая оплата TON, сумма и комментарий подставятся сами.\n"
-               "• 👛 <b>@Wallet</b> — оплата TON через встроенный кошелёк Telegram.\n\n"
-               "После оплаты Stars или через Tonkeeper ссылка на вход придёт сама. "
-               "Для @Wallet пришлите скриншот оплаты админу — выдадут вручную."
-               + manual_note)
+               "Выберите способ оплаты:")
         await _safe_edit(q.message, txt, reply_markup=kb)
         await q.answer()
 
-    @r.callback_query(F.data.startswith("sub:stars:"))
-    async def cb_stars(q: CallbackQuery) -> None:
-        """⭐ Создать stars-invoice и прислать ссылку-кнопку в чат."""
+    @r.callback_query(F.data.startswith("sub:pay:"))
+    async def cb_pay(q: CallbackQuery) -> None:
+        """Шаг 2: карточка выбранного способа оплаты со ссылкой."""
         if not subs.ready.is_set():
             await q.answer("⏳ Бот перезапускается, попробуйте через минуту", show_alert=True)
             return
@@ -1102,31 +1108,78 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             await q.answer(CLOSED_TEXT, show_alert=True)
             return
         await subs.load()
-        plan = q.data.split(":", 2)[2]
+        parts = q.data.split(":")
+        if len(parts) != 4:
+            await q.answer("Ошибка")
+            return
+        _, _, plan, method = parts
         if plan not in PLANS:
             await q.answer("Тариф не найден", show_alert=True)
             return
-        title, _price, _secs, stars = PLANS[plan]
-        if not stars:
-            await q.answer("Этот тариф доступен только в TON", show_alert=True)
-            return
+        title, price, _secs, stars = PLANS[plan]
         subs._remember_who(subs.user(q.from_user.id), q.from_user)
-        try:
-            url = await subs.new_stars_invoice(q.from_user.id, plan)
-        except Exception as e:
-            log.error("Create stars invoice failed for %s: %s", q.from_user.id, e)
-            await q.answer("Не удалось создать счёт в Stars, попробуйте позже", show_alert=True)
+        back_row = [InlineKeyboardButton(text="« Другой способ", callback_data=f"sub:buy:{plan}")]
+
+        if method == "stars":
+            if not stars:
+                await q.answer("Этот тариф Stars не оплачивается", show_alert=True)
+                return
+            try:
+                url = await subs.new_stars_invoice(q.from_user.id, plan)
+            except Exception as e:
+                log.error("Create stars invoice failed for %s: %s", q.from_user.id, e)
+                await q.answer("Не удалось создать счёт в Stars, попробуйте позже", show_alert=True)
+                return
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"⭐ Оплатить {stars} Stars", url=url)],
+                back_row,
+            ])
+            await _safe_edit(q.message,
+                f"⭐ <b>Тариф {title} — {stars}⭐</b>\n\n"
+                "Нажмите кнопку ниже и подтвердите оплату в Telegram. "
+                "Как только Telegram подтвердит, ссылка на вход придёт сама.",
+                reply_markup=kb)
+            await q.answer()
             return
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"⭐ Оплатить {stars} Stars", url=url)],
-            [InlineKeyboardButton(text="« Назад", callback_data=f"sub:buy:{plan}")],
-        ])
-        await _safe_edit(q.message,
-            f"⭐ <b>Тариф {title} — {stars}⭐</b>\n\n"
-            "Нажмите кнопку ниже и подтвердите оплату в Telegram. "
-            "Как только Telegram подтвердит, ссылка на вход придёт сама.",
-            reply_markup=kb)
-        await q.answer()
+
+        if method == "ton":
+            if not settings.sub_ton_address:
+                await q.answer("TON-оплата временно недоступна", show_alert=True)
+                return
+            code = await subs.new_invoice(q.from_user.id, plan)
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"💎 Оплатить {price:g} TON (Tonkeeper)",
+                                      url=subs.invoice_url(code))],
+                [InlineKeyboardButton(text="🔄 Проверить оплату",
+                                      callback_data=f"sub:check:{code}")],
+                back_row,
+            ])
+            await _safe_edit(q.message,
+                f"💎 <b>Тариф {title} — {price:g} TON (Tonkeeper)</b>\n\n"
+                "Нажмите «Оплатить в Tonkeeper», сумма и комментарий подставятся сами.\n\n"
+                f"Или вручную:\nАдрес: <code>{settings.sub_ton_address}</code>\n"
+                f"Сумма: <code>{price:g}</code> TON\n"
+                f"Комментарий: <code>{code}</code> (обязательно!)\n\n"
+                "Как только оплата придёт, бот сам пришлёт ссылку для входа.",
+                reply_markup=kb)
+            await q.answer()
+            return
+
+        if method == "wallet":
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text=f"👛 Оплатить {price:g} TON в @Wallet",
+                                      url=WALLET_INVOICE_URL)],
+                back_row,
+            ])
+            await _safe_edit(q.message,
+                f"👛 <b>Тариф {title} — {price:g} TON (@Wallet)</b>\n\n"
+                "Нажмите кнопку — откроется встроенный кошелёк Telegram.\n"
+                "Отправьте точную сумму и пришлите скриншот оплаты админу — "
+                "выдадут доступ вручную (у @Wallet нет вебхука к нам).",
+                reply_markup=kb)
+            await q.answer()
+            return
+        await q.answer("Неизвестный способ оплаты")
 
     @r.pre_checkout_query()
     async def pre_checkout(q: PreCheckoutQuery) -> None:

@@ -489,6 +489,22 @@ class Database:
         )
         return [dict(r) for r in await cur.fetchall()]
 
+    async def recent_sent_by_seller(self, ident: str, limit: int = 5) -> list[dict[str, Any]]:
+        """Найти последние отправленные лоты продавца. ident — @username (с @ или без)
+        или числовой seller_id. Для @юз — поиск по lower(seller_username); для числа — по seller_id."""
+        assert self.conn
+        ident = ident.strip().lstrip("@")
+        if ident.isdigit():
+            sql = ("SELECT * FROM listings WHERE sent=1 AND message_id IS NOT NULL AND seller_id=? "
+                   "ORDER BY sent_at DESC LIMIT ?")
+            params: tuple = (int(ident), limit)
+        else:
+            sql = ("SELECT * FROM listings WHERE sent=1 AND message_id IS NOT NULL "
+                   "AND lower(seller_username)=? ORDER BY sent_at DESC LIMIT ?")
+            params = (ident.lower(), limit)
+        cur = await self.conn.execute(sql, params)
+        return [dict(r) for r in await cur.fetchall()]
+
     async def mark_purged(self, listing_ids: Iterable[str]) -> None:
         """После удаления сообщений: обнуляем message_id, чтобы не пытаться удалить повторно."""
         assert self.conn

@@ -1913,6 +1913,52 @@ def build_routers(app: "App") -> list[Router]:
                        "Если они всё ещё не отвечают — slow-mark поставится снова после "
                        "≥3 подряд unresolvable-фейлов с разных сессий.")
 
+    # ---------------------------------------------------------------- offer
+    @admin.message(F.text.regexp(r"^/?(?P<ident>@?[A-Za-z0-9_]+|\d+)\s+оффер\s*$"))
+    async def cmd_mark_offer(m: Message) -> None:
+        """Админ: /<юз или id> оффер — у последнего отправленного лота этого продавца
+        кнопка «Написать без оффера» заменяется на «С оффером» (с заполненным трейд-оффером).
+        Пример: '7373733737 оффер' или '/@seller оффер'."""
+        from bot.formatter import listing_keyboard
+        from tracker.queue import listing_from_row
+        parts = (m.text or "").split(maxsplit=1)
+        ident = parts[0].lstrip("/").lstrip("@")
+        try:
+            rows = await app.db.recent_sent_by_seller(ident, limit=5)
+        except Exception as e:
+            await m.answer(f"❌ Поиск по БД упал: {html.escape(str(e))}")
+            return
+        if not rows:
+            await m.answer(f"ℹ️ Нет отправленных лотов продавца <code>{html.escape(ident)}</code>.")
+            return
+        row = rows[0]
+        chat = row.get("target_chat_id")
+        thread = row.get("target_thread_id")
+        mid = row.get("message_id")
+        if not chat or not mid:
+            # старая запись до v7 — вычислим маршрут из цены и фона
+            chat, thread = settings.route_chat(row.get("stars_price"), row.get("backdrop"))
+        if not chat or not mid:
+            await m.answer("ℹ️ У лота не сохранён chat_id — слишком старая запись, не могу отредактировать.")
+            return
+        try:
+            l = listing_from_row(row)
+        except Exception as e:
+            await m.answer(f"❌ Не смог собрать карточку лота: {html.escape(str(e))}")
+            return
+        kb = listing_keyboard(l, with_offer=True)
+        try:
+            await app.bot.edit_message_reply_markup(chat_id=chat, message_id=mid, reply_markup=kb)
+        except Exception as e:
+            s = str(e).lower()
+            if "not modified" in s:
+                await m.answer(f"ℹ️ У лота уже кнопка «С оффером».")
+                return
+            await m.answer(f"❌ Не смог отредактировать сообщение: {html.escape(str(e))}")
+            return
+        await m.answer(f"✅ Кнопка лота <b>{html.escape(l.gift_name or '?')} #{l.gift_num or ''}</b> "
+                       f"сменена на «С оффером».")
+
     # ---------------------------------------------------------------- purge
     @admin.message(Command("purge_all"))
     async def cmd_purge_all(m: Message) -> None:

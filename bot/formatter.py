@@ -95,20 +95,20 @@ def _trade_offer(l: Listing) -> tuple[int, str] | None:
     return None
 
 
-def listing_keyboard(l: Listing, with_seller: bool = True) -> InlineKeyboardMarkup:
-    """Кнопки: [Занять] / [Лот] [Написать].
-    «Написать» открывает ЛС продавца. Если задан TRADE_BOT_USERNAME, в поле ввода уже стоит оффер
-    «@<бот> <ссылка на NFT> <сниженная_цена>» — остаётся нажать «Отправить» (inline-оффер прямо в ЛС).
-    Без @username продавца ЛС с текстом не открыть — тогда профиль по ID, иначе торговый бот."""
+def listing_keyboard(l: Listing, with_seller: bool = True, with_offer: bool = False) -> InlineKeyboardMarkup:
+    """Кнопки: [Занять] / [Лот] [Написать без оффера | С оффером].
+    По умолчанию — «Написать без оффера»: открывает ЛС продавца пустой, человек пишет сам.
+    Если админ командой '/<юз_или_id> оффер' подтвердил лот — бот редактирует клавиатуру,
+    кнопка становится «С оффером» и в поле ввода уже стоит оффер
+    «@<бот> <ссылка на NFT> <сниженная_цена>» — остаётся нажать «Отправить»."""
     rows = [[InlineKeyboardButton(text="Занять", callback_data=f"take:{l.gift_unique_id}"[:64])]]
     second = []
     if l.gift_link:
         second.append(InlineKeyboardButton(text="Лот", url=l.gift_link))
     trade_bot = (getattr(settings, "trade_bot_username", "") or "").lstrip("@")
-    offer = _trade_offer(l) if trade_bot else None
+    offer = _trade_offer(l) if (trade_bot and with_offer) else None
     offer_text = None
-    if trade_bot and l.gift_link:
-        # ссылка на NFT в оффере всегда, даже если цену не удалось взять
+    if with_offer and trade_bot and l.gift_link:
         tail = f" {offer[0]} {offer[1]}".rstrip() if offer else ""
         offer_text = f"@{trade_bot} {l.gift_link}{tail}"
     url = None
@@ -121,7 +121,8 @@ def listing_keyboard(l: Listing, with_seller: bool = True) -> InlineKeyboardMark
     elif offer_text:
         url = f"https://t.me/{trade_bot}?text={quote(offer_text, safe='/')}"
     if url:
-        second.append(InlineKeyboardButton(text="Написать", url=url))
+        btn_text = "С оффером" if with_offer else "Написать без оффера"
+        second.append(InlineKeyboardButton(text=btn_text, url=url))
     if second:
         rows.append(second)
     return InlineKeyboardMarkup(inline_keyboard=rows)

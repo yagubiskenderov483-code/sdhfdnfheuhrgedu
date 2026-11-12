@@ -138,6 +138,15 @@ class App:
         self.sessions = SessionManager(self.storage)
         self.bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode="HTML"))
         self.bot.session.middleware(_html_fallback)   # битая HTML-разметка → отправить текстом, а не молчать
+        # Отдельный бот для пользовательского интерфейса подписки + Stars (Maker: оплата
+        # Stars должна идти в siqveoabot, а не в основной админ-бот). Если SUB_BOT_TOKEN
+        # не задан — подписка идёт через основной BOT_TOKEN как раньше.
+        self.sub_bot: Bot | None = None
+        self.sub_dp: Dispatcher | None = None
+        if settings.sub_bot_token and settings.sub_bot_token != settings.bot_token:
+            self.sub_bot = Bot(settings.sub_bot_token,
+                               default=DefaultBotProperties(parse_mode="HTML"))
+            self.sub_bot.session.middleware(_html_fallback)
         self.sender = TelegramSender(self.bot)
         self.backup = SessionBackup(self.bot, self.storage, all_admins, save_admins,
                                     history_export=lambda: self.db.export_sent_history(),
@@ -171,15 +180,33 @@ class App:
         self._bad_since: dict[str, float] = {}
         self._started_at = time.time()
         self.subs = Subscriptions(self)
+        # Если задан отдельный sub_bot (SUB_BOT_TOKEN) — пользовательский UI и Stars-invoice
+        # идут через него. Основной BOT_TOKEN остаётся для админки/постинга лотов.
+        if self.sub_bot is not None:
+            self.subs.bot = self.sub_bot
         sub_router, sub_tail = build_sub_router(self, self.subs, is_manager)
         self.sub_welcome = sub_router.welcome
         self.subs.on_change = lambda: self.backup.save()
         self.backup.subs_export = self.subs.export
         self.backup.subs_import = self.subs.import_
-        self.dp.include_router(sub_router)
-        for r in build_routers(self):
-            self.dp.include_router(r)
-        self.dp.include_router(sub_tail)      # последним: всё прочее от не-админов → приветствие
+        if self.sub_bot is not None:
+            # отдельный диспетчер для sub_bot: /start, выбор тарифа, pre_checkout_query,
+            # successful_payment приходят на sub_bot. Админ-команды подписки (/subs, /grant,
+            # /revoke) тоже живут в этом роутере — админ отдаёт их в sub_bot (siqveoabot).
+            self.sub_dp = Dispatcher(storage=MemoryStorage())
+            from bot.resilience import ResponsiveReplies as _RR
+            _rr2 = _RR()
+            self.sub_dp.message.middleware(_rr2)
+            self.sub_dp.callback_query.middleware(_rr2)
+            self.sub_dp.include_router(sub_router)
+            self.sub_dp.include_router(sub_tail)
+            for r in build_routers(self):
+                self.dp.include_router(r)
+        else:
+            self.dp.include_router(sub_router)
+            for r in build_routers(self):
+                self.dp.include_router(r)
+            self.dp.include_router(sub_tail)      # последним: всё прочее от не-админов → приветствие
         self._tasks: list[asyncio.Task] = []
         self.booting = True          # аккаунты ещё подключаются после запуска
         self.bench: dict | None = None
@@ -258,6 +285,16 @@ class App:
                 self.dp.start_polling(self.bot, handle_signals=False,
                                       allowed_updates=self.dp.resolve_used_update_types()),
                 name="admin-bot"))
+            if self.sub_bot is not None and self.sub_dp is not None:
+                # дроп вебхука у подписного бота тоже — иначе Telegram вернёт 409 Conflict
+                try:
+                    await self.sub_bot.delete_webhook(drop_pending_updates=False)
+                except Exception as e:
+                    log.warning("sub_bot delete_webhook failed: %s", e)
+                self._spawn(asyncio.create_task(
+                    self.sub_dp.start_polling(self.sub_bot, handle_signals=False,
+                                              allowed_updates=self.sub_dp.resolve_used_update_types()),
+                    name="sub-bot"))
             self._spawn(asyncio.create_task(self.subs.run(), name="subscriptions"))
             self._spawn(asyncio.create_task(self._webhook_guard(), name="webhook-guard"))
             await self._set_menu()
@@ -1129,6 +1166,11 @@ class App:
             await self.dp.stop_polling()
         except Exception:
             pass
+        if self.sub_dp is not None:
+            try:
+                await self.sub_dp.stop_polling()
+            except Exception:
+                pass
         await self.coordinator.stop()
         # сначала дообработать уже найденные лоты (до 10 сек), чтобы они попали и в канал, и в копию
         if not self.coordinator.paused:
@@ -1153,6 +1195,11 @@ class App:
         await self.sessions.stop_all()
         await self.db.close()
         await self.bot.session.close()
+        if self.sub_bot is not None:
+            try:
+                await self.sub_bot.session.close()
+            except Exception:
+                pass
         log.info("Stopped")
 
 

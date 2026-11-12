@@ -7,8 +7,8 @@ from aiogram.types import CallbackQuery, Message
 
 log = logging.getLogger(__name__)
 
-_ACK_AFTER = 3.0      # команда дольше 3 с — пишем «выполняю», чтобы не жали повторно
-_STILL_AFTER = 25.0   # дольше 25 с — ещё одно сообщение, что команда жива
+_ACK_AFTER = 1.2      # команда дольше 1.2 с — пишем «выполняю», чтобы было видно что бот жив
+_STILL_AFTER = 15.0   # дольше 15 с — ещё одно сообщение, что команда жива
 
 
 class ResponsiveReplies(BaseMiddleware):

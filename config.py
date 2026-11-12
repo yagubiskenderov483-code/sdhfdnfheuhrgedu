@@ -197,6 +197,10 @@ class Settings:
     api_id: int = 0
     api_hash: str = ""
     bot_token: str = ""
+    # Отдельный бот для пользовательского интерфейса подписки + Stars (Maker: оплата Stars
+    # должна идти в siqveoabot, а не в основной админ-бот). Если пусто — подписка идёт через
+    # основной BOT_TOKEN, как раньше.
+    sub_bot_token: str = ""
     target_chat_id: int = 0
     # (lo, hi, chat_id, thread_id) — каналы по диапазону цены. Аннотация ранее была
     # неточной (3-tuple вместо 4-tuple) — для IDE/mypy теперь правильная.
@@ -364,7 +368,7 @@ class Settings:
 
     def public_view(self) -> dict[str, Any]:
         """Настройки без секретов — для /settings."""
-        hidden = {"api_hash", "bot_token", "session_backup_key", "old_bot_token"}
+        hidden = {"api_hash", "bot_token", "sub_bot_token", "session_backup_key", "old_bot_token"}
         out = {}
         for f in fields(self):
             if f.name in hidden:
@@ -372,11 +376,12 @@ class Settings:
             out[f.name] = getattr(self, f.name)
         out["api_hash"] = "***" if self.api_hash else "(не задан)"
         out["bot_token"] = "***" if self.bot_token else "(не задан)"
+        out["sub_bot_token"] = "***" if self.sub_bot_token else "(не задан — Stars/подписка идут через BOT_TOKEN)"
         return out
 
     def secrets(self) -> list[str]:
         olds = [t.strip() for t in (self.old_bot_token or "").split(",")]
-        return [s for s in (self.api_hash, self.bot_token, self.session_backup_key, self.old_bot_token, *olds) if s]
+        return [s for s in (self.api_hash, self.bot_token, self.sub_bot_token, self.session_backup_key, self.old_bot_token, *olds) if s]
 
 
 def _rng(lo: float, hi: float, cast=float):
@@ -471,7 +476,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
 def _from_env() -> Settings:
     # секреты можно держать в переменных окружения хостинга, а в .env оставить пустыми:
     # пустое значение в .env не затирает переменную окружения (токен не лежит в репозитории)
-    _secrets = {k: os.environ.get(k) for k in ("BOT_TOKEN", "API_HASH", "SESSION_BACKUP_KEY", "OLD_BOT_TOKEN",
+    _secrets = {k: os.environ.get(k) for k in ("BOT_TOKEN", "SUB_BOT_TOKEN", "API_HASH", "SESSION_BACKUP_KEY", "OLD_BOT_TOKEN",
                                                "TONCENTER_API_KEY")}
     load_dotenv(ENV_PATH, override=True)
     for k, v in _secrets.items():
@@ -482,6 +487,7 @@ def _from_env() -> Settings:
         api_id=_int(e("API_ID"), 0),
         api_hash=(e("API_HASH") or "").strip().strip('"'),
         bot_token=(e("BOT_TOKEN") or "").strip().strip('"'),
+        sub_bot_token=(e("SUB_BOT_TOKEN") or "").strip().strip('"'),
         target_chat_id=_int(e("TARGET_CHAT_ID"), 0),
         price_routes=_safe_parse(_price_routes, e("PRICE_ROUTES"), "PRICE_ROUTES"),
         backdrop_routes=_safe_parse(_backdrop_routes, e("BACKDROP_ROUTES"), "BACKDROP_ROUTES"),
