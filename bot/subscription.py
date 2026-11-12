@@ -29,7 +29,7 @@ import aiohttp
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, StateFilter
 from aiogram.types import (CallbackQuery, ChatMemberUpdated, InlineKeyboardButton, InlineKeyboardMarkup,
-                           Message)
+                           LabeledPrice, Message, PreCheckoutQuery)
 
 from config import settings
 from utils.logger import get_logger
@@ -47,17 +47,22 @@ CLOSED_TEXT = "🔒 Парсер закрыт"
 TRIAL_SECONDS = 60 * 60
 REMIND_BEFORE = 60 * 60          # напомнить о продлении за час до конца
 FOREVER = -1.0
-# код тарифа → (название, цена TON, длительность в секундах или FOREVER)
-PLANS: dict[str, tuple[str, float, float]] = {
-    "12h": ("12ч", 1.5, 12 * 3600),
-    "24h": ("24ч", 2.6, 24 * 3600),
-    "48h": ("48ч", 4.9, 48 * 3600),
-    "72h": ("72ч", 8.0, 72 * 3600),
-    "forever": ("Навсегда", 15.0, FOREVER),
+# код тарифа → (название, цена TON, длительность в секундах или FOREVER, цена в Stars или None)
+# Stars=None → тариф не оплачивается звёздами (например, «навсегда» — только TON).
+PLANS: dict[str, tuple[str, float, float, int | None]] = {
+    "6h":      ("6ч",       1.2, 6 * 3600,   150),
+    "12h":     ("12ч",      2.2, 12 * 3600,  250),
+    "24h":     ("24ч",      4.0, 24 * 3600,  450),
+    "forever": ("Навсегда", 10.0, FOREVER,   None),
 }
 INVOICE_TTL = 60 * 60           # счёт ждёт оплату 1 час
 LINK_TTL = 24 * 3600            # ссылка на вход действует сутки
 KV_KEY = "subs_state"
+
+# «@Wallet» ссылка — кнопка оплаты через Crypto Bot / @Wallet. Один общий invoice-id
+# на всех (Maker выдал через @send merchant panel). После оплаты человек присылает
+# скриншот админу — тот выдаёт /grant вручную (у @Wallet нет вебхука на нашу сторону).
+WALLET_INVOICE_URL = "https://t.me/send?start=IVxOhr7KT8WT"
 
 
 def sub_chat_id() -> int:
@@ -140,7 +145,7 @@ class Subscriptions:
                     # счёт старой версии: она могла успеть выдать время, но не отметить счёт —
                     # если у человека есть время после оплаты, считаем выданным (иначе выдали бы дважды)
                     u = self.state["users"].get(str(i.get("uid"))) or {}
-                    secs = PLANS.get(i.get("plan"), (None, None, 0))[2]
+                    secs = PLANS.get(i.get("plan"), (None, None, 0, None))[2]
                     if secs == FOREVER:
                         got = u.get("until") == FOREVER or u.get("pending") == FOREVER
                     else:
@@ -208,8 +213,9 @@ class Subscriptions:
         rows = []
         if not self.user(uid).get("trial"):
             rows.append([InlineKeyboardButton(text="🎁 Пробный час бесплатно", callback_data="sub:trial")])
-        for code, (title, price, _) in PLANS.items():
-            rows.append([InlineKeyboardButton(text=f"{title} · {price:g} TON", callback_data=f"sub:buy:{code}")])
+        for code, (title, price, _, stars) in PLANS.items():
+            label = f"{title} · {price:g} TON" + (f" / {stars}⭐" if stars else "")
+            rows.append([InlineKeyboardButton(text=label, callback_data=f"sub:buy:{code}")])
         rows.append([InlineKeyboardButton(text="« Назад", callback_data="sub:home")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -541,11 +547,12 @@ class Subscriptions:
             # один активный счёт на тариф — не плодим новые при повторном нажатии
             for code, inv in self.state["invoices"].items():
                 if (inv["uid"] == uid and inv["plan"] == plan and not inv.get("paid")
+                        and inv.get("kind", "ton") == "ton"
                         and time.time() - inv["ts"] < INVOICE_TTL):
                     return code
             code = "TRK" + secrets.token_hex(4).upper()
             self.state["invoices"][code] = {"uid": uid, "plan": plan, "nano": int(round(PLANS[plan][1] * 1e9)),
-                                            "ts": time.time(), "paid": False}
+                                            "ts": time.time(), "paid": False, "kind": "ton"}
             await self.save()
         if self.on_change:
             # счёт — и в резервную копию, чтобы оплата после деплоя не потерялась (вне общего лока)
@@ -554,6 +561,73 @@ class Subscriptions:
             except Exception as e:
                 log.warning("Backup after new invoice failed: %s", e)
         return code
+
+    async def new_stars_invoice(self, uid: int, plan: str) -> str:
+        """Создать Stars-invoice через Bot API (createInvoiceLink). → https://t.me/$… URL.
+        Один живой инвойс на (uid, plan) — повторный клик отдаёт ту же ссылку, чтобы Telegram
+        не заваливали десятками активных счетов."""
+        title, _price, _secs, stars = PLANS[plan]
+        if not stars:
+            raise ValueError(f"plan {plan!r} has no stars price")
+        now = time.time()
+        async with self._lock:
+            for code, inv in self.state["invoices"].items():
+                if (inv.get("kind") == "stars" and inv["uid"] == uid and inv["plan"] == plan
+                        and not inv.get("paid") and inv.get("stars_url")
+                        and now - inv["ts"] < INVOICE_TTL):
+                    return inv["stars_url"]
+            code = "STR" + secrets.token_hex(4).upper()
+        # создание ссылки — вне лока: HTTP-вызов Bot API может висеть, не держим подписки
+        url = await self.bot.create_invoice_link(
+            title=f"NFT Tracker — {title}",
+            description=f"Доступ к трекеру: тариф {title}",
+            payload=code,
+            currency="XTR",
+            prices=[LabeledPrice(label=title, amount=int(stars))],
+        )
+        async with self._lock:
+            self.state["invoices"][code] = {
+                "uid": uid, "plan": plan, "kind": "stars", "stars": int(stars),
+                "stars_url": url, "ts": now, "paid": False,
+            }
+            await self.save()
+        if self.on_change:
+            try:
+                await self.on_change()
+            except Exception as e:
+                log.warning("Backup after new stars invoice failed: %s", e)
+        return url
+
+    async def on_stars_paid(self, payload: str, uid: int, total_amount: int,
+                            charge_id: str | None = None) -> None:
+        """successful_payment.invoice_payload (= наш code) → отметить оплату и выдать доступ."""
+        async with self._lock:
+            inv = self.state["invoices"].get(payload)
+            if not inv or inv.get("kind") != "stars":
+                log.warning("Stars payment for unknown invoice %r from %s", payload, uid)
+                return
+            if inv.get("paid"):
+                return                 # повторный webhook того же платежа
+            if int(inv.get("uid") or 0) != int(uid):
+                log.warning("Stars payment %s uid mismatch: inv=%s pay=%s", payload, inv.get("uid"), uid)
+            inv["paid"] = True
+            inv["paid_at"] = time.time()
+            inv["granted"] = "inflight"
+            inv["charge_id"] = charge_id
+            inv["paid_stars"] = int(total_amount)
+            self.state["revenue_stars"] = int(self.state.get("revenue_stars") or 0) + int(total_amount)
+            self.state["paid_count_stars"] = int(self.state.get("paid_count_stars") or 0) + 1
+            await self.save(backup=True)
+        await self.flush_backup()
+        await self._deliver(inv)
+        title, _price, _secs, stars = PLANS[inv["plan"]]
+        for admin in settings.admin_ids:
+            try:
+                await self.bot.send_message(
+                    admin, f"💰 Оплата <b>{total_amount}⭐</b>, тариф {title}, "
+                           f"пользователь <code>{uid}</code>")
+            except Exception:
+                pass
 
     async def _fetch_txs(self) -> list[dict]:
         """Последние входящие переводы. Листаем назад (до 6 страниц по 50), пока не дойдём до уже
@@ -665,7 +739,7 @@ class Subscriptions:
                 except Exception:
                     pass
         for inv in paid:
-            title, price, secs = PLANS[inv["plan"]]
+            title, price, secs, _stars = PLANS[inv["plan"]]
             log.info("Payment received: %s TON from user %s (%s)", price, inv["uid"], inv["plan"])
             ok = await self._deliver(inv)
             for admin in settings.admin_ids:
@@ -680,11 +754,16 @@ class Subscriptions:
 
     async def _deliver(self, inv: dict) -> bool:
         """Выдать доступ по оплаченному счёту. Если не вышло — повторим в фоне (оплата не теряется)."""
-        title, price, secs = PLANS[inv["plan"]]
+        title, price, secs, _stars = PLANS[inv["plan"]]
+        kind = inv.get("kind") or "ton"
+        if kind == "stars":
+            amount = inv.get("stars") or 0
+            reason = f"Оплата {amount}⭐ пришла, тариф {title}."
+        else:
+            reason = f"Оплата {price:g} TON пришла, тариф {title}."
         inv["granted"] = "inflight"
         try:
-            text = await self.grant(int(inv["uid"]), secs, f"Оплата {price:g} TON пришла, тариф {title}.",
-                                    inv=inv)
+            text = await self.grant(int(inv["uid"]), secs, reason, inv=inv)
         except Exception as e:
             inv["granted"] = False          # повторит _retry_undelivered
             await self.save()
@@ -758,6 +837,8 @@ class Subscriptions:
         now = time.time()
         paid = [i for i in self.state["invoices"].values() if i.get("paid")]
         day = [i for i in paid if now - float(i.get("paid_at") or i.get("ts", 0)) < 86400]
+        day_ton = [i for i in day if i.get("kind", "ton") == "ton"]
+        day_stars = [i for i in day if i.get("kind") == "stars"]
         users = self.state["users"].values()
         return {
             "active": sum(1 for u in users if u.get("in_chat") and (u.get("until") == FOREVER
@@ -766,7 +847,12 @@ class Subscriptions:
             "trials": sum(1 for u in users if u.get("trial")),
             "paid_total": int(self.state.get("revenue_nano") or 0) / 1e9,
             "paid_count": int(self.state.get("paid_count") or 0),
-            "paid_day": sum(i["nano"] for i in day) / 1e9, "paid_day_count": len(day),
+            "paid_day": sum(int(i.get("nano") or 0) for i in day_ton) / 1e9,
+            "paid_day_count": len(day_ton),
+            "stars_total": int(self.state.get("revenue_stars") or 0),
+            "stars_count": int(self.state.get("paid_count_stars") or 0),
+            "stars_day": sum(int(i.get("paid_stars") or i.get("stars") or 0) for i in day_stars),
+            "stars_day_count": len(day_stars),
         }
 
     async def _expire(self) -> None:
@@ -964,26 +1050,136 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             return
         await subs.load()
         plan = q.data.split(":", 2)[2]
-        if plan not in PLANS or not settings.sub_ton_address:
+        if plan not in PLANS:
+            await q.answer("Тариф не найден", show_alert=True)
+            return
+        title, price, _secs, stars = PLANS[plan]
+        if not stars and not settings.sub_ton_address:
+            # ни Stars, ни TON — платить вообще нечем
             await q.answer("Оплата временно недоступна", show_alert=True)
             return
-        title, price, _ = PLANS[plan]
         subs._remember_who(subs.user(q.from_user.id), q.from_user)
-        code = await subs.new_invoice(q.from_user.id, plan)
+        rows: list[list[InlineKeyboardButton]] = []
+        # 1) Stars — через встроенный invoice Telegram. Самый быстрый путь (без крипты).
+        if stars:
+            rows.append([InlineKeyboardButton(text=f"⭐ Оплатить {stars} Stars",
+                                              callback_data=f"sub:stars:{plan}")])
+        # 2) TON через Tonkeeper (нативный deep-link)
+        if settings.sub_ton_address:
+            code = await subs.new_invoice(q.from_user.id, plan)
+            rows.append([InlineKeyboardButton(text=f"💎 Оплатить {price:g} TON (Tonkeeper)",
+                                              url=subs.invoice_url(code))])
+            rows.append([InlineKeyboardButton(text="🔄 Проверить оплату",
+                                              callback_data=f"sub:check:{code}")])
+            manual_note = (f"\nИли вручную:\nАдрес: <code>{settings.sub_ton_address}</code>\n"
+                           f"Сумма: <code>{price:g}</code> TON\n"
+                           f"Комментарий: <code>{code}</code> (обязательно!)")
+        else:
+            manual_note = ""
+        # 3) @Wallet (Crypto Bot) — после оплаты пришлите скриншот админу (webhook от @send к нам нет)
+        rows.append([InlineKeyboardButton(text="👛 Оплатить в @Wallet", url=WALLET_INVOICE_URL)])
+        rows.append([InlineKeyboardButton(text="« Назад", callback_data="sub:menu")])
+        kb = InlineKeyboardMarkup(inline_keyboard=rows)
+        txt = (f"💎 <b>Тариф {title}</b>\n"
+               f"Цена: <b>{price:g} TON</b>" + (f" или <b>{stars}⭐</b>" if stars else "") + "\n\n"
+               "Выберите способ оплаты:\n"
+               + ("• ⭐ <b>Stars</b> — оплата через Telegram в пару касаний (мгновенно).\n" if stars else "")
+               + "• 💎 <b>Tonkeeper</b> — классическая оплата TON, сумма и комментарий подставятся сами.\n"
+               "• 👛 <b>@Wallet</b> — оплата TON через встроенный кошелёк Telegram.\n\n"
+               "После оплаты Stars или через Tonkeeper ссылка на вход придёт сама. "
+               "Для @Wallet пришлите скриншот оплаты админу — выдадут вручную."
+               + manual_note)
+        await _safe_edit(q.message, txt, reply_markup=kb)
+        await q.answer()
+
+    @r.callback_query(F.data.startswith("sub:stars:"))
+    async def cb_stars(q: CallbackQuery) -> None:
+        """⭐ Создать stars-invoice и прислать ссылку-кнопку в чат."""
+        if not subs.ready.is_set():
+            await q.answer("⏳ Бот перезапускается, попробуйте через минуту", show_alert=True)
+            return
+        if closed():
+            await q.answer(CLOSED_TEXT, show_alert=True)
+            return
+        await subs.load()
+        plan = q.data.split(":", 2)[2]
+        if plan not in PLANS:
+            await q.answer("Тариф не найден", show_alert=True)
+            return
+        title, _price, _secs, stars = PLANS[plan]
+        if not stars:
+            await q.answer("Этот тариф доступен только в TON", show_alert=True)
+            return
+        subs._remember_who(subs.user(q.from_user.id), q.from_user)
+        try:
+            url = await subs.new_stars_invoice(q.from_user.id, plan)
+        except Exception as e:
+            log.error("Create stars invoice failed for %s: %s", q.from_user.id, e)
+            await q.answer("Не удалось создать счёт в Stars, попробуйте позже", show_alert=True)
+            return
         kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text=f"💎 Оплатить {price:g} TON в Tonkeeper", url=subs.invoice_url(code))],
-            [InlineKeyboardButton(text="🔄 Проверить оплату", callback_data=f"sub:check:{code}")],
-            [InlineKeyboardButton(text="« Назад", callback_data="sub:menu")],
+            [InlineKeyboardButton(text=f"⭐ Оплатить {stars} Stars", url=url)],
+            [InlineKeyboardButton(text="« Назад", callback_data=f"sub:buy:{plan}")],
         ])
-        await _safe_edit(q.message, 
-            f"💎 <b>Тариф {title}, {price:g} TON</b>\n\n"
-            "Нажмите «Оплатить в Tonkeeper», сумма и комментарий подставятся сами.\n\n"
-            f"Или вручную:\nАдрес: <code>{settings.sub_ton_address}</code>\n"
-            f"Сумма: <code>{price:g}</code> TON\n"
-            f"Комментарий: <code>{code}</code> (обязательно!)\n\n"
-            "Как только оплата придёт, бот сам пришлёт ссылку для входа (обычно до минуты).",
+        await _safe_edit(q.message,
+            f"⭐ <b>Тариф {title} — {stars}⭐</b>\n\n"
+            "Нажмите кнопку ниже и подтвердите оплату в Telegram. "
+            "Как только Telegram подтвердит, ссылка на вход придёт сама.",
             reply_markup=kb)
         await q.answer()
+
+    @r.pre_checkout_query()
+    async def pre_checkout(q: PreCheckoutQuery) -> None:
+        """Telegram спрашивает «можем принять?» — отвечаем да, если инвойс ещё живой.
+        Отказ сюда = отказ в оплате у клиента, так что отклоняем только явно чужие payload'ы."""
+        payload = q.invoice_payload or ""
+        inv = subs.state["invoices"].get(payload)
+        if not inv or inv.get("kind") != "stars":
+            try:
+                await q.answer(ok=False, error_message="Счёт не найден. Откройте бот ещё раз.")
+            except Exception:
+                pass
+            return
+        if inv.get("paid"):
+            try:
+                await q.answer(ok=False, error_message="Этот счёт уже оплачен.")
+            except Exception:
+                pass
+            return
+        if time.time() - float(inv.get("ts") or 0) > 7 * 86400:
+            try:
+                await q.answer(ok=False, error_message="Счёт устарел, создайте новый.")
+            except Exception:
+                pass
+            return
+        try:
+            await q.answer(ok=True)
+        except Exception as e:
+            log.warning("pre_checkout answer failed: %s", e)
+
+    @r.message(F.successful_payment)
+    async def on_successful_payment(m: Message) -> None:
+        """Telegram подтвердил оплату Stars — выдаём доступ."""
+        sp = m.successful_payment
+        if sp is None:
+            return
+        try:
+            await subs.on_stars_paid(sp.invoice_payload, m.from_user.id, int(sp.total_amount),
+                                     charge_id=getattr(sp, "telegram_payment_charge_id", None))
+        except Exception as e:
+            log.exception("Stars delivery failed")
+            try:
+                await m.answer(f"⚠️ Оплата прошла, но выдача доступа споткнулась. "
+                               f"Напишите админу с чеком Stars (payload <code>{html.escape(sp.invoice_payload)}</code>).")
+            except Exception:
+                pass
+            for admin in settings.admin_ids:
+                try:
+                    await subs.bot.send_message(admin,
+                        f"⚠️ Stars оплата от <code>{m.from_user.id}</code> пришла, но выдача упала: "
+                        f"{html.escape(str(e))}\npayload <code>{html.escape(sp.invoice_payload)}</code>")
+                except Exception:
+                    pass
 
     @r.callback_query(F.data.startswith("sub:check:"))
     async def cb_check(q: CallbackQuery) -> None:
@@ -1030,8 +1226,10 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         from bot.admin import _answer_long
         await _answer_long(m, "<b>Подписчики</b>\n" + ("\n".join(rows) or "нет") +
                        f"\n\n👥 Активных: {st['active']} (навсегда: {st['forever']}) · пробных всего: {st['trials']}\n"
-                       f"💰 Выручка: {st['paid_total']:g} TON ({st['paid_count']} оплат) · "
-                       f"за сутки: {st['paid_day']:g} TON ({st['paid_day_count']})\n"
+                       f"💎 TON: {st['paid_total']:g} ({st['paid_count']} оплат) · "
+                       f"сутки: {st['paid_day']:g} ({st['paid_day_count']})\n"
+                       f"⭐ Stars: {st['stars_total']} ({st['stars_count']} оплат) · "
+                       f"сутки: {st['stars_day']} ({st['stars_day_count']})\n"
                        "Выдать вручную: <code>/grant ID часы</code> или <code>/grant ID навсегда</code>\n"
                        "Забрать: <code>/revoke ID</code>")
 
