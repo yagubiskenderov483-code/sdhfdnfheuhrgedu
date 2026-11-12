@@ -28,14 +28,17 @@ def _is_admin(uid: int | None) -> bool:
 class ResponsiveReplies(BaseMiddleware):
     def __init__(self):
         self.active_callbacks = set()
+        self._labels_cache: frozenset[str] | None = None   # MAIN_KB.keyboard не меняется
 
     async def __call__(self, handler, event, data):
         callback = isinstance(event, CallbackQuery)
         message = event.message if callback else event
         if not isinstance(message, Message):
             return await handler(event, data)
-        from bot.admin import MAIN_KB
-        labels = {button.text for row in MAIN_KB.keyboard for button in row}
+        if self._labels_cache is None:
+            from bot.admin import MAIN_KB
+            self._labels_cache = frozenset(button.text for row in MAIN_KB.keyboard for button in row)
+        labels = self._labels_cache
         text = (event.data or "") if callback else (message.text or "")
         if not callback and not text.startswith("/") and text not in labels:
             return await handler(event, data)

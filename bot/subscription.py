@@ -1452,17 +1452,35 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if not inv or inv["uid"] != q.from_user.id:
             await q.answer("Счёт не найден", show_alert=True)
             return
+        # 1) TON — перечекиваем toncenter прямо сейчас (не ждём фоновый цикл)
         if not inv.get("paid"):
             try:
-                await subs.check_payments()
+                if inv.get("kind") == "crypto":
+                    await subs.check_crypto_payments()
+                else:
+                    await subs.check_payments()
             except Exception as e:
                 log.warning("Manual payment check failed: %s", e)
-        inv = subs.state["invoices"].get(code, {})
+            inv = subs.state["invoices"].get(code, {})
+        # 2) Если оплачено, но доступ ещё не выдан — выдаём СИНХРОННО и возвращаем ссылку
+        if inv.get("paid") and inv.get("granted") is not True:
+            try:
+                await subs._deliver(inv)
+            except Exception as e:
+                log.warning("Manual deliver failed: %s", e)
+            inv = subs.state["invoices"].get(code, {})
+        # 3) Отчитаться юзеру: alert кратко + сообщение в чат с реальной ссылкой, если выдали
         if inv.get("paid"):
-            await q.answer("Оплата пришла, ссылка в чате" if inv.get("granted") is True
-                           else "Оплата пришла, ссылка придёт в чат в течение пары минут", show_alert=True)
+            if inv.get("granted") is True:
+                await q.answer("Оплата пришла — ссылка отправлена в этот чат",
+                               show_alert=True)
+            else:
+                await q.answer("Оплата пришла, выдаю доступ…", show_alert=True)
+                # повторная попытка через мгновение — если grant отвалился от rate-limit
+                asyncio.get_running_loop().create_task(subs._retry_undelivered())
         else:
-            await q.answer("Оплата пока не пришла. Если уже оплатили, подождите минуту и нажмите ещё раз.",
+            await q.answer("Оплата пока не пришла. Если уже оплатили, подождите "
+                           "~минуту (toncenter) и нажмите ещё раз.",
                            show_alert=True)
 
     # ---------------- админам: список и ручная выдача

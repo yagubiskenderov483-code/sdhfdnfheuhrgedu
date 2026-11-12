@@ -44,11 +44,28 @@ ADMINS_FILE = DATA_DIR / "admins.json"
 
 
 # ---------------------------------------------------------------------------- admins
+_claimed_cache: tuple[float, set[int]] = (0.0, set())
+
+
 def _load_claimed() -> set[int]:
+    """Прочитать admins.json с диска, с кешем по mtime (без кеша каждый admin-check в
+    middleware делал disk-read — при двух ботах и десятке событий в секунду это заметно
+    тормозило отклик)."""
+    global _claimed_cache
     try:
-        return {int(x) for x in json.loads(ADMINS_FILE.read_text(encoding="utf-8"))}
-    except (FileNotFoundError, ValueError, json.JSONDecodeError):
+        mtime = ADMINS_FILE.stat().st_mtime
+    except (FileNotFoundError, OSError):
+        if _claimed_cache[0] != 0.0:
+            _claimed_cache = (0.0, set())
         return set()
+    if _claimed_cache[0] == mtime:
+        return _claimed_cache[1]
+    try:
+        data = {int(x) for x in json.loads(ADMINS_FILE.read_text(encoding="utf-8"))}
+    except (FileNotFoundError, ValueError, json.JSONDecodeError):
+        data = set()
+    _claimed_cache = (mtime, data)
+    return data
 
 
 def all_admins() -> set[int]:

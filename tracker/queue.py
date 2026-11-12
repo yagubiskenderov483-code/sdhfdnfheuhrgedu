@@ -893,12 +893,23 @@ class ListingPipeline:
             llog("FILTER", f"#{l.listing_id} skipped before send: {l.reason}")
             await self.db.update_listing(l)
             return
-        if ((settings.require_username and not l.seller_username) or l.seller_type != "user"
-                or not l.seller_id or l.seller_id <= 0):
-            guard = ("NO_USERNAME", "у продавца нет @username / владелец не подтверждён")
-        elif settings.require_free_messages and l.messages != "бесплатно":
+        no_valid_user = ((settings.require_username and not l.seller_username) or l.seller_type != "user"
+                         or not l.seller_id or l.seller_id <= 0)
+        if no_valid_user:
+            # Maker: для лотов >= SOFT_FILTER_STARS отсутствие @юза / неподтверждённого владельца
+            # не блокирует отправку — пост уходит с пометкой 'profile hidden'. Платные ЛС и
+            # LEVEL_TOO_HIGH всё равно проверяются ниже.
+            soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
+            if soft and l.stars_price and l.stars_price >= soft:
+                l.owner_not_found = True
+                llog("FILTER", f"#{l.listing_id} NO_USERNAME на before-send, но цена "
+                               f"{l.stars_price}⭐ ≥ SOFT_FILTER_STARS={soft} — пропускаем "
+                               "с пометкой profile hidden")
+            else:
+                guard = ("NO_USERNAME", "у продавца нет @username / владелец не подтверждён")
+        if not guard and settings.require_free_messages and l.messages != "бесплатно":
             guard = ("PAID_MESSAGES", f"ЛС: {l.messages or 'не удалось проверить'}")
-        elif settings.max_seller_level > 0 and (l.level or 0) > settings.max_seller_level:
+        elif not guard and settings.max_seller_level > 0 and (l.level or 0) > settings.max_seller_level:
             guard = ("LEVEL_TOO_HIGH", f"level {l.level} > {settings.max_seller_level}")
         if guard:
             l.seller_filter_result = guard[0]
