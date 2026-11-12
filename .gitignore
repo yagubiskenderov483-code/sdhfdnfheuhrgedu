@@ -1,41 +1,10 @@
-# === Секреты — НИКОГДА не коммитить ===
-.env
-.env.*
-!.env.example
-*.pem
-*.key
-*.cert
-secrets/
-
-# === Рантайм состояние ===
 telegram_sessions/*
 !telegram_sessions/.gitkeep
-sessions/*.session
-sessions/*.session-journal
 data/*
 !data/.gitkeep
 logs/*
 !logs/.gitkeep
-
-# === Python ===
 __pycache__/
 *.pyc
-*.pyo
-*.pyd
-*.egg-info/
-.Python
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# === Сессии Telegram (на любом уровне) ===
 *.session
 *.session-journal
-
-# === IDE / OS ===
-.vscode/
-.idea/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
