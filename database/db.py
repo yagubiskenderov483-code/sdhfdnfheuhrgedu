@@ -30,6 +30,7 @@ _LISTING_COLUMNS = (
     "seller_name", "seller_profile_link", "stars_price", "ton_price", "ton_nano", "currency", "ton_only",
     "level", "premium", "messages", "seller_filter_result", "status", "reason", "first_seen",
     "listing_created_at", "sent", "message_id", "session_source",
+    "target_chat_id", "target_thread_id",
 )
 
 
@@ -41,6 +42,7 @@ def _listing_row(l: Listing) -> tuple:
         int(l.ton_only), l.level, None if l.premium is None else int(l.premium), l.messages,
         l.seller_filter_result, l.status, l.reason, l.first_seen, l.listing_created_at, int(l.sent),
         l.message_id, l.session_source,
+        l.target_chat_id, l.target_thread_id,
     )
 
 
@@ -463,3 +465,41 @@ class Database:
         cur = await self.conn.execute(
             "SELECT status, COUNT(*) FROM listings WHERE first_seen >= ? GROUP BY status", (since_iso,))
         return {r[0]: r[1] for r in await cur.fetchall()}
+
+    # ------------------------------------------------------------------ purge
+    async def sent_messages_count(self) -> int:
+        """Сколько отправленных сообщений ещё не удалено (с живым message_id)."""
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT COUNT(*) FROM listings WHERE sent=1 AND message_id IS NOT NULL")
+        r = await cur.fetchone()
+        return int(r[0]) if r else 0
+
+    async def sent_messages_for_purge(self, limit: int = 5000) -> list[dict[str, Any]]:
+        """Пачка отправленных сообщений для /purge_all: id (rowid), listing_id, message_id,
+        target_chat_id, target_thread_id, stars_price, backdrop. Для старых строк, где
+        target_chat_id ещё не заполнен, админ-команда вычислит его из stars_price и backdrop."""
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT listing_id, message_id, target_chat_id, target_thread_id, "
+            "       stars_price, backdrop "
+            "FROM listings WHERE sent=1 AND message_id IS NOT NULL "
+            "ORDER BY sent_at DESC LIMIT ?",
+            (limit,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+    async def mark_purged(self, listing_ids: Iterable[str]) -> None:
+        """После удаления сообщений: обнуляем message_id, чтобы не пытаться удалить повторно."""
+        assert self.conn
+        ids = list(listing_ids)
+        if not ids:
+            return
+        async with self._write_lock:
+            # IN (?,?,?) до 500 за раз — SQLite host-parameter limit
+            for i in range(0, len(ids), 500):
+                chunk = ids[i:i + 500]
+                qs = ",".join("?" * len(chunk))
+                await self.conn.execute(
+                    f"UPDATE listings SET message_id=NULL WHERE listing_id IN ({qs})", chunk)
+            await self.conn.commit()

@@ -5,7 +5,7 @@
 """
 from __future__ import annotations
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -117,6 +117,14 @@ MIGRATIONS: dict[int, list[str]] = {
     # full-table scan по 33k+ записей.
     6: [
         "CREATE INDEX IF NOT EXISTS ix_listings_username_sent ON listings(lower(seller_username), sent)",
+    ],
+    # v7: куда реально был отправлен пост (для /purge_all). До v7 чат вычислялся
+    # из цены и фона на лету — теперь сохраняем, чтобы удалять точно по месту отправки.
+    7: [
+        "ALTER TABLE listings ADD COLUMN target_chat_id   INTEGER",
+        "ALTER TABLE listings ADD COLUMN target_thread_id INTEGER",
+        "CREATE INDEX IF NOT EXISTS ix_listings_target_chat_sent "
+        "ON listings(target_chat_id, sent, message_id)",
     ],
 }
 

@@ -122,6 +122,8 @@ def listing_from_row(r: dict[str, Any]) -> Listing:
         seller_filter_result=r["seller_filter_result"], status=r["status"], reason=r["reason"],
         first_seen=r["first_seen"], listing_created_at=r["listing_created_at"], sent=bool(r["sent"]),
         message_id=r["message_id"], session_source=r["session_source"],
+        target_chat_id=r["target_chat_id"] if "target_chat_id" in r.keys() else None,
+        target_thread_id=r["target_thread_id"] if "target_thread_id" in r.keys() else None,
     )
 
 
@@ -927,6 +929,8 @@ class ListingPipeline:
             if res.ok:
                 l.sent = not res.test_only
                 l.message_id = res.message_id
+                l.target_chat_id = _chat
+                l.target_thread_id = _thread
                 l.status = ListingStatus.TEST_ONLY if res.test_only else ListingStatus.SENT
                 if not res.test_only:
                     self.stats["sent"] += 1

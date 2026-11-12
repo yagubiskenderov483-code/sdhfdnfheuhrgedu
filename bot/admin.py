@@ -249,6 +249,7 @@ HELP = (
     "/lookup_debug &lt;имя&gt; — пошагово что будет с таким именем\n"
     "/lookup_forget &lt;имя&gt; — удалить ложного владельца из памяти\n"
     "/lookup_reset — полный сброс всех lookup-кешей\n"
+    "/purge_all — удалить ВСЕ сообщения трекера из всех каналов/тем (одной кнопкой)\n"
     "/sessions_stats — histogram скорости аккаунтов + топ замедленных\n"
     "/sessions_speedup — мягкий разгон (безопаснее /reset_speeds)\n"
     "/health — статус HTTP-endpoint'а (HEALTH_PORT) /health /stats /metrics\n\n"
@@ -412,6 +413,86 @@ def _taken_text(button_text: str) -> str:
     who = button_text.split("·", 1)[1].strip() if "·" in button_text else ""
     who = who or button_text.replace("✅ Взял", "").replace("✅ Занял", "").strip()
     return "Данный лот занят" + (f"\n{who}" if who else "")
+
+
+async def _purge_all_worker(app: "App", report_chat: int) -> None:
+    """Фоновая задача /purge_all: тянет пачки отправленных сообщений, группирует по
+    (chat_id, thread_id) и шлёт bulk-delete (до 100 id за раз). Для старых строк,
+    где target_chat_id пуст, вычисляет маршрут из stars_price и backdrop."""
+    bot = app.bot
+    total_deleted = 0
+    total_failed = 0
+    rounds = 0
+    try:
+        while True:
+            rounds += 1
+            batch = await app.db.sent_messages_for_purge(limit=5000)
+            if not batch:
+                break
+            # группировка по (chat, thread). Для строк без target_chat_id —
+            # вычисляем маршрут из цены/фона как при отправке.
+            groups: dict[tuple[int, int | None], list[tuple[int, str]]] = {}
+            for r in batch:
+                mid = r["message_id"]
+                if not mid:
+                    continue
+                chat = r["target_chat_id"]
+                thread = r["target_thread_id"]
+                if not chat:
+                    chat, thread = settings.route_chat(r["stars_price"], r["backdrop"])
+                if not chat:
+                    continue
+                groups.setdefault((int(chat), int(thread) if thread else None), []).append(
+                    (int(mid), r["listing_id"]))
+            # удаляем пачками по 100 (лимит Bot API deleteMessages)
+            for (chat, _thread), items in groups.items():
+                for i in range(0, len(items), 100):
+                    chunk = items[i:i + 100]
+                    ids = [mid for mid, _ in chunk]
+                    try:
+                        await bot.delete_messages(chat_id=chat, message_ids=ids)
+                        total_deleted += len(ids)
+                    except Exception as e:
+                        # bulk может упасть, если хоть одно сообщение — чужого бота / слишком старое.
+                        # Фоллбек: удаляем по одному, мёртвые игнорим.
+                        s = str(e).lower()
+                        if "message to delete not found" in s or "message can't be deleted" in s \
+                                or "message_id_invalid" in s:
+                            total_failed += len(ids)
+                        else:
+                            got = 0
+                            for mid in ids:
+                                try:
+                                    await bot.delete_message(chat_id=chat, message_id=mid)
+                                    got += 1
+                                except Exception:
+                                    total_failed += 1
+                            total_deleted += got
+                    # мелкая пауза, чтобы не словить 429 на канале
+                    await asyncio.sleep(0.4)
+            # помечаем всю пачку как удалённую (message_id=NULL), даже если часть не удалилась —
+            # эти сообщения Telegram уже не отдаст, повторная попытка ничего не даст
+            await app.db.mark_purged([lid for r in batch for lid in [r["listing_id"]] if r["message_id"]])
+            # защита от бесконечного цикла, если mark_purged отработал странно
+            if rounds > 200:
+                log.warning("purge_all: прервано после 200 раундов (возможна проблема с mark_purged)")
+                break
+    except Exception as e:
+        log.exception("purge_all: fatal")
+        try:
+            await bot.send_message(report_chat, f"❌ /purge_all упал: {html.escape(str(e))}")
+        except Exception:
+            pass
+        return
+    try:
+        await bot.send_message(
+            report_chat,
+            f"✅ <b>Готово.</b>\n\nУдалено: <b>{total_deleted}</b>\n"
+            f"Пропущено (слишком старые / уже удалены): <b>{total_failed}</b>",
+            parse_mode="HTML",
+        )
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------- routers
@@ -1831,6 +1912,49 @@ def build_routers(app: "App") -> list[Router]:
                        "Следующие lookup-операции попытаются использовать этих ботов.\n"
                        "Если они всё ещё не отвечают — slow-mark поставится снова после "
                        "≥3 подряд unresolvable-фейлов с разных сессий.")
+
+    # ---------------------------------------------------------------- purge
+    @admin.message(Command("purge_all"))
+    async def cmd_purge_all(m: Message) -> None:
+        """Удалить ВСЕ сообщения трекера из всех каналов/тем (одним нажатием).
+        Удаляются только посты о лотах — настройки/статус/капчи не трогаются."""
+        try:
+            total = await app.db.sent_messages_count()
+        except Exception as e:
+            await m.answer(f"❌ Не смог посчитать сообщения: {html.escape(str(e))}")
+            return
+        if total == 0:
+            await m.answer("ℹ️ Нет отправленных сообщений в БД — нечего удалять.")
+            return
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"🗑 Да, удалить {total} сообщений",
+                                 callback_data="purge_all:ok"),
+            InlineKeyboardButton(text="✖ Отмена", callback_data="purge_all:no"),
+        ]])
+        await m.answer(
+            "⚠️ <b>Удалить ВСЕ сообщения о лотах</b>\n\n"
+            f"Будет удалено ~{total} постов из всех каналов и тем, куда писал бот.\n"
+            "Действие необратимо. Сообщения, которые Telegram уже «забыл» (слишком старые "
+            "или удалённые вручную), будут просто пропущены.",
+            reply_markup=kb,
+        )
+
+    @admin.callback_query(F.data == "purge_all:no")
+    async def cb_purge_all_no(q: CallbackQuery) -> None:
+        try:
+            await q.message.edit_text("✖ Отменено, ничего не удалено.")
+        except Exception:
+            pass
+        await q.answer()
+
+    @admin.callback_query(F.data == "purge_all:ok")
+    async def cb_purge_all_ok(q: CallbackQuery) -> None:
+        try:
+            await q.message.edit_text("🗑 Удаление начато… отчёт пришлю сюда.")
+        except Exception:
+            pass
+        await q.answer("Удаление запущено")
+        asyncio.create_task(_purge_all_worker(app, q.message.chat.id))
 
     @admin.message(Command("disk_usage"))
     async def cmd_disk_usage(m: Message) -> None:

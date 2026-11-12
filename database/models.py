@@ -79,6 +79,8 @@ class Listing:
     sent: bool = False
     message_id: int | None = None
     session_source: str | None = None
+    target_chat_id: int | None = None       # куда реально отправлен пост (для /purge_all)
+    target_thread_id: int | None = None
 
     @property
     def ton_price(self) -> float | None:
