@@ -40,5 +40,8 @@ LICENSE
 Thumbs.db
 
 # Local env files (secrets must come from Render dashboard envVars, not from the image)
+.env
+.env.*
+!.env.example
 .env.local
 .env.*.local

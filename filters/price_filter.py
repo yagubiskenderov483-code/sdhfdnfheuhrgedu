@@ -49,6 +49,11 @@ def premium_exception(l: Listing) -> bool:
 
 class PriceFilter:
     def check(self, l: Listing) -> FilterResult:
+        # Ранний отсев спам-цен (ровных круглых значений, типичных для скам-лотов).
+        # Настраивается через /set SPAM_PRICES 300,1000 — пустой frozenset отключает проверку.
+        spam = getattr(settings, "spam_prices", None) or frozenset()
+        if spam and l.stars_price is not None and l.stars_price in spam:
+            return FilterResult(False, f"{l.stars_price} Stars — спам-цена (SPAM_PRICES)")
         # +333% к флору и выше — только если редкая модель/фон или монохром.
         # Если редкость подтвердилась — MAX_ABOVE_FLOOR НЕ применяем (иначе 8000⭐ на флоре
         # 929 с Wild Mango 1.2% всё равно падал по cap=450% → дорогие лоты вообще не шли).

@@ -76,6 +76,23 @@ def _int_set(v: str | None) -> set[int]:
     return out
 
 
+def _int_set(v: str | None) -> frozenset[int]:
+    """Парсит '300,1000' → frozenset({300, 1000}). Пустая строка → frozenset().
+    Нечисловые элементы тихо пропускаются — поведение как у _bot_list."""
+    out: set[int] = set()
+    for p in (v or "").replace(";", ",").split(","):
+        p = p.strip()
+        if not p:
+            continue
+        try:
+            n = int(p)
+            if n >= 0:
+                out.add(n)
+        except ValueError:
+            continue
+    return frozenset(out)
+
+
 def _str_list(v: str | None) -> list[str]:
     return [p.strip() for p in (v or "").replace(";", ",").split(",") if p.strip()]
 
@@ -234,6 +251,9 @@ class Settings:
     premium_over_floor_percent: int = 333  # наценка к флору >= N%: только редкая модель/фон или Monochrome (0 = выкл)
     rare_attribute_percent: float = 1.5    # «редкая» модель/фон — редкость <= N%
     max_above_floor: int = 500           # не слать лоты дороже флора коллекции больше чем на N% (0 = выкл).
+    spam_prices: frozenset[int] = field(default_factory=lambda: frozenset({300, 1000}))
+    # ^^^ фильтр спам-цен (ровные круглые Stars-значения, типичные для скам-лотов).
+    # Пустой frozenset() = выкл. Меняется через `/set SPAM_PRICES 300,1000,5000` (comma-separated int).
     # По умолчанию 500% (6х флора): фильтрует явный overprice типа «NFT с флором 400⭐ выставлен за 20k»,
     # но пропускает редкие атрибуты (2-5х от флора — нормально). /set MAX_ABOVE_FLOOR N для изменения.
     allow_ton_only: bool = False
@@ -424,6 +444,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOW_PRIORITY_POLL_INTERVAL": ("low_priority_poll_interval", _rng(5, 3600)),
     "MIN_TON": ("min_ton", lambda v: float(v.replace(",", "."))),
     "MAX_ABOVE_FLOOR": ("max_above_floor", lambda v: max(0, int(v))),
+    "SPAM_PRICES": ("spam_prices", _int_set),
     "PREMIUM_OVER_FLOOR_PERCENT": ("premium_over_floor_percent", lambda v: max(0, int(v))),
     "RESCUE_ABOVE_TOP": ("rescue_above_top", _bool_strict),
     "RARE_ATTRIBUTE_PERCENT": ("rare_attribute_percent", lambda v: max(0.1, min(100.0, float(v.replace(",", "."))))),
@@ -517,6 +538,7 @@ def _from_env() -> Settings:
         low_priority_hot_min=max(1.0, _float(e("LOW_PRIORITY_HOT_MIN"), 10.0)),
         min_ton=_float(e("MIN_TON"), 0.0),
         max_above_floor=max(0, _int(e("MAX_ABOVE_FLOOR"), 500)),
+        spam_prices=_int_set(e("SPAM_PRICES") or "300,1000"),
         premium_over_floor_percent=max(0, _int(e("PREMIUM_OVER_FLOOR_PERCENT"), 333)),
         rescue_above_top=_bool(e("RESCUE_ABOVE_TOP"), False),
         rare_attribute_percent=max(0.1, min(100.0, _float(e("RARE_ATTRIBUTE_PERCENT"), 1.5))),
