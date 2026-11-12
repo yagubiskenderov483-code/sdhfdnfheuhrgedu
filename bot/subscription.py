@@ -144,6 +144,14 @@ class Subscriptions:
         self._backup_task: asyncio.Task | None = None
         self.degraded = False          # копия не восстановилась → не кикаем незнакомых, пробный час не даём
         self.on_change: Callable[[], Awaitable[Any]] | None = None   # сохранить копию после оплаты/входа
+        # Per-invoice locks: не даём двум одновременным _deliver работать параллельно.
+        # Maker: "когда много раз нажимаешь 'проверить оплату', там повторяется, а надо
+        # чтоб один раз писало 'оплата получена, ожидайте'". Lock сериализует _deliver
+        # на один invoice-код, второй клик ждёт первого и видит уже обновлённое состояние.
+        self._deliver_locks: dict[str, asyncio.Lock] = {}
+        # Rate-limit callback'а "проверить оплату": uid → ts последнего выхова. Между
+        # кликами < 3 сек — тихий ответ без повторной проверки сети.
+        self._check_last_ts: dict[int, float] = {}
 
     def _user_bots(self) -> list:
         """Все боты, через которые юзеру может прийти DM со ссылкой (main + sub, если задан).
@@ -1032,7 +1040,19 @@ class Subscriptions:
           1) DM «Оплата получена, ожидайте» — сразу после фиксации платежа.
           2) grant() → ссылка на вход.
           3) DM с текстом «тариф Xч. … ссылка …».
-          4) Реакция 🎉 на это сообщение (одна эмодзи-реакция от имени бота)."""
+          4) Реакция 🎉 на это сообщение (одна эмодзи-реакция от имени бота).
+
+        Per-invoice lock: параллельные клики "проверить оплату" сериализуются,
+        второй видит notice_sent=True и не шлёт повторный pre-notice."""
+        code = str(inv.get("code") or f"uid:{inv.get('uid')}")
+        lock = self._deliver_locks.setdefault(code, asyncio.Lock())
+        async with lock:
+            # Повторный вход (второй клик после первого успешного _deliver) — быстрый выход.
+            if inv.get("granted") is True:
+                return True
+            return await self._deliver_locked(inv)
+
+    async def _deliver_locked(self, inv: dict) -> bool:
         pinfo = plan_info(inv["plan"])
         if pinfo is None:
             log.warning("Unknown plan %r on invoice %s; cannot deliver", inv.get("plan"),
@@ -1568,10 +1588,19 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if not inv or inv["uid"] != q.from_user.id:
             await q.answer("Счёт не найден", show_alert=True)
             return
+
+        # ANTI-SPAM: если юзер жмёт "проверить" чаще чем раз в 3 сек — не долбим сеть,
+        # показываем текущий статус. Maker: "много раз нажимает — повторяется".
+        import time as _t
+        now_ts = _t.monotonic()
+        last_ts = subs._check_last_ts.get(q.from_user.id, 0.0)
+        skip_network = (now_ts - last_ts) < 3.0
+        subs._check_last_ts[q.from_user.id] = now_ts
+
         # 1) Прочекать toncenter / CryptoPay прямо сейчас (не ждём фоновый цикл).
         #    Ошибку НЕ прячем — показываем юзеру, чтобы было понятно, что сети лежит.
         check_err = None
-        if not inv.get("paid"):
+        if not inv.get("paid") and not skip_network:
             try:
                 if inv.get("kind") == "crypto":
                     await subs.check_crypto_payments()
@@ -1581,6 +1610,10 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 check_err = str(e)[:100]
                 log.warning("Manual payment check failed for %s: %s", code, e)
             inv = subs.state["invoices"].get(code, {})
+        elif skip_network and not inv.get("paid"):
+            # быстрый повторный клик — тихий alert без спама в сеть
+            await q.answer("Жду подтверждение сети, подождите немного", show_alert=False)
+            return
         # 2) Если оплачено, но доступ ещё не выдан — выдаём СИНХРОННО
         if inv.get("paid") and inv.get("granted") is not True:
             try:
