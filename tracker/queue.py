@@ -1056,23 +1056,38 @@ class ListingPipeline:
                 await self.db.update_listing(l)
                 return
         if not found:
-            # Без подтверждённого владельца с @username лот НЕ шлём (раньше при молчащем боте
-            # уходил пост «⚠️ владелец не найден» без юза).
-            all_dead = (self.owner_lookup is not None and hasattr(self.owner_lookup, "all_bots_dead")
-                        and self.owner_lookup.all_bots_dead())
-            if all_dead:
-                code, why = "OWNER_BOTS_DEAD", "боты поиска не отвечают — владелец не проверен"
-            elif infra_failure:
-                code, why = "OWNER_LOOKUP_TIMEOUT", "бот поиска не ответил вовремя — владелец не проверен"
+            # SOFT-FILTER RESCUE: раньше это работало только для before-send/NO_USERNAME,
+            # а когда lookup-бот честно вернул "не нашёл" — дорогие лоты (>= SOFT_FILTER_STARS)
+            # всё равно валились в OWNER_NOT_FOUND. Теперь: если цена ≥ soft_filter_stars,
+            # помечаем owner_not_found=True и пропускаем дальше по pipeline — _check_seller
+            # на 766-й строке умеет такие лоты отправлять с пометкой "profile hidden".
+            # Это закрывает основную дыру: 7 лотов за минуту из лога падали именно здесь.
+            soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
+            if soft and l.stars_price and l.stars_price >= soft:
+                l.owner_not_found = True
+                self.stats["owner_not_found_soft_rescued"] = \
+                    self.stats.get("owner_not_found_soft_rescued", 0) + 1
+                llog("FILTER", f"#{l.listing_id} владелец не найден, но цена "
+                               f"{l.stars_price}⭐ ≥ SOFT_FILTER_STARS={soft} — шлём с пометкой")
+                # НЕ return — проваливаемся дальше в lookup_check_onsale и обычный flow
             else:
-                code, why = "OWNER_NOT_FOUND", "владелец не найден ботом поиска"
-            l.status, l.reason = ListingStatus.FILTERED_SELLER, why
-            l.seller_filter_result = code
-            self.stats["filtered_seller"] += 1
-            self.stats["owner_not_found"] = self.stats.get("owner_not_found", 0) + 1
-            llog("FILTER", f"#{l.listing_id} hidden owner not verified ({code}) — skipped")
-            await self.db.update_listing(l)
-            return
+                # Без подтверждённого владельца с @username лот НЕ шлём (раньше при молчащем боте
+                # уходил пост «⚠️ владелец не найден» без юза).
+                all_dead = (self.owner_lookup is not None and hasattr(self.owner_lookup, "all_bots_dead")
+                            and self.owner_lookup.all_bots_dead())
+                if all_dead:
+                    code, why = "OWNER_BOTS_DEAD", "боты поиска не отвечают — владелец не проверен"
+                elif infra_failure:
+                    code, why = "OWNER_LOOKUP_TIMEOUT", "бот поиска не ответил вовремя — владелец не проверен"
+                else:
+                    code, why = "OWNER_NOT_FOUND", "владелец не найден ботом поиска"
+                l.status, l.reason = ListingStatus.FILTERED_SELLER, why
+                l.seller_filter_result = code
+                self.stats["filtered_seller"] += 1
+                self.stats["owner_not_found"] = self.stats.get("owner_not_found", 0) + 1
+                llog("FILTER", f"#{l.listing_id} hidden owner not verified ({code}) — skipped")
+                await self.db.update_listing(l)
+                return
         # пока ждали бота поиска, лот могли купить или снять — проверяем, что он ещё продаётся
         if settings.lookup_check_onsale and l.gift_slug:
             on_sale = await self._still_on_sale(l)
