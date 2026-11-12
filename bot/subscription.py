@@ -259,7 +259,7 @@ class Subscriptions:
     def plans_kb(self, uid: int) -> InlineKeyboardMarkup:
         rows = []
         if not self.user(uid).get("trial"):
-            rows.append([InlineKeyboardButton(text="30 минут бесплатно",
+            rows.append([InlineKeyboardButton(text="30 мин бесплатно",
                                               callback_data="sub:trial")])
         for code, (title, price, _, stars) in PLANS.items():
             stars_part = f" / {stars} Stars" if stars else ""
@@ -1230,7 +1230,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         subs.user(uid)["trial"] = True
         subs._remember_who(subs.user(uid), q.from_user)
         try:
-            text = await subs.grant(uid, TRIAL_SECONDS, "Пробные 30 минут активированы.")
+            text = await subs.grant(uid, TRIAL_SECONDS, "Пробные 30 мин активированы.")
         except Exception as e:
             subs.user(uid)["trial"] = False
             log.error("Trial link failed for %s: %s", uid, e)
