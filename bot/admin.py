@@ -249,7 +249,7 @@ HELP = (
     "/lookup_debug &lt;имя&gt; — пошагово что будет с таким именем\n"
     "/lookup_forget &lt;имя&gt; — удалить ложного владельца из памяти\n"
     "/lookup_reset — полный сброс всех lookup-кешей\n"
-    "/purge_all — удалить ВСЕ сообщения трекера из всех каналов/тем (одной кнопкой)\n"
+    "/purge или /purge_all — кнопки удалить 50/100/500/1k/5k/20k/100k/ВСЕ последних сообщений\n"
     "/sessions_stats — histogram скорости аккаунтов + топ замедленных\n"
     "/sessions_speedup — мягкий разгон (безопаснее /reset_speeds)\n"
     "/health — статус HTTP-endpoint'а (HEALTH_PORT) /health /stats /metrics\n\n"
@@ -415,18 +415,24 @@ def _taken_text(button_text: str) -> str:
     return "Данный лот занят" + (f"\n{who}" if who else "")
 
 
-async def _purge_all_worker(app: "App", report_chat: int) -> None:
+async def _purge_all_worker(app: "App", report_chat: int, budget: int | None = None) -> None:
     """Фоновая задача /purge_all: тянет пачки отправленных сообщений, группирует по
     (chat_id, thread_id) и шлёт bulk-delete (до 100 id за раз). Для старых строк,
-    где target_chat_id пуст, вычисляет маршрут из stars_price и backdrop."""
+    где target_chat_id пуст, вычисляет маршрут из stars_price и backdrop.
+    budget — сколько последних сообщений удалить (None = все)."""
     bot = app.bot
     total_deleted = 0
     total_failed = 0
     rounds = 0
+    remaining = budget if budget and budget > 0 else None
     try:
         while True:
+            if remaining is not None and remaining <= 0:
+                break
             rounds += 1
-            batch = await app.db.sent_messages_for_purge(limit=5000)
+            # запрашиваем ровно столько, сколько осталось в бюджете; если без лимита — 5000 за раз
+            batch_size = min(5000, remaining) if remaining is not None else 5000
+            batch = await app.db.sent_messages_for_purge(limit=batch_size)
             if not batch:
                 break
             # группировка по (chat, thread). Для строк без target_chat_id —
@@ -473,6 +479,8 @@ async def _purge_all_worker(app: "App", report_chat: int) -> None:
             # помечаем всю пачку как удалённую (message_id=NULL), даже если часть не удалилась —
             # эти сообщения Telegram уже не отдаст, повторная попытка ничего не даст
             await app.db.mark_purged([lid for r in batch for lid in [r["listing_id"]] if r["message_id"]])
+            if remaining is not None:
+                remaining -= len(batch)
             # защита от бесконечного цикла, если mark_purged отработал странно
             if rounds > 200:
                 log.warning("purge_all: прервано после 200 раундов (возможна проблема с mark_purged)")
@@ -1960,10 +1968,10 @@ def build_routers(app: "App") -> list[Router]:
                        f"сменена на «С оффером».")
 
     # ---------------------------------------------------------------- purge
-    @admin.message(Command("purge_all"))
+    @admin.message(or_f(Command("purge_all"), Command("purge")))
     async def cmd_purge_all(m: Message) -> None:
-        """Удалить ВСЕ сообщения трекера из всех каналов/тем (одним нажатием).
-        Удаляются только посты о лотах — настройки/статус/капчи не трогаются."""
+        """/purge или /purge_all — кнопки: удалить 50 / 100 / 500 / 1000 / 5000 / ВСЕ
+        последних сообщений. Удаляются ТОЛЬКО посты о лотах из каналов/тем, куда писал бот."""
         try:
             total = await app.db.sent_messages_count()
         except Exception as e:
@@ -1972,16 +1980,29 @@ def build_routers(app: "App") -> list[Router]:
         if total == 0:
             await m.answer("ℹ️ Нет отправленных сообщений в БД — нечего удалять.")
             return
-        kb = InlineKeyboardMarkup(inline_keyboard=[[
-            InlineKeyboardButton(text=f"🗑 Да, удалить {total} сообщений",
-                                 callback_data="purge_all:ok"),
-            InlineKeyboardButton(text="✖ Отмена", callback_data="purge_all:no"),
-        ]])
+        kb_rows: list[list[InlineKeyboardButton]] = []
+        # ряды по 3 кнопки; показываем только те бюджеты, которые ≤ total
+        presets = [50, 100, 500, 1000, 5000, 20000, 100000]
+        row: list[InlineKeyboardButton] = []
+        for n in presets:
+            if n > total:
+                continue
+            row.append(InlineKeyboardButton(text=f"🗑 {n}", callback_data=f"purge_all:n:{n}"))
+            if len(row) == 3:
+                kb_rows.append(row); row = []
+        if row:
+            kb_rows.append(row)
+        kb_rows.append([InlineKeyboardButton(text=f"🗑 ВСЕ ({total})",
+                                             callback_data="purge_all:ok")])
+        kb_rows.append([InlineKeyboardButton(text="✖ Отмена", callback_data="purge_all:no")])
+        kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
         await m.answer(
-            "⚠️ <b>Удалить ВСЕ сообщения о лотах</b>\n\n"
-            f"Будет удалено ~{total} постов из всех каналов и тем, куда писал бот.\n"
-            "Действие необратимо. Сообщения, которые Telegram уже «забыл» (слишком старые "
-            "или удалённые вручную), будут просто пропущены.",
+            "⚠️ <b>Удалить сообщения о лотах</b>\n\n"
+            f"Всего в БД: <b>{total}</b> отправленных постов.\n"
+            "Нажмите, сколько последних удалить. Удаление идёт пачками по 100 "
+            "с паузой 0.4с — на большом объёме пришлю отчёт сюда.\n\n"
+            "Сообщения, которые Telegram уже «забыл» (слишком старые или удалённые "
+            "вручную), будут просто пропущены.",
             reply_markup=kb,
         )
 
@@ -1996,11 +2017,25 @@ def build_routers(app: "App") -> list[Router]:
     @admin.callback_query(F.data == "purge_all:ok")
     async def cb_purge_all_ok(q: CallbackQuery) -> None:
         try:
-            await q.message.edit_text("🗑 Удаление начато… отчёт пришлю сюда.")
+            await q.message.edit_text("🗑 Удаление ВСЕХ сообщений начато… отчёт пришлю сюда.")
         except Exception:
             pass
         await q.answer("Удаление запущено")
         asyncio.create_task(_purge_all_worker(app, q.message.chat.id))
+
+    @admin.callback_query(F.data.startswith("purge_all:n:"))
+    async def cb_purge_all_n(q: CallbackQuery) -> None:
+        try:
+            n = int(q.data.split(":", 2)[2])
+        except (ValueError, IndexError):
+            await q.answer("Неверный аргумент")
+            return
+        try:
+            await q.message.edit_text(f"🗑 Удаляю последние {n} сообщений… отчёт пришлю сюда.")
+        except Exception:
+            pass
+        await q.answer(f"Удаление {n} запущено")
+        asyncio.create_task(_purge_all_worker(app, q.message.chat.id, budget=n))
 
     @admin.message(Command("disk_usage"))
     async def cmd_disk_usage(m: Message) -> None:
