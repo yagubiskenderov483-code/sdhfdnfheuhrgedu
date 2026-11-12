@@ -1056,19 +1056,19 @@ class ListingPipeline:
                 await self.db.update_listing(l)
                 return
         if not found:
-            # SOFT-FILTER RESCUE: раньше это работало только для before-send/NO_USERNAME,
-            # а когда lookup-бот честно вернул "не нашёл" — дорогие лоты (>= SOFT_FILTER_STARS)
-            # всё равно валились в OWNER_NOT_FOUND. Теперь: если цена ≥ soft_filter_stars,
-            # помечаем owner_not_found=True и пропускаем дальше по pipeline — _check_seller
-            # на 766-й строке умеет такие лоты отправлять с пометкой "profile hidden".
-            # Это закрывает основную дыру: 7 лотов за минуту из лога падали именно здесь.
-            soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
-            if soft and l.stars_price and l.stars_price >= soft:
+            # RESCUE: когда lookup-бот честно не нашёл владельца, не режем лот —
+            # помечаем owner_not_found=True и шлём с пометкой "profile hidden".
+            # Порог rescue управляется OWNER_NOT_FOUND_MIN_STARS (default 0 = спасать все
+            # лоты, прошедшие PriceFilter). Поднять выше = жёстче (напр. /set
+            # OWNER_NOT_FOUND_MIN_STARS 1000 — только от 1000⭐).
+            # Полностью выключить rescue: /set OWNER_NOT_FOUND_MIN_STARS 999999.
+            rescue_floor = int(getattr(settings, "owner_not_found_min_stars", 0) or 0)
+            if l.stars_price is not None and l.stars_price >= rescue_floor:
                 l.owner_not_found = True
                 self.stats["owner_not_found_soft_rescued"] = \
                     self.stats.get("owner_not_found_soft_rescued", 0) + 1
                 llog("FILTER", f"#{l.listing_id} владелец не найден, но цена "
-                               f"{l.stars_price}⭐ ≥ SOFT_FILTER_STARS={soft} — шлём с пометкой")
+                               f"{l.stars_price}⭐ ≥ OWNER_NOT_FOUND_MIN_STARS={rescue_floor} — шлём с пометкой")
                 # НЕ return — проваливаемся дальше в lookup_check_onsale и обычный flow
             else:
                 # Без подтверждённого владельца с @username лот НЕ шлём (раньше при молчащем боте

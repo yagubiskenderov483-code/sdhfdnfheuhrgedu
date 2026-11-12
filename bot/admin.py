@@ -319,7 +319,6 @@ SETTING_DESC: dict[str, str] = {
     "SYNC_MODE": "fast — коллекция начинает слать лоты сразу (база = верхние 100 лотов) | full — сперва читает ВСЕ лоты (медленно)",
     "ROUTE_BY": "в какую тему класть лот: floor (по флору коллекции = цене гифта) | price (по цене лота)",
     "MAX_ABOVE_FLOOR": "не слать лоты дороже флора коллекции больше чем на N% (0 = не проверять)",
-    "SPAM_PRICES": "цены в Stars, которые считаются спамом и отсеиваются сразу (список через запятую, напр. '300,1000'; пусто = выкл)",
     "ALLOW_TON_ONLY": "слать лоты, которые продаются только за TON (true/false)",
     "RUSSIAN_ONLY": "только русские продавцы (true/false)",
     "UNKNOWN_SELLER_POLICY": "продавец без явных данных: block (отсеять) | allow (пропускать)",
@@ -373,7 +372,7 @@ SETTING_DESC: dict[str, str] = {
     "BACKDROP_ROUTES": "каналы/темы по фону: Название:ID или ID/тема (напр. Black:-100X/67); в приоритете над ценой",
 }
 SETTING_GROUPS: list[tuple[str, list[str]]] = [
-    ("Фильтр цены", ["COLLECTION_MIN_FLOOR", "MAX_ABOVE_FLOOR", "MIN_STARS", "MIN_TON", "ALLOW_TON_ONLY", "SPAM_PRICES"]),
+    ("Фильтр цены", ["COLLECTION_MIN_FLOOR", "MAX_ABOVE_FLOOR", "MIN_STARS", "MIN_TON", "ALLOW_TON_ONLY"]),
     ("Фильтр продавца", ["REQUIRE_USERNAME", "RUSSIAN_ONLY", "UNKNOWN_SELLER_POLICY", "ALLOW_HIDDEN_OWNER",
                             "REQUIRE_FREE_MESSAGES", "MAX_SELLER_LEVEL", "MAX_SELLER_NFTS", "SELLER_PHONE_PREFIXES"]),
     ("Без повторов", ["UNIQUE_GIFTS", "UNIQUE_SELLERS", "MAX_SAME_COLLECTION_STREAK",
