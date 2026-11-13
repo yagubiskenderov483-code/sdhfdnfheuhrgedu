@@ -519,13 +519,19 @@ async def main():
     check(b.text == "Написать с оффером" and "1 500" in unquote(b.url) and "?text=" in b.url,
           "/фа без торгового бота → обычный текст оффера со своей ценой в ЛС продавца")
 
-    # скидка оффера: до 1000 ⭐ включительно −30, дальше как было
+    # скидка оффера (Maker-шкала): ≤1000 −30 · ≤2000 −50 · ≤3500 −120 · ≤5000 −170 · ≤10000 −250 · 10001+ −350
     from bot.formatter import _trade_offer
     def off(stars):
         return _trade_offer(Listing(listing_id="x", gift_unique_id=1, gift_id=1, gift_name="x", stars_price=stars))
-    check(off(1000) == (970, "") and off(500) == (470, ""), "до 1000 ⭐ → −30 (1000 → 970)")
-    check(off(1001) == (951, "") and off(1800) == (1750, "") and off(3000) == (2900, ""),
-          "от 1001 ⭐ — прежние скидки")
+    def offt(ton):
+        return _trade_offer(Listing(listing_id="x", gift_unique_id=1, gift_id=1, gift_name="x",
+                                    ton_nano=int(ton*1e9), ton_only=True))
+    check(off(1000) == (970, "") and off(500) == (470, ""), "⭐ ≤1000 → −30 (1000 → 970)")
+    check(off(2000) == (1950, "") and off(3500) == (3380, "") and off(5000) == (4830, ""),
+          "⭐ ≤2000 −50 · ≤3500 −120 · ≤5000 −170")
+    check(off(8000) == (7750, "") and off(15000) == (14650, ""), "⭐ ≤10000 −250 · 10001+ −350")
+    check(offt(12) == (11, "g") and offt(30) == (28, "g") and offt(60) == (57, "g") and offt(100) == (95, "g"),
+          "TON: <25 −1 · 25–49 −2 · 50–80 −3 · 80+ −5")
 
     # не нашли и LOOKUP_REQUIRED=true → лот не уходит
     # (дешёвый лот: от SOFT_FILTER_STARS лот специально уходит с пометкой «владелец не найден»)
