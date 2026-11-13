@@ -1179,7 +1179,9 @@ class Subscriptions:
         try:
             url = "https://toncenter.com/api/v2/getTransactions"
             headers = {"X-API-Key": settings.toncenter_api_key} if settings.toncenter_api_key else {}
-            params = {"address": settings.sub_ton_address, "limit": "50", "archival": "false"}
+            # archival=true: спрашиваем архивный узел — у не-архивного часто «lt not in db»
+            # (cannot find block) на свежих переводах, из-за чего оплата не находилась
+            params = {"address": settings.sub_ton_address, "limit": "50", "archival": "true"}
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as s:
                 for _page in range(6):
                     async with s.get(url, params=params, headers=headers) as r:
