@@ -58,7 +58,7 @@ REMIND_BEFORE = 60 * 60          # напомнить о продлении за
 # (Premium-юзеры видят кастомку, остальные — fallback). Maker прислал ID:
 EMOJI_DIAMOND = "6032742198179532882"     # — для 'Подписка', 'Тариф'
 EMOJI_STAR    = "6028338546736107668"     # — цена в Stars
-EMOJI_TON     = "5316802593391916971"     # цена в TON
+EMOJI_TON     = "5424905554432631390"     # цена в TON
 EMOJI_GIFT    = "6032644646587338669"     # — '30 минут бесплатно'
 EMOJI_PAID    = "6039486778597970865"     # — 'Оплата получена, ожидайте.'
 EMOJI_SUB     = "5927118708873892465"     # — 'Подписка' (меню)
@@ -351,9 +351,9 @@ class Subscriptions:
         # (Telegram даёт кнопкам только эти 4 варианта цвета)
         # «Испытать удачу» — не здесь, а на экране выбора способа оплаты тарифа
         buttons = [
-            btn("Оформить подписку", "success", E.SUB, callback_data="sub:menu"),
-            btn("Реферальная система", "primary", E.GIFT, callback_data="sub:ref"),
-            btn("Промокод", "danger", E.DIAMOND, callback_data="sub:promo"),
+            btn("Оформить подписку", "success", E.PROFILE, callback_data="sub:menu"),
+            btn("Реферальная система", "primary", E.SHOP, callback_data="sub:ref"),
+            btn("Промокод", "danger", E.TAG, callback_data="sub:promo"),
         ]
         rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
         return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -395,10 +395,14 @@ class Subscriptions:
         rows = []
         if not self.user(uid).get("trial"):
             rows.append([btn("30 мин бесплатно", "success", E.GIFT, callback_data="sub:trial")])
+        pct = self.promo_pct(uid)
         styles = ("primary", "danger", "success")            # тарифы — разными цветами, без «пустых»
         for i, (code, (title, price, _, stars)) in enumerate(PLANS.items()):
-            label = title
-            rows.append([btn(label, styles[i % len(styles)], E.DIAMOND, callback_data=f"sub:buy:{code}")])
+            p_ton = _disc(price, pct)
+            p_st = max(1, round(_disc(stars, pct))) if stars else None
+            # кастомные эмодзи внутри текста кнопки Telegram не показывает — тут обычные символы
+            label = f"{title} • {p_ton:.4g} TON" + (f" / {p_st} ⭐" if p_st else "")
+            rows.append([btn(label, styles[i % len(styles)], callback_data=f"sub:buy:{code}")])
         rows.append([btn("« Назад", "danger", callback_data="sub:home")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -1835,9 +1839,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         ton, stars = game_ticket(plan)
         rows = []
         if stars:
-            rows.append([btn(f"{stars}", "primary", E.STAR, callback_data=f"sub:gpay:{ball}:stars:{plan}")])
+            rows.append([btn(f"{stars} ⭐", "primary", callback_data=f"sub:gpay:{ball}:stars:{plan}")])
         if settings.sub_ton_address:
-            rows.append([btn(f"{ton:g}", "success", E.TON, callback_data=f"sub:gpay:{ball}:ton:{plan}")])
+            rows.append([btn(f"{ton:g} TON", "success", callback_data=f"sub:gpay:{ball}:ton:{plan}")])
         rows.append([btn("« Назад", "danger", callback_data=f"sub:game:{plan}")])
         await _safe_edit(q.message, f"<b>Мяч: {emoji}</b>\n\nВыберите способ оплаты билета:",
                          reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
@@ -2031,13 +2035,12 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         # кастомные эмодзи в кнопках — через icon_custom_emoji_id (utils.emoji)
         rows: list[list[InlineKeyboardButton]] = []
         if stars:
-            rows.append([btn(f"{stars}", "primary", E.STAR, callback_data=f"sub:pay:{plan}:stars")])
+            rows.append([btn(f"{stars} ⭐", "primary", callback_data=f"sub:pay:{plan}:stars")])
         if settings.sub_ton_address:
-            rows.append([btn(f"{price:.4g}", "success", E.TON, callback_data=f"sub:pay:{plan}:ton")])
+            rows.append([btn(f"{price:.4g} TON", "success", callback_data=f"sub:pay:{plan}:ton")])
         if settings.game_enabled and (settings.sub_ton_address or game_ticket(plan)[1]):
-            g_ton = game_ticket(plan)[0]
-            rows.append([btn(f"Испытать удачу · {g_ton:g}", "danger", E.GIFT, callback_data=f"sub:game:{plan}")])
-        rows.append([btn("« Назад", "danger", callback_data="sub:menu")])
+            rows.append([btn("Испытать удачу", "danger", E.GIFT, callback_data=f"sub:game:{plan}")])
+        rows.append([btn("« Назад", "primary", callback_data="sub:menu")])
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
         stars_part = f" или <b>{stars}</b> {_tg_emoji(EMOJI_STAR, '⭐')}" if stars else ""
         txt = (f"<b>Тариф {title}</b>\n"
