@@ -262,6 +262,7 @@ HELP = (
     "/flood — диагностика FloodWait (кто ловит, speed, когда последний)\n"
     "/reset_speeds — сброс замедления аккаунтов (после шторма)\n"
     "/removed — удалённые за 14 дней · /revive ИМЯ|all — вернуть\n"
+    "/sessions_clean — убрать все мёртвые (разлогиненные) сессии разом\n"
     "/proxies — прокси для аккаунтов\n\n"
     "<b>Маршруты и фильтры</b>\n"
     "/routes — PRICE_ROUTES и BACKDROP_ROUTES в удобной форме\n"
@@ -1100,6 +1101,49 @@ def build_routers(app: "App") -> list[Router]:
             await _answer_long(m, "Выберите аккаунт для удаления:\n\n" + text, reply_markup=kb)
             return
         await m.answer(await _remove_session(m.from_user.id, name))
+
+    def _dead_sessions() -> list[str]:
+        """Мёртвые/разлогиненные сессии (AUTH_ERROR) — числятся в счётчике, но не работают."""
+        return [w.name for w in app.sessions.workers.values()
+                if getattr(w.status, "value", "") == "AUTH_ERROR"]
+
+    @admin.message(Command("sessions_clean"))
+    async def cmd_sessions_clean(m: Message) -> None:
+        dead = _dead_sessions()
+        total = len(app.sessions.workers)
+        if not dead:
+            await m.answer(f"Мёртвых сессий нет. Всего загружено: {total}.")
+            return
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"Да, убрать {len(dead)}", callback_data="sessclean_ok"),
+            InlineKeyboardButton(text="Отмена", callback_data="rmsess_no")]])
+        await m.answer(
+            f"Всего сессий загружено: <b>{total}</b>, из них мёртвых (разлогинены, AUTH_ERROR): "
+            f"<b>{len(dead)}</b>.\n\nУбрать их в <code>removed/</code>? Останется рабочих примерно "
+            f"<b>{total - len(dead)}</b>. Вернуть потом можно через /revive.",
+            reply_markup=kb)
+
+    @public.callback_query(F.data == "sessclean_ok")
+    async def cb_sessclean_ok(q: CallbackQuery) -> None:
+        if not is_manager(q.from_user.id):
+            await q.answer("Только для админов", show_alert=True)
+            return
+        await q.answer("Чищу…")
+        dead = _dead_sessions()
+        done = 0
+        for name in dead:
+            app.backup.bury(name, "массовая чистка мёртвых сессий")
+            try:
+                await app.sessions.remove(name)
+                done += 1
+            except Exception as e:
+                log.warning("sessions_clean: не удалось убрать %s: %s", name, e)
+        try:
+            await app.backup.save(allow_shrink=True)
+        except Exception:
+            pass
+        await _edit_or_send(q, f"Убрано мёртвых сессий: <b>{done}</b>. Осталось загружено: "
+                               f"<b>{len(app.sessions.workers)}</b>.\nВернуть: /revive &lt;имя&gt; или /revive all.")
 
     @admin.message(or_f(Command("pause", "off"), F.text == BTN_PAUSE))
     async def cmd_pause(m: Message) -> None:
