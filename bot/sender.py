@@ -74,7 +74,8 @@ class TelegramSender:
     def __init__(self, bot: Bot):
         self.bot = bot
         self._lock = _PriorityLock()
-        self._last = 0.0
+        self._last = 0.0                          # последняя отправка вообще (для статистики/совместимости)
+        self._last_chat: dict[int, float] = {}    # последняя отправка в КОНКРЕТНУЮ группу
         self._recent: dict[int, deque[float]] = {}
         self._flood_until: dict[int, float] = {}    # группа под лимитом Telegram (RetryAfter) — до этого момента не шлём
         self.test_sent = 0
@@ -86,8 +87,12 @@ class TelegramSender:
         while recent and now - recent[0] > 60:
             recent.popleft()
         win = recent[0] + 60 - now if len(recent) >= self.PER_CHAT_MINUTE else 0.0
-        # темы одной группы делят её лимит: пока группа под RetryAfter, остальные посты туда ждут, а не долбят
-        return max(win, self._flood_until.get(chat_id, 0.0) - now)
+        # SEND_INTERVAL — между постами в ОДНУ группу (темы одной группы делят её лимит).
+        # Раньше интервал был общий на все группы и выдерживался под общей блокировкой: пост в
+        # другой канал/маршрут ждал чужие 1.1 с, и при нескольких маршрутах лоты копились в очереди.
+        gap = self._last_chat.get(chat_id, 0.0) + settings.send_interval - now
+        # пока группа под RetryAfter, остальные посты туда ждут, а не долбят
+        return max(win, gap, self._flood_until.get(chat_id, 0.0) - now)
 
     def _test_chat(self) -> int | None:
         if settings.test_chat_id:
@@ -154,7 +159,7 @@ class TelegramSender:
                     log.warning("send: budget exhausted (chat=%s, attempts=%d, floods=%d) — giving up",
                                 chat_id, attempt, flood_waits)
                     return SendResult(False, error=f"send budget (7m) exhausted after {flood_waits} RetryAfter")
-                wait = self._last + settings.send_interval - time.monotonic()
+                wait = self._last_chat.get(chat_id, 0.0) + settings.send_interval - time.monotonic()
                 if wait > 0:
                     await asyncio.sleep(wait)
                 try:
@@ -162,6 +167,7 @@ class TelegramSender:
                                                       link_preview_options=preview, reply_markup=markup,
                                                       **extra)
                     self._last = time.monotonic()
+                    self._last_chat[chat_id] = self._last
                     self._recent.setdefault(chat_id, deque()).append(self._last)
                     return SendResult(True, msg.message_id, chat_id=chat_id)
                 except TelegramRetryAfter as e:

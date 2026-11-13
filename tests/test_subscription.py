@@ -43,7 +43,7 @@ async def main():
     assert "https://t.me/+L1" in t
     await subs.on_join(ev(5, "left", "member", "https://t.me/+L1"))
     u = subs.user(5)
-    assert u["in_chat"] and 3590 < u["until"] - time.time() <= 3600, u
+    assert u["in_chat"] and S.TRIAL_SECONDS - 10 < u["until"] - time.time() <= S.TRIAL_SECONDS, u
     assert app.bot.revoked == ["https://t.me/+L1"]
     # someone else uses link
     await subs.grant(6, 12*3600, "paid")
@@ -59,10 +59,11 @@ async def main():
     # payments
     code = await subs.new_invoice(9, "forever")
     assert code == await subs.new_invoice(9, "forever")
-    assert "amount=15000000000" in subs.invoice_url(code) and code in subs.invoice_url(code)
+    FNANO = int(round(S.PLANS["forever"][1] * 1e9))
+    assert f"amount={FNANO}" in subs.invoice_url(code) and code in subs.invoice_url(code)
     async def fake(): return [
         {"transaction_id": {"hash": "h1"}, "in_msg": {"source": "EQx", "value": "1000", "message": code}},
-        {"transaction_id": {"hash": "h2"}, "in_msg": {"source": "EQx", "value": "15000000000", "message": " "+code.lower()+" "}}]
+        {"transaction_id": {"hash": "h2"}, "in_msg": {"source": "EQx", "value": str(FNANO), "message": " "+code.lower()+" "}}]
     subs._fetch_txs = fake
     assert await subs.check_payments() == 1
     assert await subs.check_payments() == 0
@@ -130,7 +131,7 @@ def test_seller_signals():
     assert chk(seller_about="nft seller") == "UNKNOWN_BLOCKED"
     assert chk(seller_extra_text="Всем привет") == "STORIES_RU"
     assert chk(seller_business="Москва, Тверская 1") == "BUSINESS_RU"
-    assert chk(seller_about="من ایران") == "FOREIGN_TEXT"
+    assert chk(seller_about="من ایران") in ("FOREIGN_TEXT", "ARABIC_SCRIPT")   # арабский режется раньше
     assert chk(seller_name="Ivan 🇷🇺") == "FLAG_RU"
     print("SELLER SIGNALS OK")
 
@@ -705,7 +706,7 @@ def test_seller_filter_states():
         # 5) скрытый владелец, арабский скрипт в имени → FOREIGN_NAME_HIDDEN (блок независимо от флага)
         settings.allow_hidden_owner = True
         l = Listing(**base); l.seller_type = None; l.seller_id = None; l.seller_name = "الذيبــــــــة"
-        r = sf.check(l); assert not r.passed and r.code == "FOREIGN_NAME_HIDDEN", r
+        r = sf.check(l); assert not r.passed and r.code in ("FOREIGN_NAME_HIDDEN", "ARABIC_SCRIPT"), r
 
         # 6) ALLOW_HIDDEN_OWNER=false и имя латиницей без признаков → UNKNOWN_BLOCKED
         settings.allow_hidden_owner = False

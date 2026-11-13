@@ -95,7 +95,27 @@ def _trade_offer(l: Listing) -> tuple[int, str] | None:
     return None
 
 
-def listing_keyboard(l: Listing, with_seller: bool = True, with_offer: bool = False) -> InlineKeyboardMarkup:
+def offer_message(l: Listing, amount: tuple[int, str] | None = None) -> str | None:
+    """Текст оффера, который подставится в поле ввода.
+    • TRADE_BOT_USERNAME задан → «@бот <ссылка> <цена>» (инлайн-запрос торгового бота).
+    • не задан → обычное сообщение продавцу «Здравствуйте! Готов забрать <ссылка> за N ⭐».
+    Раньше без торгового бота оффер не собирался вообще, и '/<id> оффер' ничего не менял.
+    amount — своя цена от админа (/фа @юз оффер 1500), иначе — скидка по шкале _trade_offer."""
+    if not l.gift_link:
+        return None
+    offer = amount or _trade_offer(l)
+    trade_bot = (getattr(settings, "trade_bot_username", "") or "").lstrip("@")
+    if trade_bot:
+        tail = f" {offer[0]} {offer[1]}".rstrip() if offer else ""
+        return f"@{trade_bot} {l.gift_link}{tail}"
+    if not offer:
+        return f"Здравствуйте! Интересует {l.gift_link} — готов купить. Какая финальная цена?"
+    unit = f"{settings.ton_label}" if offer[1] == "g" else "⭐"
+    return f"Здравствуйте! Готов забрать {l.gift_link} за {_n(offer[0])} {unit}"
+
+
+def listing_keyboard(l: Listing, with_seller: bool = True, with_offer: bool = False,
+                     offer_amount: tuple[int, str] | None = None) -> InlineKeyboardMarkup:
     """Кнопки: [Занять] / [Лот] [Написать без оффера | С оффером].
     По умолчанию — «Написать без оффера»: открывает ЛС продавца пустой, человек пишет сам.
     Если админ командой '/<юз_или_id> оффер' подтвердил лот — бот редактирует клавиатуру,
@@ -106,24 +126,23 @@ def listing_keyboard(l: Listing, with_seller: bool = True, with_offer: bool = Fa
     if l.gift_link:
         second.append(InlineKeyboardButton(text="Лот", url=l.gift_link))
     trade_bot = (getattr(settings, "trade_bot_username", "") or "").lstrip("@")
-    offer = _trade_offer(l) if (trade_bot and with_offer) else None
-    offer_text = None
-    if with_offer and trade_bot and l.gift_link:
-        tail = f" {offer[0]} {offer[1]}".rstrip() if offer else ""
-        offer_text = f"@{trade_bot} {l.gift_link}{tail}"
+    offer_text = offer_message(l, offer_amount) if with_offer else None
     url = None
     if with_seller and l.seller_username:
         url = f"https://t.me/{l.seller_username}"
         if offer_text:
             url += f"?text={quote(offer_text, safe='/')}"
+    elif offer_text and trade_bot:
+        # у продавца нет @юза — в его ЛС текст не подставить (tg://user?id= не умеет ?text=),
+        # открываем торгового бота с готовым оффером
+        url = f"https://t.me/{trade_bot}?text={quote(offer_text, safe='/')}"
     elif with_seller and seller_url(l):
         url = seller_url(l)
-    elif offer_text:
-        url = f"https://t.me/{trade_bot}?text={quote(offer_text, safe='/')}"
     if url:
-        # Maker: кнопка всегда «Написать». Без админской команды — пустой ЛС, после
-        # '/<юз> оффер' тот же URL уже содержит заполненный оффер в поле ввода.
-        second.append(InlineKeyboardButton(text="Написать", url=url))
+        # Без админской команды — «Написать» (пустой ЛС). После '/фа <юз|id> оффер' —
+        # «Написать с оффером»: в поле ввода уже стоит оффер, остаётся нажать «Отправить».
+        has_offer = bool(offer_text) and ("?text=" in url)
+        second.append(InlineKeyboardButton(text="Написать с оффером" if has_offer else "Написать", url=url))
     if second:
         rows.append(second)
     return InlineKeyboardMarkup(inline_keyboard=rows)

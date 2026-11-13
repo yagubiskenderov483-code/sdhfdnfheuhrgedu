@@ -273,6 +273,7 @@ HELP = (
     "/test_bot [@bot] [имя] — реальный тест с ответом бота\n"
     "/test_bots — пинг всех настроенных ботов (бесплатно)\n"
     "/lookup_last — последние 20 lookup-операций с результатом\n"
+    "/фа @юз оффер [цена] — кнопка «Написать с оффером» у постов этого продавца\n"
     "/lookup_cache — состояние кешей, inflight, dead-marks\n"
     "/lookup_memory — обзор памяти найденных владельцев в БД\n"
     "/lookup_debug &lt;имя&gt; — пошагово что будет с таким именем\n"
@@ -541,6 +542,17 @@ async def _purge_all_worker(app: "App", report_chat: int, budget: int | None = N
 
 
 # ---------------------------------------------------------------------------- routers
+_BG_TASKS: set = set()
+
+
+def _keep(t):
+    """Сильная ссылка на фоновую задачу: asyncio держит только weakref — без этого
+    долгую /purge могло прибить сборщиком мусора на середине."""
+    _BG_TASKS.add(t)
+    t.add_done_callback(_BG_TASKS.discard)
+    return t
+
+
 def build_routers(app: "App") -> list[Router]:
     public = Router(name="public")
     admin = Router(name="admin")        # только админы: /remove_session /reload /set
@@ -1959,50 +1971,102 @@ def build_routers(app: "App") -> list[Router]:
                        "≥3 подряд unresolvable-фейлов с разных сессий.")
 
     # ---------------------------------------------------------------- offer
-    @admin.message(F.text.regexp(r"^/?(?P<ident>@?[A-Za-z0-9_]+|\d+)\s+оффер\s*$"))
+    # «/фа <id|@юз> оффер [цена]» (или /fa …) — у постов этого продавца кнопка «Написать»
+    # меняется на «Написать с оффером»: в ЛС продавца уже введён оффер. У остальных — обычная.
+    # Старый формат «<id> оффер» / «/<юз> оффер» тоже работает.
+    # Telegram не делает команды на кириллице «синими», поэтому ловим текст регуляркой, а не Command().
+    _OFFER_RE = re.compile(
+        r"^\s*(?:/(?:фа|fa)(?:@\w+)?\s+)?/?(?P<ident>@?[A-Za-z][A-Za-z0-9_]{3,31}|\d{3,16})"
+        r"(?:\s+(?P<word>оффер|offer))?(?:\s+(?P<amount>\d+(?:[.,]\d+)?)\s*(?P<unit>ton|тон|g|⭐|stars?|звезд\w*)?)?\s*$",
+        re.IGNORECASE)
+    _FA_ONLY_RE = re.compile(r"^\s*/(?:фа|fa)(?:@\w+)?\s*$", re.IGNORECASE)
+
+    def _offer_usage() -> str:
+        return ("<b>Оффер продавцу</b>\n"
+                "<code>/фа 7373733737 оффер</code> — по ID\n"
+                "<code>/фа @username оффер</code> — по юзу\n"
+                "<code>/фа @username оффер 1500</code> — своя цена (⭐), <code>… 12 ton</code> — в TON\n\n"
+                "У последних постов этого продавца кнопка «Написать» станет «Написать с оффером» — "
+                "в его ЛС уже будет введён оффер. У остальных лотов кнопка обычная.")
+
+    @admin.message(F.text.regexp(_FA_ONLY_RE))
+    async def cmd_offer_help(m: Message) -> None:
+        await m.answer(_offer_usage())
+
+    @admin.message(F.text.func(lambda t: bool(t) and bool(_OFFER_RE.match(t)) and (
+        t.lstrip().lower().startswith(("/фа", "/fa")) or re.search(r"\s(оффер|offer)\b", t, re.I))))
     async def cmd_mark_offer(m: Message) -> None:
-        """Админ: /<юз или id> оффер — у последнего отправленного лота этого продавца
-        кнопка «Написать без оффера» заменяется на «С оффером» (с заполненным трейд-оффером).
-        Пример: '7373733737 оффер' или '/@seller оффер'."""
         from bot.formatter import listing_keyboard
         from tracker.queue import listing_from_row
-        parts = (m.text or "").split(maxsplit=1)
-        ident = parts[0].lstrip("/").lstrip("@")
+        mt = _OFFER_RE.match(m.text or "")
+        if not mt:
+            await m.answer(_offer_usage())
+            return
+        ident = mt.group("ident").lstrip("@")
+        amount: tuple[int, str] | None = None
+        if mt.group("amount"):
+            try:
+                val = float(mt.group("amount").replace(",", "."))
+            except ValueError:
+                val = 0
+            unit = (mt.group("unit") or "").lower()
+            is_ton = unit in ("ton", "тон", "g")
+            if val <= 0 or (not is_ton and val != int(val)):
+                await m.answer("Цена должна быть положительным целым числом звёзд или суммой в TON.\n\n"
+                               + _offer_usage())
+                return
+            amount = (max(1, round(val)), "g") if is_ton else (int(val), "")
         try:
-            rows = await app.db.recent_sent_by_seller(ident, limit=5)
+            rows = await app.db.recent_sent_by_seller(ident, limit=3)
         except Exception as e:
             await m.answer(f"Поиск по БД упал: {html.escape(str(e))}")
             return
         if not rows:
-            await m.answer(f"ℹНет отправленных лотов продавца <code>{html.escape(ident)}</code>.")
+            await m.answer(f"ℹНет отправленных лотов продавца <code>{html.escape(ident)}</code>.\n"
+                           "Проверьте ID / @юз (юз — без учёта регистра).")
             return
-        row = rows[0]
-        chat = row.get("target_chat_id")
-        thread = row.get("target_thread_id")
-        mid = row.get("message_id")
-        if not chat or not mid:
-            # старая запись до v7 — вычислим маршрут из цены и фона
-            chat, thread = settings.route_chat(row.get("stars_price"), row.get("backdrop"))
-        if not chat or not mid:
-            await m.answer("ℹУ лота не сохранён chat_id — слишком старая запись, не могу отредактировать.")
+        done, already, failed = [], 0, []
+        no_text = False
+        for row in rows:
+            chat = row.get("target_chat_id")
+            mid = row.get("message_id")
+            if not chat and mid:
+                # старая запись до v7 — вычислим маршрут из цены и фона
+                chat, _thread = settings.route_chat(row.get("stars_price"), row.get("backdrop"))
+            if not chat or not mid:
+                failed.append("нет chat_id у старой записи")
+                continue
+            try:
+                l = listing_from_row(row)
+            except Exception as e:
+                failed.append(f"карточка: {e}")
+                continue
+            kb = listing_keyboard(l, with_offer=True, offer_amount=amount)
+            if not any(b.text == "Написать с оффером" for r in kb.inline_keyboard for b in r):
+                no_text = True          # у продавца нет @юза и торговый бот не задан — оффер некуда вписать
+            try:
+                await app.bot.edit_message_reply_markup(chat_id=chat, message_id=mid, reply_markup=kb)
+                done.append(l)
+            except Exception as e:
+                es = str(e).lower()
+                if "not modified" in es:
+                    already += 1
+                else:
+                    failed.append(str(e)[:120])
+        if no_text and not done and not already:
+            await m.answer("У этого продавца нет @username, а TRADE_BOT_USERNAME не задан — "
+                           "вписать оффер в ЛС по ID Telegram не позволяет. Задайте торгового бота "
+                           "в /settings, и кнопка откроет его с готовым оффером.")
             return
-        try:
-            l = listing_from_row(row)
-        except Exception as e:
-            await m.answer(f"Не смог собрать карточку лота: {html.escape(str(e))}")
-            return
-        kb = listing_keyboard(l, with_offer=True)
-        try:
-            await app.bot.edit_message_reply_markup(chat_id=chat, message_id=mid, reply_markup=kb)
-        except Exception as e:
-            s = str(e).lower()
-            if "not modified" in s:
-                await m.answer(f"ℹУ лота уже кнопка «С оффером».")
-                return
-            await m.answer(f"Не смог отредактировать сообщение: {html.escape(str(e))}")
-            return
-        await m.answer(f"Кнопка лота <b>{html.escape(l.gift_name or '?')} #{l.gift_num or ''}</b> "
-                       f"сменена на «С оффером».")
+        lines = []
+        if done:
+            names = ", ".join(f"{html.escape(x.gift_name or '?')} #{x.gift_num or ''}" for x in done)
+            lines.append(f"Кнопка «Написать с оффером» поставлена: {names}")
+        if already:
+            lines.append(f"ℹУже с оффером: {already}")
+        if failed:
+            lines.append("Не удалось: " + html.escape("; ".join(failed[:3])))
+        await m.answer("\n".join(lines) or "Ничего не изменилось")
 
     # ---------------------------------------------------------------- purge
     @admin.message(or_f(Command("purge_all"), Command("purge")))
@@ -2058,7 +2122,7 @@ def build_routers(app: "App") -> list[Router]:
         except Exception:
             pass
         await q.answer("Удаление запущено")
-        asyncio.create_task(_purge_all_worker(app, q.message.chat.id))
+        _keep(asyncio.create_task(_purge_all_worker(app, q.message.chat.id)))
 
     @admin.callback_query(F.data.startswith("purge_all:n:"))
     async def cb_purge_all_n(q: CallbackQuery) -> None:
@@ -2072,7 +2136,7 @@ def build_routers(app: "App") -> list[Router]:
         except Exception:
             pass
         await q.answer(f"Удаление {n} запущено")
-        asyncio.create_task(_purge_all_worker(app, q.message.chat.id, budget=n))
+        _keep(asyncio.create_task(_purge_all_worker(app, q.message.chat.id, budget=n)))
 
     @admin.message(Command("disk_usage"))
     async def cmd_disk_usage(m: Message) -> None:

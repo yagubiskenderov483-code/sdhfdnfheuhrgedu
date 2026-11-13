@@ -495,6 +495,14 @@ class Database:
         assert self.conn
         ident = ident.strip().lstrip("@")
         if ident.isdigit():
+            # seller_key='u<id>' идёт по индексу ix_listings_seller_sent; по seller_id индекса нет
+            # (полный скан таблицы листингов). seller_id — запасной путь для старых записей.
+            cur = await self.conn.execute(
+                "SELECT * FROM listings WHERE seller_key=? AND sent=1 AND message_id IS NOT NULL "
+                "ORDER BY sent_at DESC LIMIT ?", (f"u{int(ident)}", limit))
+            rows = [dict(r) for r in await cur.fetchall()]
+            if rows:
+                return rows
             sql = ("SELECT * FROM listings WHERE sent=1 AND message_id IS NOT NULL AND seller_id=? "
                    "ORDER BY sent_at DESC LIMIT ?")
             params: tuple = (int(ident), limit)

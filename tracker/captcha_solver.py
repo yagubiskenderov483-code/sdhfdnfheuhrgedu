@@ -34,10 +34,10 @@ import json
 import logging
 import os
 import re
+import time
 import unicodedata
 from typing import Iterable, Optional
 from urllib import request as _urlreq
-from urllib.error import HTTPError, URLError
 
 log = logging.getLogger("captcha")
 
@@ -135,6 +135,22 @@ def cache_pop(key: str) -> None:
 
 _LAYER_HITS: dict[str, int] = {}      # сколько раз каждый слой матчера сработал
 
+_OCR_SEM: tuple[object, asyncio.Semaphore] | None = None
+
+
+def _ocr_sem() -> asyncio.Semaphore:
+    """Ограничение параллельных OCR (env CAPTCHA_OCR_CONCURRENCY, по умолчанию 2).
+    Семафор привязан к своему event loop — пересоздаём, если loop другой (тесты, рестарт)."""
+    global _OCR_SEM
+    loop = asyncio.get_running_loop()
+    if _OCR_SEM is None or _OCR_SEM[0] is not loop:
+        try:
+            n = max(1, int(os.environ.get("CAPTCHA_OCR_CONCURRENCY", "2")))
+        except ValueError:
+            n = 2
+        _OCR_SEM = (loop, asyncio.Semaphore(n))
+    return _OCR_SEM[1]
+
 
 def captcha_cache_stats() -> dict:
     """Для вывода в /panel."""
@@ -182,7 +198,7 @@ _WORD_TO_EMOJI: dict[str, tuple[str, ...]] = {
     "frog": ("🐸",), "лягушка": ("🐸",),
     "koala": ("🐨",), "коала": ("🐨",),
     "wolf": ("🐺",), "волк": ("🐺",),
-    "chicken": ("🐔", "🐓"), "курица": ("🐔",), "петух": ("🐓",), "rooster": ("🐓",),
+    "chicken": ("🐔", "🐓"), "петух": ("🐓",), "rooster": ("🐓",),
     "bird": ("🐦", "🐤"), "птица": ("🐦",),
     "penguin": ("🐧",), "пингвин": ("🐧",),
     "unicorn": ("🦄",), "единорог": ("🦄",),
@@ -671,14 +687,25 @@ def _preprocess(photo: bytes, threshold: int, scale: int, invert: bool = False,
 
 
 def _ocr_and_match(photo: bytes, buttons: list[str]) -> Optional[int]:
-    """OCR + матч к кнопкам с ранним выходом.
+    """Обратная совместимость: только индекс кнопки."""
+    return _ocr_match_hyps(photo, buttons)[0]
+
+
+def _ocr_match_hyps(photo: bytes, buttons: list[str],
+                    deadline: float | None = None) -> tuple[Optional[int], list[tuple[str, float]]]:
+    """OCR + матч к кнопкам с ранним выходом. → (индекс кнопки | None, все собранные гипотезы).
+    Гипотезы отдаём наружу, чтобы запасные кандидаты для retry брать из них, а НЕ гонять
+    ocr_words() второй раз (это ещё ~85 вызовов tesseract = 10–25 с задержки перед кликом).
+    deadline (time.monotonic) — поток сам прекращает работу: wait_for не умеет убить поток,
+    и раньше «просроченный» OCR продолжал жечь CPU параллельно со следующими капчами.
 
     Прогоняем варианты пред-обработки блоками (быстрые сначала). После каждого блока
     пробуем матч. Если нашли уверенный ответ — выходим не прогоняя все 85 попыток.
     Экономит 2-3 секунды на капчу которая читается с первого раза."""
+    import time as _time
     mods = _try_import_ocr()
     if mods is None or not photo:
-        return None
+        return None, []
     pytesseract = mods[0]
     # Разрешаем цифры тоже — OCR часто читает 's' как '5', 'o' как '0' на размытых капчах.
     # _norm_word вернёт обратно в буквы через digit→letter mapping.
@@ -714,12 +741,16 @@ def _ocr_and_match(photo: bytes, buttons: list[str]) -> Optional[int]:
         base = _base_image(photo)
     except Exception as e:                                             # noqa: BLE001
         log.warning("OCR: cannot open image: %s", e)
-        return None
+        return None, []
     if base is None:
-        return None
+        return None, []
     try:
         for block in blocks:
+            if deadline is not None and _time.monotonic() > deadline:
+                break
             for threshold, scale, inv, shrp, ctr, ero in block:
+                if deadline is not None and _time.monotonic() > deadline:
+                    break
                 img = _preprocess_from_base(base, threshold, scale, invert=inv, sharpen=shrp,
                                             contrast=ctr, erode=ero)
                 if img is None:
@@ -745,12 +776,12 @@ def _ocr_and_match(photo: bytes, buttons: list[str]) -> Optional[int]:
             # пробуем матч после каждого блока
             idx = _best_button_from_hypotheses(hyps, buttons)
             if idx is not None:
-                return idx
+                return idx, hyps
     except Exception as e:                                             # noqa: BLE001
         log.warning("OCR failed: %s", e)
     log.info("Captcha solver: ни один из %d гипотез (%d вариантов) не подошёл",
              len(hyps), sum(len(b) for b in blocks))
-    return None
+    return None, hyps
 
 
 def ocr_words(photo: bytes) -> list[tuple[str, float]]:
@@ -1073,56 +1104,35 @@ class CaptchaSolver:
 
         results: list[int] = []
 
-        # 1) OCR с early-exit: после первых базовых вариантов пробуем матч; если нашли — выходим.
-        # ВАЖНО: оборачиваем в wait_for — tesseract на сломанной картинке
-        # может зависнуть на минуты, блокируя всю очередь lookup.
+        # 1) OCR с early-exit. Гипотезы собираются один раз и переиспользуются для запасных
+        # кандидатов — раньше после успешного OCR ещё раз гонялся полный ocr_words() (85 вызовов
+        # tesseract), и клик по уже найденной кнопке задерживался на 10–25 секунд.
+        # В кеш ответ НЕ кладём, пока бот поиска не подтвердил клик (это делает solve_captcha):
+        # иначе неверная догадка OCR закреплялась бы в кеше.
+        # Семафор: одновременно не больше OCR_CONCURRENCY распознаваний — при волне капч с
+        # нескольких аккаунтов tesseract-потоки забивали общий executor и тормозили весь бот.
         if self._ocr_available:
+            idx, hyps = None, []
             try:
-                idx = await asyncio.wait_for(
-                    asyncio.to_thread(_ocr_and_match, photo, btns), timeout=30
-                )
+                async with _ocr_sem():
+                    deadline = time.monotonic() + 25
+                    idx, hyps = await asyncio.wait_for(
+                        asyncio.to_thread(_ocr_match_hyps, photo, btns, deadline), timeout=30)
             except asyncio.TimeoutError:
                 log.warning("Captcha solver: OCR timeout на 30s — пропускаем")
-                idx = None
             except Exception as e:            # noqa: BLE001
                 log.warning("Captcha solver: OCR упал: %s", e)
-                idx = None
             if idx is not None:
-                cache_put(ck, idx)
                 results.append(idx)
-                # дополнительно — лучшие OCR слова (по confidence), сматченные к кнопкам
-                try:
-                    hyps = await asyncio.wait_for(
-                        asyncio.to_thread(ocr_words, photo), timeout=30
-                    )
-                    hyps.sort(key=lambda x: -x[1])          # сначала гипотезы с высокой confidence
-                    for w, _ in hyps[:12]:
-                        alt = match_word_to_button(w, btns)
-                        if alt is not None and alt != idx and alt not in results:
-                            results.append(alt)
-                            if len(results) >= 3:
-                                break
-                except Exception:
-                    pass
+            # запасные кандидаты для retry — из уже собранных гипотез (по confidence)
+            for w, _ in sorted(hyps, key=lambda x: -x[1])[:12]:
+                alt = match_word_to_button(w, btns)
+                if alt is not None and alt not in results:
+                    results.append(alt)
+                    if len(results) >= 3:
+                        break
+            if idx is not None:
                 return results
-
-        # 1b) OCR не дал однозначного ответа, но собрал гипотезы — вытащим топ слабых матчей.
-        # Это оправданная трата токенов retry: пусть funstat подтвердит или отвергнет,
-        # а не отправляем сразу админу.
-        if self._ocr_available:
-            try:
-                hyps = await asyncio.wait_for(
-                    asyncio.to_thread(ocr_words, photo), timeout=30
-                )
-                hyps.sort(key=lambda x: -x[1])
-                for w, _ in hyps[:12]:
-                    alt = match_word_to_button(w, btns)
-                    if alt is not None and alt not in results:
-                        results.append(alt)
-                        if len(results) >= 2:
-                            break
-            except Exception:
-                pass
 
         # 2) vision API — защитимся от любых исключений, иначе капча не решается НИЧЕМ
         if self._vision.enabled:

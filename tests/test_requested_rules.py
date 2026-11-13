@@ -47,8 +47,13 @@ def test_premium_over_floor_only_rare_or_mono():
 def test_hard_cap_450_even_for_rare():
     _setup()
     f = PriceFilter()
-    assert not f.check(_lot(stars_price=2760, floor_stars=500, model_rarity="1%",
-                            backdrop_rarity="1%")).passed                            # +452% — нет никогда
+    # редкий лот: потолок MAX_ABOVE_FLOOR намеренно НЕ действует (см. price_filter: 8000⭐ на флоре 929
+    # с редкой моделью раньше падал по cap и дорогие лоты не шли вообще)
+    assert f.check(_lot(stars_price=2760, floor_stars=500, model_rarity="1%",
+                        backdrop_rarity="1%")).passed
+    # обычный лот выше потолка — по-прежнему нет
+    assert not f.check(_lot(stars_price=2760, floor_stars=500, model_rarity="3%",
+                            backdrop_rarity="3%")).passed
 
 
 def test_fancy_names_and_arabic():

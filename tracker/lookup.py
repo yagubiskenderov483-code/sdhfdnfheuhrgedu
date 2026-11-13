@@ -545,7 +545,7 @@ class OwnerLookup:
         # Следующий бот из пула (кроме помеченного этого)
         next_bot = next((b for b in self._bot_pool() if b.lower() != k), None)
         log.error("Lookup: бот @%s недоступен (%d подряд unresolvable на разных сессиях). "
-                  "Помечен dead на 15 мин. Fallback → @%s",
+                  "На 10 мин в конец очереди (из работы не выпадает). Сначала → @%s",
                   bot, n, next_bot or "— запасных нет, настрой LOOKUP_BOTS")
         if self.on_bot_dead:
             try:
@@ -1365,7 +1365,7 @@ class OwnerLookup:
                 deadline = time.monotonic() + max(5.0, settings.lookup_timeout)
                 poll_min_id = None     # после капчи: читаем все последние, не только с min_id
                 prev_sig, stable, last_cands = None, 0, []
-                await asyncio.sleep(2.0)  # даём боту время обработать нажатие
+                await asyncio.sleep(1.5)  # даём боту время обработать нажатие (раньше 2 с тут + 2 с в _wait_captcha)
                 continue
             # funstat ответил чем-то кроме капчи — значит прошлая капча (если была) прошла нормально
             got_answer = True
@@ -1467,8 +1467,7 @@ class OwnerLookup:
                         self._captcha.pop(token, None)
                         if self._captcha_by_session.get(session) == token:
                             self._captcha_by_session.pop(session, None)
-                        await asyncio.sleep(2.0)
-                        return True
+                        return True       # пауза перед чтением ответа — одна, в _ask_bot_locked
                     log.info("Lookup: авто-клик %d (из топ-%d) не прошёл (%s)",
                              idx + 1, len(idxs), res)
                     # Капча стала «неактуальной» — funstat её сменил. Остальные idxs шлют в молоко,
@@ -1508,8 +1507,7 @@ class OwnerLookup:
                         self._captcha.pop(token, None)
                         if self._captcha_by_session.get(session) == token:
                             self._captcha_by_session.pop(session, None)
-                        await asyncio.sleep(2.0)
-                        return True
+                        return True       # пауза перед чтением ответа — одна, в _ask_bot_locked
                     log.info("Lookup: рандом-клик %d не прошёл (%s)", idx + 1, res)
                     # Капча «неактуальна» → funstat её сменил ИЛИ прислал новую (мы её увидим в
                     # следующем _ask_bot_locked poll). Если «Неизвестная кнопка» — больше нечего пробовать.

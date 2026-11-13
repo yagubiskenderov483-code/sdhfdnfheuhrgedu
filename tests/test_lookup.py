@@ -274,8 +274,10 @@ async def main():
     c2 = FakeClient(REPLY, gifts, users)
     lk2 = L.OwnerLookup(FakeSessions(c2), kv)               # «после деплоя»: кэш в памяти пуст
     f = await lk2.find_owner("Иван Иванов", "PlushPepe-77", 5555)
-    check(f is not None and f.user_id == 222 and not c2.sent and lk2.stats["from_memory"] == 1,
-          "владелец из памяти — боту поиска не пишем")
+    # Память «имя → владелец» в _find намеренно выключена (под тем же именем бывает ДРУГОЙ продавец,
+    # юз в памяти устаревает) — каждый раз проверяем заново через бота поиска.
+    check(f is not None and f.user_id == 222 and lk2.stats.get("from_memory", 0) == 0,
+          "память имён выключена — владелец найден заново, а не из памяти")
 
     # приоритет: дорогой лот получает аккаунт раньше дешёвого
     pl = L._PrioLock()
@@ -499,11 +501,21 @@ async def main():
     kb = listing_keyboard(l)
     btns = {b.text: b for row in kb.inline_keyboard for b in row}
     check(set(btns) == {"Занять", "Лот", "Написать"}, "кнопки: Занять / Лот / Написать (без «Клик»)")
-    check(btns["Написать"].url.startswith("https://t.me/ivan_222?text=%40iostherobot"),
-          "«Написать» → ЛС продавца с готовым оффером")
+    check(btns["Написать"].url == "https://t.me/ivan_222",
+          "по умолчанию «Написать» → пустой ЛС продавца (без оффера)")
+    kb = listing_keyboard(l, with_offer=True)
+    btns = {b.text: b for row in kb.inline_keyboard for b in row}
+    check("Написать с оффером" in btns
+          and btns["Написать с оффером"].url.startswith("https://t.me/ivan_222?text=%40iostherobot"),
+          "/фа → «Написать с оффером»: ЛС продавца с готовым оффером торгового бота")
     settings.trade_bot_username = ""
-    check(btns and listing_keyboard(l).inline_keyboard[1][1].url == "https://t.me/ivan_222",
+    check(listing_keyboard(l).inline_keyboard[1][1].url == "https://t.me/ivan_222",
           "без торгового бота «Написать» → просто ЛС продавца")
+    kb = listing_keyboard(l, with_offer=True, offer_amount=(1500, ""))
+    b = kb.inline_keyboard[1][1]
+    from urllib.parse import unquote
+    check(b.text == "Написать с оффером" and "1 500" in unquote(b.url) and "?text=" in b.url,
+          "/фа без торгового бота → обычный текст оффера со своей ценой в ЛС продавца")
 
     # скидка оффера: до 1000 ⭐ включительно −30, дальше как было
     from bot.formatter import _trade_offer
@@ -514,11 +526,18 @@ async def main():
           "от 1001 ⭐ — прежние скидки")
 
     # не нашли и LOOKUP_REQUIRED=true → лот не уходит
+    # (дешёвый лот: от SOFT_FILTER_STARS лот специально уходит с пометкой «владелец не найден»)
+    p = pipeline(FakeClient(REPLY, {111: [], 222: [], 333: []}, users))
+    l = hidden()
+    l.stars_price = max(1, int(settings.soft_filter_stars or 1000) - 100)
+    await p.process(ListingEvent(l, _t.monotonic(), "live"))
+    await asyncio.gather(*list(p._lookup_tasks))
+    check(p.sent_l is None and l.status == ListingStatus.FILTERED_SELLER, "владелец не найден → лот не отправлен")
     p = pipeline(FakeClient(REPLY, {111: [], 222: [], 333: []}, users))
     l = hidden()
     await p.process(ListingEvent(l, _t.monotonic(), "live"))
     await asyncio.gather(*list(p._lookup_tasks))
-    check(p.sent_l is None and l.status == ListingStatus.FILTERED_SELLER, "владелец не найден → лот не отправлен")
+    check(l.owner_not_found, "дорогой лот без владельца — помечен «владелец не найден» (SOFT_FILTER_STARS)")
 
     # лот продали, пока искали владельца → не шлём
     settings.lookup_check_onsale = True

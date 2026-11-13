@@ -110,6 +110,9 @@ async def _crypto_pay_call(method: str, payload: dict) -> dict:
     return data.get("result") or {}
 
 
+_BG_TASKS: set[asyncio.Task] = set()
+
+
 def sub_chat_id() -> int:
     return settings.sub_chat_id or settings.target_chat_id
 
@@ -229,7 +232,7 @@ class Subscriptions:
                     # счёт старой версии: она могла успеть выдать время, но не отметить счёт —
                     # если у человека есть время после оплаты, считаем выданным (иначе выдали бы дважды)
                     u = self.state["users"].get(str(i.get("uid"))) or {}
-                    secs = PLANS.get(i.get("plan"), (None, None, 0, None))[2]
+                    secs = (plan_info(i.get("plan")) or (None, None, 0, None))[2]
                     if secs == FOREVER:
                         got = u.get("until") == FOREVER or u.get("pending") == FOREVER
                     else:
@@ -294,6 +297,39 @@ class Subscriptions:
             [InlineKeyboardButton(text="Подписка", callback_data="sub:menu")],
             [InlineKeyboardButton(text="Моя подписка", callback_data="sub:my")],
         ])
+
+    @staticmethod
+    def renew_kb() -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="Продлить подписку", callback_data="sub:menu")],
+            [InlineKeyboardButton(text="Моя подписка", callback_data="sub:my")],
+        ])
+
+    async def _notify_expired(self, uid: int, u: dict | None) -> None:
+        """ЛС после кика: срок закончился + кнопка «Продлить подписку».
+        Один раз на каждый срок (expired_notified = until), чтобы _expire и _reconcile
+        не слали одно и то же дважды. Если человек ни разу не открывал бота, Telegram не даёт
+        написать первым — это нормально, просто пишем в лог."""
+        u = u if u is not None else self.state["users"].get(str(uid))
+        if u is None:
+            return
+        until = u.get("until")
+        if u.get("expired_notified") == until:
+            return
+        u["expired_notified"] = until
+        started = float(u.get("started") or 0)
+        was_trial = bool(u.get("trial")) and until not in (None, FOREVER) and started \
+            and float(until) - started <= TRIAL_SECONDS + 60
+        if was_trial:
+            text = ("<b>Пробный период закончился</b>\n\n"
+                    "Вы удалены из канала с лотами. Чтобы снова получать лоты, "
+                    "оформите подписку — кнопка ниже.")
+        else:
+            text = ("<b>Срок вашей подписки окончен</b>\n\n"
+                    "Вы удалены из канала с лотами. Продлите подписку, чтобы снова "
+                    "получать лоты, — после оплаты бот сразу пришлёт новую ссылку.")
+        if not await self._dm_user(uid, text, reply_markup=self.renew_kb()):
+            log.info("Expired-notice to %s not delivered (бот не может написать первым)", uid)
 
     def plans_kb(self, uid: int) -> InlineKeyboardMarkup:
         rows = []
@@ -606,7 +642,19 @@ class Subscriptions:
                     async with self._lock:
                         u["in_chat"] = False
                         await self.save()
+                        renewed = self._has_access(u) or u.get("pending")
+                    if renewed:
+                        # продлил, пока мы его кикали — новая ссылка вместо «срок окончен»
+                        try:
+                            text = await self.grant(uid, 0, "Подписка продлена, держите ссылку для входа.")
+                            await self._dm_user(uid, text)
+                        except Exception as e:
+                            log.warning("Re-link after renewal during reconcile failed for %s: %s", uid, e)
+                        continue
                     log.warning("Reconcile: user %s still in channel after subscription ended — kicked", uid)
+                    if not u.get("unpaid_join"):
+                        await self._notify_expired(uid, u)
+                        await self.save()
 
     async def kick(self, uid: int) -> bool:
         """Удалить из канала без ЧС: ban → сразу unban. → True, если человека в канале больше нет."""
@@ -645,7 +693,7 @@ class Subscriptions:
                         and time.time() - inv["ts"] < INVOICE_TTL):
                     return code
             code = "TRK" + secrets.token_hex(4).upper()
-            self.state["invoices"][code] = {"uid": uid, "plan": plan, "nano": int(round(PLANS[plan][1] * 1e9)),
+            self.state["invoices"][code] = {"code": code, "uid": uid, "plan": plan, "nano": int(round(PLANS[plan][1] * 1e9)),
                                             "ts": time.time(), "paid": False, "kind": "ton"}
             await self.save()
         if self.on_change:
@@ -687,7 +735,7 @@ class Subscriptions:
             url = "https://" + url.lstrip("/")
         async with self._lock:
             self.state["invoices"][code] = {
-                "uid": uid, "plan": plan, "kind": "stars", "stars": int(stars),
+                "code": code, "uid": uid, "plan": plan, "kind": "stars", "stars": int(stars),
                 "stars_url": url, "ts": now, "paid": False,
             }
             await self.save()
@@ -735,7 +783,7 @@ class Subscriptions:
                 raise RuntimeError(f"CryptoPay вернул неполный результат: {res}")
             async with self._lock:
                 self.state["invoices"][code] = {
-                    "uid": uid, "plan": plan, "kind": "crypto",
+                    "code": code, "uid": uid, "plan": plan, "kind": "crypto",
                     "nano": int(round(price * 1e9)),
                     "pay_url": pay_url, "invoice_id": int(invoice_id),
                     "asset": "TON", "amount": str(price),
@@ -763,7 +811,7 @@ class Subscriptions:
             raise
         async with self._lock:
             self.state["invoices"][code] = {
-                "uid": uid, "plan": plan, "kind": "crypto",
+                "code": code, "uid": uid, "plan": plan, "kind": "crypto",
                 "nano": int(round(price * 1e9)),
                 "pay_url": pay_url, "invoice_id": None,
                 "asset": "TON", "amount": str(price),
@@ -783,18 +831,28 @@ class Subscriptions:
         на paid — доставляется. → число оплат, обработанных в этот проход."""
         if not settings.crypto_bot_api_token:
             return 0
-        pending = [(code, int(i["invoice_id"])) for code, i in self.state["invoices"].items()
-                   if i.get("kind") == "crypto" and not i.get("paid") and i.get("invoice_id")]
+        now = time.time()
+        # свежие первыми и только за 7 дней: раньше брались первые 100 по порядку вставки —
+        # при >100 висящих счетах новые не проверялись никогда и оплата терялась
+        pending = sorted(((code, int(i["invoice_id"]), float(i.get("ts") or 0))
+                          for code, i in self.state["invoices"].items()
+                          if i.get("kind") == "crypto" and not i.get("paid") and i.get("invoice_id")
+                          and now - float(i.get("ts") or 0) < 7 * 86400),
+                         key=lambda x: -x[2])
+        pending = [(c, iid) for c, iid, _ in pending[:300]]
         if not pending:
             return 0
-        ids = [str(iid) for _, iid in pending[:100]]      # Crypto Bot ограничивает 100 id за раз
-        try:
-            res = await _crypto_pay_call("getInvoices", {"invoice_ids": ",".join(ids), "count": len(ids)})
-        except Exception as e:
-            log.warning("CryptoPay getInvoices failed: %s", e)
-            return 0
-        items = res.get("items") or []
-        by_id = {int(x.get("invoice_id") or 0): x for x in items if isinstance(x, dict)}
+        by_id: dict[int, dict] = {}
+        for k in range(0, len(pending), 100):           # Crypto Bot отдаёт не больше 100 id за раз
+            ids = [str(iid) for _, iid in pending[k:k + 100]]
+            try:
+                res = await _crypto_pay_call("getInvoices", {"invoice_ids": ",".join(ids), "count": len(ids)})
+            except Exception as e:
+                log.warning("CryptoPay getInvoices failed: %s", e)
+                break
+            for x in res.get("items") or []:
+                if isinstance(x, dict):
+                    by_id[int(x.get("invoice_id") or 0)] = x
         paid: list[dict] = []
         async with self._lock:
             for code, iid in pending:
@@ -821,7 +879,7 @@ class Subscriptions:
                 await self.save(backup=True)
         await self.flush_backup()
         for inv in paid:
-            title, price, _secs, _stars = PLANS.get(inv["plan"], ("?", 0, 0, None))
+            title, price, _secs, _stars = plan_info(inv["plan"]) or ("?", 0, 0, None)
             log.info("CryptoPay payment received: user=%s plan=%s", inv["uid"], inv["plan"])
             ok = await self._deliver(inv)
             for admin in settings.admin_ids:
@@ -839,21 +897,34 @@ class Subscriptions:
         """successful_payment.invoice_payload (= наш code) → отметить оплату и выдать доступ."""
         async with self._lock:
             inv = self.state["invoices"].get(payload)
-            if not inv or inv.get("kind") != "stars":
-                log.warning("Stars payment for unknown invoice %r from %s", payload, uid)
-                return
-            if inv.get("paid"):
-                return                 # повторный webhook того же платежа
-            if int(inv.get("uid") or 0) != int(uid):
-                log.warning("Stars payment %s uid mismatch: inv=%s pay=%s", payload, inv.get("uid"), uid)
-            inv["paid"] = True
-            inv["paid_at"] = time.time()
-            inv["granted"] = "inflight"
-            inv["charge_id"] = charge_id
-            inv["paid_stars"] = int(total_amount)
-            self.state["revenue_stars"] = int(self.state.get("revenue_stars") or 0) + int(total_amount)
-            self.state["paid_count_stars"] = int(self.state.get("paid_count_stars") or 0) + 1
-            await self.save(backup=True)
+            if inv and inv.get("kind") == "stars" and inv.get("paid") and inv.get("charge_id") == charge_id:
+                return                 # повторный апдейт того же платежа
+            # invoice-ссылку можно оплатить повторно (другой charge_id) — это НОВЫЕ деньги, не теряем молча
+            unknown = not inv or inv.get("kind") != "stars" or bool(inv.get("paid"))
+            if not unknown:
+                if int(inv.get("uid") or 0) != int(uid):
+                    log.warning("Stars payment %s uid mismatch: inv=%s pay=%s", payload, inv.get("uid"), uid)
+                inv["paid"] = True
+                inv["paid_at"] = time.time()
+                inv["granted"] = "inflight"
+                inv["charge_id"] = charge_id
+                inv["paid_stars"] = int(total_amount)
+                self.state["revenue_stars"] = int(self.state.get("revenue_stars") or 0) + int(total_amount)
+                self.state["paid_count_stars"] = int(self.state.get("paid_count_stars") or 0) + 1
+                await self.save(backup=True)
+        if unknown:
+            log.warning("Stars payment %s for unknown/paid invoice %r from %s", total_amount, payload, uid)
+            for admin in settings.admin_ids:
+                try:
+                    await self.bot.send_message(
+                        admin, f"Пришла оплата <b>{total_amount} Stars</b> от <code>{uid}</code>, но счёт "
+                               f"<code>{html.escape(str(payload)[:64])}</code> не найден или уже оплачен.\n"
+                               f"Выдать вручную: <code>/grant {uid} 24</code>"
+                               + (f"\nchargeID: <code>{html.escape(str(charge_id))}</code>" if charge_id else ""))
+                except Exception:
+                    pass
+            await self._dm_user(uid, "Оплата получена. Админ проверит её и выдаст доступ вручную.")
+            return
         await self.flush_backup()
         await self._deliver(inv)
         pinfo = plan_info(inv["plan"]) or ("?", 0.0, 0.0, None)
@@ -871,7 +942,8 @@ class Subscriptions:
         обработанного перевода или до времени старше самого старого открытого счёта.
         Если toncenter (бесплатный, 1 rps) не отвечает — фоллбек на tonapi.io."""
         seen = set(self.state.get("seen_tx") or [])
-        open_ts = [float(i.get("ts") or 0) for i in self.state["invoices"].values() if not i.get("paid")]
+        open_ts = [float(i.get("ts") or 0) for i in self.state["invoices"].values()
+                   if not i.get("paid") and i.get("kind", "ton") == "ton"]
         oldest = min(open_ts) if open_ts else time.time()
         out: list[dict] = []
         tc_err: str | None = None
@@ -944,8 +1016,11 @@ class Subscriptions:
     async def check_payments(self) -> int:
         """Найти оплаченные счета по комментарию и сумме. → сколько оплачено сейчас."""
         # ссылка на оплату живёт INVOICE_TTL, но опоздавший перевод по счёту всё равно засчитываем (7 дней)
+        # только TON-счета: у Stars/Crypto нет суммы в nano (KeyError ронял всю проверку), и TON-перевод
+        # с их кодом не должен закрывать счёт, который человек может оплатить ещё раз в CryptoBot/Stars
         open_codes = {c for c, i in self.state["invoices"].items()
-                      if not i.get("paid") and time.time() - i["ts"] < 7 * 86400}
+                      if not i.get("paid") and i.get("kind", "ton") == "ton" and i.get("nano")
+                      and time.time() - float(i.get("ts") or 0) < 7 * 86400}
         if not open_codes or not settings.sub_ton_address:
             return 0
         txs = await self._fetch_txs()
@@ -1044,13 +1119,20 @@ class Subscriptions:
 
         Per-invoice lock: параллельные клики "проверить оплату" сериализуются,
         второй видит notice_sent=True и не шлёт повторный pre-notice."""
-        code = str(inv.get("code") or f"uid:{inv.get('uid')}")
+        # ключ — пользователь: два разных счёта одного человека тоже не должны выдаваться параллельно
+        # (оба grant() иначе создают по ссылке и дважды шлют «оплата получена»)
+        code = f"uid:{inv.get('uid')}"
         lock = self._deliver_locks.setdefault(code, asyncio.Lock())
-        async with lock:
-            # Повторный вход (второй клик после первого успешного _deliver) — быстрый выход.
-            if inv.get("granted") is True:
-                return True
-            return await self._deliver_locked(inv)
+        try:
+            async with lock:
+                # Повторный вход (второй клик после первого успешного _deliver) — быстрый выход.
+                if inv.get("granted") is True:
+                    return True
+                return await self._deliver_locked(inv)
+        finally:
+            if (not lock.locked() and not getattr(lock, "_waiters", None)
+                    and self._deliver_locks.get(code) is lock):
+                self._deliver_locks.pop(code, None)      # словарь локов не растёт бесконечно
 
     async def _deliver_locked(self, inv: dict) -> bool:
         pinfo = plan_info(inv["plan"])
@@ -1219,8 +1301,8 @@ class Subscriptions:
                         pass
                 continue
             log.info("Subscription ended — user %s removed from channel", uid)
-            await self._dm_user(uid, "Ваша подписка закончилась. Продлить можно здесь:",
-                                reply_markup=self.main_kb())
+            await self._notify_expired(uid, u)
+            await self.save()
         # старые счета и неиспользованные ссылки — чистим
         for code, i in list(self.state["invoices"].items()):
             if i.get("paid") and i.get("granted") is not True:
@@ -1596,6 +1678,8 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         last_ts = subs._check_last_ts.get(q.from_user.id, 0.0)
         skip_network = (now_ts - last_ts) < 3.0
         subs._check_last_ts[q.from_user.id] = now_ts
+        if len(subs._check_last_ts) > 5000:
+            subs._check_last_ts = {k: v for k, v in subs._check_last_ts.items() if now_ts - v < 60}
 
         # 1) Прочекать toncenter / CryptoPay прямо сейчас (не ждём фоновый цикл).
         #    Ошибку НЕ прячем — показываем юзеру, чтобы было понятно, что сети лежит.
@@ -1627,7 +1711,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 await q.answer("Оплата пришла — ссылка в чате", show_alert=True)
             else:
                 await q.answer("Оплата пришла, выдаю доступ…", show_alert=True)
-                asyncio.get_running_loop().create_task(subs._retry_undelivered())
+                t = asyncio.get_running_loop().create_task(subs._retry_undelivered())
+                _BG_TASKS.add(t)                     # сильная ссылка — иначе задачу может съесть GC
+                t.add_done_callback(_BG_TASKS.discard)
         elif inv.get("got"):
             # пришла НЕПОЛНАЯ сумма — комментарий совпал, но меньше чем нужно
             got_ton = int(inv.get("got") or 0) / 1e9

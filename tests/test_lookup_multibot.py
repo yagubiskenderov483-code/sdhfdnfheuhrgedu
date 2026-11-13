@@ -137,28 +137,32 @@ def test_any_bot_configured():
 
 
 def test_register_bot_unresolved_threshold():
-    """3 подряд unresolvable (при пустом LOOKUP_SESSIONS → threshold=min(3,max(2, 1//2))=2) → dead-mark."""
-    settings.lookup_bot_username = "funstat"
-    settings.lookup_bots = []
-    settings.lookup_sessions = []  # threshold = min(3, max(2, 0)) = 2
-    lk = L.OwnerLookup(FakeSessions([]))
-    lk._register_bot_unresolved("funstat")
-    check("funstat" not in lk._bot_dead_until, "1 fail — not yet dead")
-    lk._register_bot_unresolved("funstat")
-    check("funstat" in lk._bot_dead_until, "2 fails + threshold=2 → dead-marked")
-
-
-def test_clear_bot_unresolved():
-    """После успеха дед-метка снимается."""
+    """3 РАЗНЫЕ сессии с unresolvable → бот уходит в конец очереди (slow-mark), dead-mark не ставится:
+    по просьбе админа боты из работы не выпадают."""
     settings.lookup_bot_username = "funstat"
     settings.lookup_bots = []
     settings.lookup_sessions = []
     lk = L.OwnerLookup(FakeSessions([]))
-    for _ in range(3):
-        lk._register_bot_unresolved("funstat")
-    check("funstat" in lk._bot_dead_until, "pre: dead")
+    lk._register_bot_unresolved("funstat", "s1")
+    lk._register_bot_unresolved("funstat", "s1")
+    check("funstat" not in lk._bot_slow_until, "2 фейла с ОДНОЙ сессии — ещё не slow")
+    lk._register_bot_unresolved("funstat", "s2")
+    lk._register_bot_unresolved("funstat", "s3")
+    check("funstat" in lk._bot_slow_until and "funstat" not in lk._bot_dead_until,
+          "3 разные сессии → slow-mark, но не dead")
+
+
+def test_clear_bot_unresolved():
+    """После успеха метка снимается."""
+    settings.lookup_bot_username = "funstat"
+    settings.lookup_bots = []
+    settings.lookup_sessions = []
+    lk = L.OwnerLookup(FakeSessions([]))
+    for s_ in ("s1", "s2", "s3"):
+        lk._register_bot_unresolved("funstat", s_)
+    check("funstat" in lk._bot_slow_until, "pre: slow")
     lk._clear_bot_unresolved("funstat")
-    check("funstat" not in lk._bot_dead_until, "clear: dead-mark removed")
+    check("funstat" not in lk._bot_slow_until, "clear: slow-mark removed")
     check(lk._bot_consec_unres.get("funstat", 0) == 0, "clear: counter reset")
 
 
@@ -218,7 +222,8 @@ def test_pick_sessions_primary_dead_fallback_bot_alive():
     lk._bot_dead_until["funstat"] = now + 900     # primary dead-marked
     lk._bot_unresolvable[("s1", "funstat")] = now  # и у сессии метка на primary
     # В пуле остался только infostat; s1 к нему не unres → должна остаться
-    check(lk._bot_pool() == ["infostat"], "пул отфильтровал dead primary")
+    lk._bot_slow_until["funstat"] = now + 600     # «молчащий» бот не выкидывается — идёт последним
+    check(lk._bot_pool() == ["infostat", "funstat"], "молчащий primary — в конце пула, не выкинут")
     order = lk._pick_sessions()
     check("s1" in order, f"s1 остаётся: primary dead, fallback жив, сессия к fallback'у ок: {order}")
 
