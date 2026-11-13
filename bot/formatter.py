@@ -171,10 +171,10 @@ def listing_keyboard(l: Listing, with_seller: bool = True, with_offer: bool = Fa
         # Без админской команды — «Написать» (пустой ЛС). После '/фа <юз|id> оффер' —
         # «Написать с оффером»: в поле ввода уже стоит оффер, остаётся нажать «Отправить».
         has_offer = bool(offer_text) and ("?text=" in url)
-        # «Написать» — красная, «Написать с оффером» — обычная со звездой (сразу видно лот с оффером)
-        kw = {"style": "danger"} if not has_offer else {}
+        # Кнопка «Написать» всегда красная (чтобы «светилась»), и с оффером, и без —
+        # оффер теперь на всех лотах по умолчанию (OFFER_IN_BUTTON).
         second.append(InlineKeyboardButton(text="Написать с оффером" if has_offer else "Написать",
-                                           **kw, **_icon(E.PENCIL), url=url))
+                                           style="danger", **_icon(E.PENCIL), url=url))
     if second:
         rows.append(second)
     return InlineKeyboardMarkup(inline_keyboard=rows)
