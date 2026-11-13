@@ -254,7 +254,7 @@ class MessageFormatter:
         elif l.seller_name:
             # Скрытый Telegram-ом владелец: имя идёт как <code> — один тап копирует его в буфер,
             # дальше можно вручную найти профиль через любой поиск (глобальный Telegram, бот поиска и т.п.)
-            seller_line = f"<code>{html.escape(l.seller_name)}</code> (скрыт Telegram — скопируй имя)"
+            seller_line = f"<code>{html.escape(l.seller_name)}</code> (скрыт Telegram – скопируй имя)"
             if getattr(l, "owner_pending", False):
                 seller_line = f"<code>{html.escape(l.seller_name)}</code> (🔎 ищу владельца…)"
             elif l.owner_not_found:

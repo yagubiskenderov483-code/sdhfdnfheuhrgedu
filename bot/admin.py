@@ -573,6 +573,8 @@ def build_routers(app: "App") -> list[Router]:
     pending: dict[int, dict[str, Any]] = {}   # user_id → {client, name, phone, hash, api_id, api_hash}
     claimed: set[tuple[int, int]] = set()     # (chat_id, message_id) уже занятых лотов — атомарность «Занять»
     claim_lock = asyncio.Lock()
+    take_cd: dict[int, float] = {}            # user_id → monotonic последнего «Занять» (кулдаун 3 сек)
+    TAKE_COOLDOWN = 3.0
     global _owner_ids_getter
     _owner_ids_getter = lambda: {r.owner_id for r in app.storage.list_sessions() if r.owner_id}  # noqa: E731
 
@@ -658,6 +660,12 @@ def build_routers(app: "App") -> list[Router]:
         if first.callback_data != q.data:          # старый пост, уже занят
             await q.answer("Данный лот занят", show_alert=True)
             return
+        # кулдаун 3 сек между «Занять» у одного пользователя
+        _uid = q.from_user.id
+        _left = TAKE_COOLDOWN - (time.monotonic() - take_cd.get(_uid, 0.0))
+        if _left > 0:
+            await q.answer(f"Подождите {int(_left) + 1} сек перед следующим лотом", show_alert=True)
+            return
         # атомарно: первый нажавший занимает лот, второй получает отказ
         key = (msg.chat.id, msg.message_id)
         async with claim_lock:
@@ -729,6 +737,11 @@ def build_routers(app: "App") -> list[Router]:
                  "ts": int(time.time())}))
         except Exception as e:
             log.warning("Could not save taken lot: %s", e)
+        take_cd[_uid] = time.monotonic()           # старт кулдауна 3 сек на следующий «Занять»
+        if len(take_cd) > 10000:
+            _now = time.monotonic()
+            for _k in [k for k, v in take_cd.items() if _now - v > 60]:
+                take_cd.pop(_k, None)
         await q.answer("Лот ваш, отправил его вам в личку")
 
     @public.callback_query(F.data == "taken")
@@ -3171,7 +3184,7 @@ def build_routers(app: "App") -> list[Router]:
             price = f"{r['stars_price']}⭐" if r["stars_price"] is not None else "TON"
             reason = _human_reason(r["status"], r["reason"] or "", r["seller_filter_result"])
             lines.append(f"{icons.get(r['status'], '•')} {html.escape(r['gift_name'] or '?')} #{r['gift_num'] or ''} "
-                         f"— {price}" + (f" — {html.escape(reason[:60])}" if r["status"] != "SENT" else ""))
+                         f"– {price}" + (f" – {html.escape(reason[:60])}" if r["status"] != "SENT" else ""))
         await _answer_long(m, "\n".join(lines))
 
     async def _stats_text() -> str:
