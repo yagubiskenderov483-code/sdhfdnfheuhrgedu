@@ -415,7 +415,7 @@ class Subscriptions:
         for _code, (title, price, _, stars) in PLANS.items():
             p_ton = _disc(price, pct)
             p_st = max(1, round(_disc(stars, pct))) if stars else None
-            lines.append(f"<b>{title}</b> — {p_ton:.4g} {t}" + (f" / {p_st} {st}" if p_st else ""))
+            lines.append(f"<b>{title}</b> — {t} {p_ton:.4g}" + (f" / {st} {p_st}" if p_st else ""))
         disc = f"\n\nСкидка по промокоду: <b>−{pct}%</b>" if pct else ""
         return (f'{_tg_emoji(EMOJI_SUB, "💎")} <b>Подписка</b>\n\n' + "\n".join(lines) + disc
                 + "\n\nВыберите тариф")
@@ -1900,13 +1900,13 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             t = _tg_emoji(EMOJI_TON, "💎")
             await _safe_edit(q.message,
                 f"<b>Билет {GAME_BALLS[ball][0]} — {ton:g} {t}</b>\n\n"
-                "Онлайн: нажмите «Оплатить онлайн» — откроется Tonkeeper с готовой суммой и комментарием.\n\n"
+                "Онлайн: нажмите «Оплатить» — откроется Tonkeeper с готовой суммой и комментарием.\n\n"
                 f"Вручную: отправьте <b>{ton:g} {t}</b> на\n<code>{settings.sub_ton_address}</code>\n"
                 f"с комментарием <code>{code}</code>.\n\n"
                 "Счёт действует 30 минут. После оплаты бот сам бросит мяч.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [btn("Оплатить онлайн", "success", E.TON, url=subs.invoice_url(code))],
-                    [btn("Проверить оплату", "primary", E.PAID, callback_data=f"sub:check:{code}")], back]))
+                    [btn("Оплатить", "success", E.TON, url=subs.invoice_url(code))],
+                    [btn("Проверить оплату", "primary", E.CHECK, callback_data=f"sub:check:{code}")], back]))
             await q.answer()
             return
         await q.answer("Способ оплаты недоступен", show_alert=True)
@@ -2118,13 +2118,13 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 return
             code = await subs.new_invoice(q.from_user.id, plan)
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [btn("Оплатить онлайн", "success", E.TON, url=subs.invoice_url(code))],
-                [btn("Проверить оплату", "primary", E.PAID, callback_data=f"sub:check:{code}")],
+                [btn("Оплатить", "success", E.TON, url=subs.invoice_url(code))],
+                [btn("Проверить оплату", "primary", E.CHECK, callback_data=f"sub:check:{code}")],
                 back_row,
             ])
             await _safe_edit(q.message,
                 f"<b>Тариф {title} — {price:g}</b> {_tg_emoji(EMOJI_TON, '💎')}\n\n"
-                "Онлайн: нажмите «Оплатить онлайн» — откроется Tonkeeper с готовой суммой и комментарием.\n\n"
+                "Онлайн: нажмите «Оплатить» — откроется Tonkeeper с готовой суммой и комментарием.\n\n"
                 f"Вручную: отправьте <b>{price:g}</b> {_tg_emoji(EMOJI_TON, '💎')} на\n"
                 f"<code>{settings.sub_ton_address}</code>\n"
                 f"с комментарием <code>{code}</code>.\n\n"
