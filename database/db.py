@@ -311,6 +311,15 @@ class Database:
         r = await cur.fetchone()
         return dict(r) if r else None
 
+    async def listing_by_message(self, chat_id: int, message_id: int) -> dict[str, Any] | None:
+        """Лот по (чат, message_id) поста — для пересборки клавиатуры (напр. оффер в личной копии)."""
+        assert self.conn
+        cur = await self.conn.execute(
+            "SELECT * FROM listings WHERE target_chat_id=? AND message_id=? ORDER BY id DESC LIMIT 1",
+            (chat_id, message_id))
+        r = await cur.fetchone()
+        return dict(r) if r else None
+
     async def username_already_sent(self, username: str, since_iso: str | None = None) -> bool:
         """Лот этого @username уже отправлялся (без учёта регистра и @).
         since_iso — дедуп только за период (совпадает с поведением seller_already_sent)."""

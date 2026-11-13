@@ -679,6 +679,21 @@ def build_routers(app: "App") -> list[Router]:
         who = f"@{u.username}" if u.username else (u.full_name or str(u.id))
         original = msg.html_text or ""
         links = kb.inline_keyboard[1:]
+        # Оффер — только тем, кому выдан доступ (активная подписка/админ): в личной копии
+        # лота кнопка «Написать» становится «Написать с оффером». У остальных — обычная.
+        try:
+            subs = app.subs
+            if u.id in settings.admin_ids or subs._has_access(subs.user(u.id)):
+                row = await app.db.listing_by_message(msg.chat.id, msg.message_id)
+                if row:
+                    from tracker.queue import listing_from_row
+                    from bot.formatter import listing_keyboard
+                    offer_rows = listing_keyboard(listing_from_row(row),
+                                                  with_seller=False, with_offer=True).inline_keyboard[1:]
+                    if offer_rows:
+                        links = offer_rows
+        except Exception as e:
+            log.debug("take: оффер для доступного не собрался: %s", e)
         rows = [[InlineKeyboardButton(text="Отменить", style="danger", **_icon(E.PERSON),
                                       callback_data=f"untake:{u.id}")]]
 
