@@ -237,6 +237,7 @@ _LOOKALIKE = str.maketrans({
     "т": "t", "у": "y", "х": "x", "і": "i", "ј": "j", "ԁ": "d", "ɩ": "l", "ł": "l", "ŋ": "n", "ɡ": "g",
     "ϲ": "c", "α": "a", "ο": "o", "ρ": "p", "τ": "t", "κ": "k", "ν": "v", "ɑ": "a", "ʟ": "l", "ʜ": "h",
     "ᴛ": "t", "ᴄ": "c", "ᴋ": "k", "ɪ": "i", "ᴏ": "o", "ᴘ": "p", "ᴀ": "a", "ʙ": "b", "ᴇ": "e", "ɴ": "n",
+    "η": "n",     # funstat-кнопка «I'm ηοτ a вοτ!»
 })
 
 
@@ -271,6 +272,41 @@ def is_captcha(msg: Any) -> bool:
     all_emoji = all(_emoji_only(t) for t in cb)
     has_captcha_word = any(w in _plain(getattr(msg, "message", None) or "") for w in _CAPTCHA_WORDS)
     return all_emoji or has_captcha_word
+
+
+# Текстовая антибот-проверка funstat: сообщение «Click the button» с кнопкой
+# «I'm not a bot!» (рядом бывает пустая кнопка-ловушка), БЕЗ картинки.
+_GATE_WORDS = ("click the button", "press the button", "not a bot", "not a robot",
+               "im not a bot", "i'm not a bot", "i am not a bot", "prove you")
+
+
+def is_button_gate(msg: Any) -> bool:
+    """«Click the button / I'm not a bot!» — текстовая проверка (без картинки, с callback-кнопками)."""
+    has_media = getattr(msg, "media", None) is not None or getattr(msg, "photo", None) is not None
+    if has_media:
+        return False                      # это капча-картинка, её ловит is_captcha
+    btns = _buttons(msg)
+    if not any(d for _t, d in btns):
+        return False                      # нет ни одной callback-кнопки
+    text = _plain(getattr(msg, "message", None) or "")
+    btn_text = _plain(" ".join(t for t, _ in btns))
+    return any(w in text or w in btn_text for w in _GATE_WORDS)
+
+
+def _pick_gate_button(btns: list[tuple[str, bytes | None]]) -> bytes | None:
+    """Выбрать кнопку, которую нажать: сначала ту, где текст про «I'm not a bot»,
+    иначе первую callback-кнопку с непустым текстом (пустая — ловушка), иначе любую."""
+    cb = [(t, d) for t, d in btns if d]
+    if not cb:
+        return None
+    for t, d in cb:
+        if any(w in _plain(t) for w in ("not a bot", "not a robot", "im not a bot",
+                                        "i'm not a bot", "human")):
+            return d
+    for t, d in cb:
+        if (t or "").strip() not in ("", "?"):
+            return d
+    return cb[0][1]
 
 
 def _gift_matches(saved: Any, slug: str | None, unique_id: int | None) -> bool:
@@ -1337,6 +1373,7 @@ class OwnerLookup:
         captcha_rounds = 0        # защита от бесконечного цикла капча→клик→новая капча. 5 капч подряд —
                                   # уже явный бот-брутфорс, уходим. Обычно 1-2 капчи хватает.
         poll_min_id = sent_id     # после решения капчи ставим None (читаем всё — funstat может редактировать)
+        gate_clicked: set = set() # id уже нажатых антибот-кнопок «I'm not a bot!» (не жмём дважды)
         while time.monotonic() < deadline:
             await asyncio.sleep(1.0)
             try:
@@ -1346,6 +1383,18 @@ class OwnerLookup:
                 continue
             if not msgs:
                 continue
+            # Текстовая проверка «Click the button / I'm not a bot!» (без картинки) — жмём кнопку
+            gate = next((m for m in msgs if is_button_gate(m)), None)
+            if gate is not None and getattr(gate, "id", None) not in gate_clicked:
+                gate_clicked.add(getattr(gate, "id", None))
+                if len(gate_clicked) <= 5 and await self._click_gate(session, bot, gate):
+                    self.stats["gate_click"] = self.stats.get("gate_click", 0) + 1
+                    log.info("Lookup: @%s — нажал антибот-кнопку для %r", bot, seller_name)
+                    deadline = time.monotonic() + max(5.0, settings.lookup_timeout)
+                    poll_min_id = None            # после нажатия funstat сам отвечает на /human
+                    prev_sig, stable, last_cands = None, 0, []
+                    await asyncio.sleep(1.5)
+                    continue
             cap = next((m for m in msgs if is_captcha(m)), None)
             if cap is not None:
                 if not _retry or captcha_rounds >= 5:
@@ -1388,6 +1437,28 @@ class OwnerLookup:
             log.warning("Lookup: @%s не ответил на %r за %.0f с", bot, cmd, settings.lookup_timeout)
             return None
         return last_cands
+
+    async def _click_gate(self, session: str, bot: str, msg: Any) -> bool:
+        """Нажать кнопку текстовой проверки «I'm not a bot!» (без картинки). → True если нажали."""
+        data = _pick_gate_button(_buttons(msg))
+        if data is None:
+            return False
+        msg_id = getattr(msg, "id", None)
+
+        async def _click(client):
+            ent = await client.get_input_entity(bot)
+            try:
+                await client(GetBotCallbackAnswerRequest(peer=ent, msg_id=msg_id, data=data))
+            except Exception as e:      # бот часто не отвечает на callback (timeout) — нажатие всё равно прошло
+                if "timeout" not in str(e).lower() and "BOT_RESPONSE_TIMEOUT" not in str(e):
+                    raise
+            return True
+        try:
+            await self._run(session, _click, timeout=20)
+            return True
+        except Exception as e:
+            log.debug("Lookup: клик по антибот-кнопке не прошёл: %s", e)
+            return False
 
     async def _wait_captcha(self, session: str, bot: str, msg: Any) -> bool:
         """Бот поиска показал капчу: ВСЕГДА пробуем решить сами, админу — только
