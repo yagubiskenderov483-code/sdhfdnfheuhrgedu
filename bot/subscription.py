@@ -959,7 +959,7 @@ class Subscriptions:
             title=f"NFT Tracker — {title}",
             description=(f"Испытать удачу: {GAME_BALLS.get(ball, ('?',))[0]} — {title}"
                          if is_game(plan) else f"Доступ к трекеру: тариф {title}"),
-            payload=code,
+            payload=f"{code}:{plan}",     # тариф в payload → автовыдача даже если счёт потерян
             currency="XTR",
             prices=[LabeledPrice(label=title, amount=int(stars))],
         )
@@ -1130,9 +1130,10 @@ class Subscriptions:
 
     async def on_stars_paid(self, payload: str, uid: int, total_amount: int,
                             charge_id: str | None = None) -> None:
-        """successful_payment.invoice_payload (= наш code) → отметить оплату и выдать доступ."""
+        """successful_payment.invoice_payload (= «code:plan») → отметить оплату и выдать доступ."""
+        code, _, plan_hint = (payload or "").partition(":")      # payload = «code:plan»
         async with self._lock:
-            inv = self.state["invoices"].get(payload)
+            inv = self.state["invoices"].get(code)
             if inv and inv.get("kind") == "stars" and inv.get("paid") and inv.get("charge_id") == charge_id:
                 return                 # повторный апдейт того же платежа
             # invoice-ссылку можно оплатить повторно (другой charge_id) — это НОВЫЕ деньги, не теряем молча
@@ -1149,6 +1150,23 @@ class Subscriptions:
                 self.state["paid_count_stars"] = int(self.state.get("paid_count_stars") or 0) + 1
                 await self.save(backup=True)
         if unknown:
+            # Счёт потерян (напр. сброс состояния), но тариф зашит в payload — выдаём АВТОМАТИЧЕСКИ.
+            # Игру (бросок мяча) так не восстановить — её по-прежнему добиваем вручную.
+            if plan_hint in PLANS and not is_game(plan_hint):
+                syn_code = code or ("STR" + secrets.token_hex(4).upper())
+                syn = {"code": syn_code, "uid": int(uid), "plan": plan_hint, "kind": "stars",
+                       "stars": int(total_amount), "paid": True, "paid_at": time.time(),
+                       "granted": "inflight", "charge_id": charge_id, "ts": time.time(),
+                       "paid_stars": int(total_amount)}
+                async with self._lock:
+                    self.state["invoices"][syn_code] = syn
+                    self.state["revenue_stars"] = int(self.state.get("revenue_stars") or 0) + int(total_amount)
+                    self.state["paid_count_stars"] = int(self.state.get("paid_count_stars") or 0) + 1
+                    await self.save(backup=True)
+                await self._deliver(syn)
+                log.warning("Stars payment %s: счёт потерян, авто-выдал по payload (plan=%s) для %s",
+                            total_amount, plan_hint, uid)
+                return
             log.warning("Stars payment %s for unknown/paid invoice %r from %s", total_amount, payload, uid)
             for admin in settings.admin_ids:
                 try:
@@ -2201,8 +2219,8 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
     async def pre_checkout(q: PreCheckoutQuery) -> None:
         """Telegram спрашивает «можем принять?» — отвечаем да, если инвойс ещё живой.
         Отказ сюда = отказ в оплате у клиента, так что отклоняем только явно чужие payload'ы."""
-        payload = q.invoice_payload or ""
-        inv = subs.state["invoices"].get(payload)
+        code = (q.invoice_payload or "").split(":", 1)[0]     # payload = «code:plan»
+        inv = subs.state["invoices"].get(code)
         if not inv or inv.get("kind") != "stars":
             try:
                 await q.answer(ok=False, error_message="Счёт не найден. Откройте бот ещё раз.")
