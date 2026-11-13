@@ -636,21 +636,13 @@ def build_routers(app: "App") -> list[Router]:
 
     @public.message(Command("help"))
     async def cmd_help(m: Message) -> None:
-        """Полная справка по командам. Админам — панель, владельцам аккаунтов — трекер,
-        обычным пользователям — команды бота-подписки."""
+        """Полная справка по командам — только для админов (Maker: /help ток у админов).
+        Обычные пользователи работают через /start и кнопки подписки."""
         uid = m.from_user.id if m.from_user else 0
+        if not is_manager(uid):
+            return                 # у обычных пользователей /help не отвечает
         tail = f"\n\nВаш Telegram ID: <code>{uid}</code>"
-        if is_manager(uid):
-            await _answer_long(m, HELP + tail, reply_markup=MAIN_KB)
-        elif is_allowed(uid):
-            await _answer_long(m, USER_HELP + tail, reply_markup=MAIN_KB)
-        else:
-            await m.answer(
-                "<b>Трекер NFT — команды</b>\n\n"
-                "/start — главное меню и оформить подписку\n"
-                "/my — моя подписка: тариф и сколько осталось\n"
-                "/promo — ввести промокод на скидку\n\n"
-                "Доступ к лотам — по подписке. Нажмите /start, чтобы выбрать тариф." + tail)
+        await _answer_long(m, HELP + tail, reply_markup=MAIN_KB)
 
     @public.callback_query(F.data.startswith("take:"))
     async def cb_take(q: CallbackQuery) -> None:
