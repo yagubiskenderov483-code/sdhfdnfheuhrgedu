@@ -690,8 +690,9 @@ def build_routers(app: "App") -> list[Router]:
                 if row:
                     from tracker.queue import listing_from_row
                     from bot.formatter import listing_keyboard
+                    # оффер открывает ЛС продавца с готовым текстом (не сам торговый бот)
                     offer_rows = listing_keyboard(listing_from_row(row),
-                                                  with_seller=False, with_offer=True).inline_keyboard[1:]
+                                                  with_seller=True, with_offer=True).inline_keyboard[1:]
                     if offer_rows:
                         links = offer_rows
         except Exception as e:
