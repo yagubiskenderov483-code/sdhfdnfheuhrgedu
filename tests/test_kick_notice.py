@@ -66,3 +66,42 @@ async def main():
     print("OK check_payments не падает на не-TON счетах")
 
 asyncio.run(main())
+
+
+def test_soft_zone():
+    """Мягкие фильтры — все темы, кроме 300-1000 (по тому же значению, что и маршрут)."""
+    import dataclasses, tempfile
+    from pathlib import Path
+    from database.models import Listing
+    from filters.seller_filter import SellerFilter
+    from tracker.queue import ListingPipeline
+    settings.soft_filter_stars = 1000
+    settings.route_by = "floor"
+    settings.backdrop_routes = [("Black", -1, 6)]
+    settings.russian_only, settings.unknown_seller_policy = True, "block"
+    settings.require_free_messages, settings.max_seller_nfts, settings.max_seller_level = True, 12, 4
+    base = {x.name: None for x in dataclasses.fields(Listing)
+            if x.default is dataclasses.MISSING and x.default_factory is dataclasses.MISSING}
+    def lot(**kw):
+        l = Listing(**base)
+        for k, v in kw.items():
+            setattr(l, k, v)
+        return l
+    soft = ListingPipeline._soft
+    assert not soft(lot(stars_price=1500, floor_stars=500)), "флор 500 → тема 300-1000 → строго"
+    assert soft(lot(stars_price=900, floor_stars=1500)), "флор 1500 → тема 1000-3000 → мягко"
+    assert soft(lot(stars_price=500, floor_stars=400, backdrop="Black")), "тема Black → мягко"
+    f = SellerFilter(Path(tempfile.mkdtemp()))
+    foreign = lot(seller_type="user", seller_id=5, messages="бесплатно", seller_about="nft seller",
+                  seller_nfts=50, level=9)
+    assert not f.check(foreign).passed and f.check(foreign, soft=True).passed
+    paid = lot(seller_type="user", seller_id=5, messages="платные (100 ⭐)")
+    assert f.check(paid, soft=True).code == "PAID_MESSAGES"
+    arab = lot(seller_type="user", seller_id=5, messages="бесплатно", seller_name="محمد")
+    assert f.check(arab, soft=True).code == "ARABIC_SCRIPT"
+    short = lot(seller_name="ab")
+    assert f.check(short).code == "SHORT_NAME_HIDDEN" and f.check(short, soft=True).passed
+    print("OK мягкая зона: всё кроме 300-1000; платные ЛС, арабы и ЧС режутся всегда")
+
+
+test_soft_zone()

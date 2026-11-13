@@ -231,6 +231,22 @@ class ListingPipeline:
         return admitted
 
     @staticmethod
+    def _soft(l) -> bool:
+        """Мягкие фильтры — для всех тем, КРОМЕ 300-1000 (строгая зона, там скама больше).
+        Тема считается так же, как при отправке (ROUTE_BY=floor → по флору коллекции, фон-маршруты
+        первыми). Раньше мягкость считалась по цене лота, а тема — по флору: лот с флором 500 за
+        1500⭐ попадал в тему 300-1000 с мягкими фильтрами, а флор 1500 за 900⭐ — наоборот."""
+        soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
+        if not soft:
+            return False
+        if l.backdrop and any(name.lower() in l.backdrop.lower() for name, _c, _t in settings.backdrop_routes):
+            return True                      # отдельная тема по фону (Black) — не 300-1000
+        value = l.floor_stars if (settings.route_by == "floor" and l.floor_stars) else l.stars_price
+        if value is None:
+            value = l.stars_price
+        return bool(value and value >= soft)
+
+    @staticmethod
     def _is_expensive(l) -> bool:
         # дорогой = дорогая коллекция ИЛИ сам лот дорогой (50k⭐ в коллекции с флором 1.5k — тоже дорогой)
         value = max(getattr(l, "floor_stars", None) or 0, getattr(l, "stars_price", None) or 0)
@@ -601,11 +617,11 @@ class ListingPipeline:
             # чужому алфавиту ДО lookup: имя может сложиться нормально после открытия профиля,
             # а если нет — soft-путь в _check_seller всё равно пропустит с пометкой.
             soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
-            soft_applies = bool(soft and l.stars_price and l.stars_price >= soft)
-            pre = self.seller_filter.check(l)
+            soft_applies = self._soft(l)
+            pre = self.seller_filter.check(l, soft=soft_applies)
             if pre.code in _HIDDEN_HARD_REJECT:
                 # blacklist режем всегда — это заведомо нежелательный продавец, цена роли не играет.
-                if pre.code == "BLACKLIST" or not soft_applies:
+                if pre.code in ("BLACKLIST", "ARABIC_SCRIPT") or not soft_applies:
                     l.seller_filter_result = pre.code
                     l.status, l.reason = ListingStatus.FILTERED_SELLER, pre.reason
                     self.stats["filtered_seller"] += 1
@@ -630,11 +646,10 @@ class ListingPipeline:
             # лоты в это время должны идти дальше как обычно.
             # Для дорогих лотов (>= SOFT_FILTER_STARS) шлём в lookup даже с короткими именами /
             # чужим алфавитом — на той стороне профиль может вернуть нормальное имя.
-            pre = self.seller_filter.check(l)
-            soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
-            soft_applies = bool(soft and l.stars_price and l.stars_price >= soft)
+            soft_applies = self._soft(l)
+            pre = self.seller_filter.check(l, soft=soft_applies)
             can_lookup = (pre.code not in _HIDDEN_HARD_REJECT
-                          or (soft_applies and pre.code != "BLACKLIST"))
+                          or (soft_applies and pre.code not in ("BLACKLIST", "ARABIC_SCRIPT")))
             if can_lookup:
                 t = asyncio.get_running_loop().create_task(self._lookup_then_process(l))
                 self._lookup_tasks.add(t)
@@ -696,7 +711,7 @@ class ListingPipeline:
             # Maker: дорогие лоты (>= SOFT_FILTER_STARS) пропускаем даже без @юза —
             # пост уйдёт с пометкой профиля, а не отфильтруется
             soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
-            if soft and l.stars_price and l.stars_price >= soft:
+            if self._soft(l):
                 llog("FILTER", f"#{l.listing_id} no @username, но цена {l.stars_price}⭐ ≥ "
                                f"SOFT_FILTER_STARS={soft} — пропускаем")
             else:
@@ -771,8 +786,7 @@ class ListingPipeline:
             # Maker: дорогие лоты (>= SOFT_FILTER_STARS) шлём даже с ненайденным владельцем,
             # с пометкой profile hidden. Платные ЛС / фильтр языка не трогаются (они срабатывают
             # только когда профиль прочитан, а здесь профиля нет — значит и этих рисков тоже нет).
-            soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
-            if soft and l.stars_price and l.stars_price >= soft:
+            if self._soft(l):
                 return SellerResult(True, "OWNER_NOT_FOUND_SENT",
                                     "скрытый владелец — пост с пометкой (soft filter)")
             return SellerResult(False, "OWNER_NOT_FOUND", "владелец не найден — без @username не шлём")
@@ -786,7 +800,7 @@ class ListingPipeline:
             await self._enrich_seller(l)
             if getattr(l, "owner_trusted_no_resolve", False):
                 # enrich не смог — остаёмся на доверии, но хотя бы blacklist / то что есть
-                pre = self.seller_filter.check(l)
+                pre = self.seller_filter.check(l, soft=self._soft(l))
                 if pre.code in ("BLACKLIST", "PAID_MESSAGES"):
                     return pre
                 self.stats["owner_trusted_sent"] = self.stats.get("owner_trusted_sent", 0) + 1
@@ -812,13 +826,13 @@ class ListingPipeline:
                 and not skip_override):
             # Прежде чем override'нуть — ЕСЛИ seller_nfts ещё не читали и lookup вытащил real_id,
             # проверим NFT (чтобы спамеров-коллекционеров не пропустить). Для pseudo-id пропускаем.
-            if (settings.max_seller_nfts > 0 and l.seller_nfts is None
+            if (settings.max_seller_nfts > 0 and l.seller_nfts is None and not self._soft(l)
                     and l.seller_id and l.seller_id > 0):
                 try:
                     l.seller_nfts = await self._nft_count(l)
                 except Exception:
                     pass
-            if (settings.max_seller_nfts > 0 and l.seller_nfts is not None
+            if (settings.max_seller_nfts > 0 and l.seller_nfts is not None and not self._soft(l)
                     and l.seller_nfts > settings.max_seller_nfts):
                 return SellerResult(False, "TOO_MANY_NFTS",
                                     f"{l.seller_nfts} NFT > MAX_SELLER_NFTS={settings.max_seller_nfts}")
@@ -832,7 +846,7 @@ class ListingPipeline:
         # Платные сообщения / только Premium видны уже на странице маркета — тот же фильтр, просто без
         # лишнего запроса профиля (на этом отсеивается заметная часть лотов)
         if l.seller_type == "user" and l.messages is not None and l.messages != "бесплатно":
-            pre = self.seller_filter.check(l)
+            pre = self.seller_filter.check(l, soft=self._soft(l))
             if pre.code in ("BLACKLIST", "PAID_MESSAGES"):
                 return pre
 
@@ -843,6 +857,7 @@ class ListingPipeline:
         # Владелец от funstat по доверию имени: профиль мы не читаем принципиально,
         # отбрасывать лот по max_seller_level не надо — это ломает полезный fallback.
         if (getattr(l, "seller_lookup_failed", False) and settings.max_seller_level > 0
+                and not self._soft(l)                         # мягкая зона: Level не проверяем
                 and not getattr(l, "owner_trusted_no_resolve", False)
                 and not getattr(l, "owner_from_memory", False)
                 and not l.owner_found_via):
@@ -856,23 +871,27 @@ class ListingPipeline:
         # Отрицательные seller_id — pseudo-ID (из хеша username, настоящего ID у нас нет) — пропускаем
         # все профильные запросы: они гарантированно упадут 'Could not find input entity'.
         has_real_id = l.seller_type == "user" and l.seller_id and l.seller_id > 0
-        sr = self.seller_filter.check(l)
+        if self._soft(l):
+            # мягкая зона: язык и лимит NFT не проверяются → запросы NFT/текстов подарков/историй
+            # не нужны (3–5 запросов к Telegram на продавца). Лот уходит заметно быстрее.
+            return self.seller_filter.check(l, soft=True)
+        sr = self.seller_filter.check(l, soft=False)
         if sr.passed and settings.max_seller_nfts > 0 and has_real_id:
             l.seller_nfts = await self._nft_count(l)
-            sr = self.seller_filter.check(l)
+            sr = self.seller_filter.check(l, soft=self._soft(l))
         # продавец без телефона/био/канала: последний объективный шанс — язык текстов к его подаркам
         if sr.code == "UNKNOWN_BLOCKED" and has_real_id:
             l.seller_gift_text = await self._gift_texts(l)
-            sr = self.seller_filter.check(l)
+            sr = self.seller_filter.check(l, soft=self._soft(l))
         # всё ещё непонятно — смотрим истории и посты личного канала
         # (2-3 лишних запроса на продавца — только для дорогих лотов, чтобы не перегружать аккаунты)
         if (sr.code == "UNKNOWN_BLOCKED" and has_real_id and self._is_expensive(l)):
             l.seller_extra_text = await self._extra_texts(l)
-            sr = self.seller_filter.check(l)
+            sr = self.seller_filter.check(l, soft=self._soft(l))
         # продавец прошёл только по текстам/историям — лимит NFT ещё не проверяли
         if (sr.passed and l.seller_nfts is None and settings.max_seller_nfts > 0 and has_real_id):
             l.seller_nfts = await self._nft_count(l)      # часто уже в кэше из запроса текстов подарков
-            sr = self.seller_filter.check(l)
+            sr = self.seller_filter.check(l, soft=self._soft(l))
         return sr
 
     async def _send_stage(self, ev: ListingEvent, l: Listing, base: float, t_start: float) -> None:
@@ -908,7 +927,7 @@ class ListingPipeline:
             # не блокирует отправку — пост уходит с пометкой 'profile hidden'. Платные ЛС и
             # LEVEL_TOO_HIGH всё равно проверяются ниже.
             soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
-            if soft and l.stars_price and l.stars_price >= soft:
+            if self._soft(l):
                 l.owner_not_found = True
                 llog("FILTER", f"#{l.listing_id} NO_USERNAME на before-send, но цена "
                                f"{l.stars_price}⭐ ≥ SOFT_FILTER_STARS={soft} — пропускаем "
@@ -917,7 +936,8 @@ class ListingPipeline:
                 guard = ("NO_USERNAME", "у продавца нет @username / владелец не подтверждён")
         if not guard and settings.require_free_messages and l.messages != "бесплатно":
             guard = ("PAID_MESSAGES", f"ЛС: {l.messages or 'не удалось проверить'}")
-        elif not guard and settings.max_seller_level > 0 and (l.level or 0) > settings.max_seller_level:
+        elif (not guard and settings.max_seller_level > 0 and not self._soft(l)
+              and (l.level or 0) > settings.max_seller_level):
             guard = ("LEVEL_TOO_HIGH", f"level {l.level} > {settings.max_seller_level}")
         if guard:
             l.seller_filter_result = guard[0]
@@ -1060,7 +1080,7 @@ class ListingPipeline:
             # Порог берём из SOFT_FILTER_STARS (той же настройки, что рулит рescue в
             # SHORT_NAME_HIDDEN и NO_USERNAME ветках выше). Хочешь мягче — /set SOFT_FILTER_STARS 700.
             soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
-            if soft and l.stars_price and l.stars_price >= soft:
+            if self._soft(l):
                 l.owner_not_found = True
                 self.stats["owner_not_found_soft_rescued"] = \
                     self.stats.get("owner_not_found_soft_rescued", 0) + 1

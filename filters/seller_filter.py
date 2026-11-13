@@ -149,7 +149,10 @@ class SellerFilter:
             return True
         return bool(l.seller_username and l.seller_username.lower() in names)
 
-    def check(self, l: Listing) -> SellerResult:
+    def check(self, l: Listing, soft: bool = False) -> SellerResult:
+        """soft=True — лот НЕ из темы 300-1000 (см. ListingPipeline._soft): действуют только
+        чёрный список, арабы и платные ЛС. Язык/«русскость», короткие/иностранные имена
+        скрытых, лимиты NFT и Level — не применяются."""
         if self._match(l, self.black_ids, self.black_names):
             return SellerResult(False, "BLACKLIST", "seller in blacklist")
 
@@ -157,6 +160,13 @@ class SellerFilter:
         if has_arabic(l.seller_name, l.seller_about, l.seller_channel, l.seller_gift_text,
                       l.seller_business, l.seller_extra_text):
             return SellerResult(False, "ARABIC_SCRIPT", "арабские буквы в профиле продавца")
+
+        if soft:
+            if (settings.require_free_messages and l.seller_type == "user"
+                    and l.messages is not None and l.messages != "бесплатно"):
+                return SellerResult(False, "PAID_MESSAGES",
+                                    f"messages: {l.messages or 'unknown'} (REQUIRE_FREE_MESSAGES=true)")
+            return SellerResult(True, "SOFT_ZONE", "тема не 300-1000 — мягкие фильтры (SOFT_FILTER_STARS)")
 
         # Telegram в октябре 26 начал скрывать владельцев NFT: owner_id и host_id отсутствуют,
         # видно только owner_name. Профиля нет → обычный RUSSIAN_ONLY неприменим.
