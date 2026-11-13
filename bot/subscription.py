@@ -426,7 +426,9 @@ class Subscriptions:
         u = self.state["users"].get(str(uid)) or {}
         code = u.get("promo")
         p = (self.state.get("promos") or {}).get(code) if code else None
-        if not p or p.get("off") or (p.get("max") and int(p.get("uses") or 0) >= int(p["max"])):
+        # Лимит промокода проверяется при активации (по вводам). Если пользователь уже активировал
+        # код — скидка действует, пока код не выключен (не гейтим по оплатам uses — это был баг).
+        if not p or p.get("off"):
             return 0
         return max(0, min(95, int(p.get("pct") or 0)))
 
