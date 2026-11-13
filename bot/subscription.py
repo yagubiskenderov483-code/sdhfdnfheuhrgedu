@@ -415,7 +415,7 @@ class Subscriptions:
         for _code, (title, price, _, stars) in PLANS.items():
             p_ton = _disc(price, pct)
             p_st = max(1, round(_disc(stars, pct))) if stars else None
-            lines.append(f"<b>{title}</b> — {t} {p_ton:.4g}" + (f" / {st} {p_st}" if p_st else ""))
+            lines.append(f"<b>{title}</b> — {p_ton:.4g} {t}" + (f" / {p_st} {st}" if p_st else ""))
         disc = f"\n\nСкидка по промокоду: <b>−{pct}%</b>" if pct else ""
         return (f'{_tg_emoji(EMOJI_SUB, "💎")} <b>Подписка</b>\n\n' + "\n".join(lines) + disc
                 + "\n\nВыберите тариф")
