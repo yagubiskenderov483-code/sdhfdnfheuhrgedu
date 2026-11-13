@@ -10,6 +10,10 @@ services:
       mountPath: /var/data
       sizeGB: 1
     envVars:
+      # Постоянный диск примонтирован на /var/data — пишем состояние туда,
+      # чтобы кэш/БД/скорости переживали деплой (а не пересобирались каждый раз).
+      - key: DATA_DIR
+        value: "/var/data"
       # Secrets: set the values in the Render dashboard, not in the repo.
       - key: API_ID
         sync: false
