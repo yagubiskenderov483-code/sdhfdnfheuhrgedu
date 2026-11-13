@@ -1816,8 +1816,10 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         ton, stars = game_ticket(plan)
         star_part = f" / {stars} {_tg_emoji(EMOJI_STAR, '⭐')}" if stars else ""
         return (f"<b>Испытать удачу: тариф {title}</b>\n\n"
-                f"Билет: <b>{ton:g} {_tg_emoji(EMOJI_TON, '💎')}</b>{star_part}\n"
-                "Не попали — билет сгорает.\n\n"
+                f"<b>Билет: {ton:g} {_tg_emoji(EMOJI_TON, '💎')}{star_part}</b>\n"
+                "<b>Шанс 50/50</b>\n\n"
+                "<b>Забьёте: получаете тариф</b>\n"
+                "<b>Не забьёте: деньги сгорают</b>\n\n"
                 "<b>Выберите мяч:</b>")
 
     def _game_plan(q: CallbackQuery, idx: int) -> str | None:
