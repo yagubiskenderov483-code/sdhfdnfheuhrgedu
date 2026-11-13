@@ -401,7 +401,8 @@ class Subscriptions:
             p_st = max(1, round(_disc(stars, pct))) if stars else None
             # кастомные эмодзи внутри текста кнопки Telegram не показывает — тут обычные символы
             label = f"{title} • {p_ton:.4g} TON" + (f" / {p_st} ⭐" if p_st else "")
-            rows.append([btn(label, styles[i % len(styles)], E.DIAMOND if secs_ == FOREVER else E.CLOCK,
+            # иконка-эмодзи тарифа (Maker): 👽 TON у «Навсегда» (только TON), ⭐️ Stars у остальных
+            rows.append([btn(label, styles[i % len(styles)], E.TON if secs_ == FOREVER else E.STAR,
                              callback_data=f"sub:buy:{code}")])
         rows.append([btn("Назад", "danger", E.BACK, callback_data="sub:home")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
