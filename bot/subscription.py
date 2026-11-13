@@ -868,6 +868,10 @@ class Subscriptions:
             es = str(e).lower()
             if "participant" in es or "user not found" in es or "user_not_participant" in es:
                 return True      # его и так нет в канале
+            if "chat owner" in es or "administrator" in es or "admin" in es:
+                # владельца / админа канала удалить нельзя — не повторяем попытку бесконечно
+                log.info("Kick %s skipped: owner/admin of the channel", uid)
+                return True
             log.warning("Kick %s failed: %s", uid, e)
             return False
         await asyncio.sleep(1)
