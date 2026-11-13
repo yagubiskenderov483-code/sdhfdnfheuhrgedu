@@ -90,7 +90,7 @@ GAME_PREFIX = "game_"              # билет на тариф: game_6h — в�
 GAME_FACTOR = 0.7 / 1.2            # Maker: тариф 1.2 TON → билет 0.7 TON (так же для остальных)
 # Telegram сам решает исход броска (sendDice) — бот на результат не влияет.
 # Maker: шанс 40–50%. ⚽: 4,5 — гол (2 из 5 = 40%); 🏀: 4,5 — попал (2 из 5 = 40%).
-GAME_BALLS = {"soccer": ("⚽", (4, 5)), "basket": ("🏀", (4, 5))}
+GAME_BALLS = {"soccer": ("⚽", (3, 4, 5)), "basket": ("🏀", (4, 5))}  # Telegram: ⚽ гол 3-5, 🏀 попал 4-5
 
 
 def is_game(code: str | None) -> bool:

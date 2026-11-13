@@ -60,7 +60,7 @@ async def main():
     assert await subs.check_payments() == 1
     assert subs.state["promos"]["GIFT30"]["uses"] == 1 and not subs.user(200).get("promo")
     assert subs.ref_info(100)["bonus"] == settings.ref_bonus_minutes * 60 and subs.ref_info(100)["paid"] == 1
-    assert "закончился" in await subs.activate_promo(300, "GIFT30"), "лимит активаций"
+    assert "недействителен" in await subs.activate_promo(300, "GIFT30"), "лимит активаций"
     print("OK реферал: +30 мин за оплату; промокод −30% в сумме счёта и гасится после оплаты")
     # активация бонуса
     settings.ref_min_minutes = 30
