@@ -1857,9 +1857,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         ton, stars = game_ticket(plan)
         rows = []
         if stars:
-            rows.append([btn(f"{stars}", "primary", E.STAR, callback_data=f"sub:gpay:{ball}:stars:{plan}")])
+            rows.append([btn(f"{stars} звёзд", "primary", None, callback_data=f"sub:gpay:{ball}:stars:{plan}")])
         if settings.sub_ton_address:
-            rows.append([btn(f"{ton:g}", "success", E.TON, callback_data=f"sub:gpay:{ball}:ton:{plan}")])
+            rows.append([btn(f"{ton:g} TON", "success", None, callback_data=f"sub:gpay:{ball}:ton:{plan}")])
         rows.append([btn("Назад", "danger", E.BACK, callback_data=f"sub:game:{plan}")])
         await _safe_edit(q.message, f"<b>Мяч: {emoji}</b>\n\nВыберите способ оплаты билета:",
                          reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
@@ -2053,9 +2053,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         # кастомные эмодзи в кнопках — через icon_custom_emoji_id (utils.emoji)
         rows: list[list[InlineKeyboardButton]] = []
         if stars:
-            rows.append([btn(f"{stars}", "primary", E.STAR, callback_data=f"sub:pay:{plan}:stars")])
+            rows.append([btn(f"{stars} звёзд", "primary", None, callback_data=f"sub:pay:{plan}:stars")])
         if settings.sub_ton_address:
-            rows.append([btn(f"{price:.4g}", "success", E.TON, callback_data=f"sub:pay:{plan}:ton")])
+            rows.append([btn(f"{price:.4g} TON", "success", None, callback_data=f"sub:pay:{plan}:ton")])
         if settings.game_enabled and (settings.sub_ton_address or game_ticket(plan)[1]):
             rows.append([btn("Испытать удачу", "danger", E.CLOUD, callback_data=f"sub:game:{plan}")])
         rows.append([btn("Назад", "primary", E.BACK, callback_data="sub:menu")])
