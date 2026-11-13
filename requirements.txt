@@ -1,7 +1,7 @@
 telethon==1.45.0
 # прокси для аккаунтов (socks5/http)
 python-socks[asyncio]>=2.4,<3
-aiogram>=3.13,<4
+aiogram>=3.31,<4   # цветные кнопки (style) и иконки (icon_custom_emoji_id)
 aiosqlite>=0.20,<1
 python-dotenv>=1.0,<2
 cryptography>=42,<46

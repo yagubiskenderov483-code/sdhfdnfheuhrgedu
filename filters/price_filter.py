@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 from config import settings
+from filters.zone import is_soft
 from database.models import Listing
 
 
@@ -59,6 +60,8 @@ class PriceFilter:
             if over >= pct:
                 if premium_exception(l):
                     rare_pass = True
+                elif is_soft(l):
+                    pass        # вне темы 300-1000 редкость не требуем — действует только MAX_ABOVE_FLOOR
                 else:
                     return FilterResult(False, f"{l.stars_price} Stars = +{over:.0f}% к флору {l.floor_stars}; "
                                                "нет редкой модели/фона и не монохром")

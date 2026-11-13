@@ -33,6 +33,7 @@ from database.db import Database
 from database.models import Listing, ListingStatus
 from filters.price_filter import PriceFilter
 from filters.seller_filter import SellerFilter, SellerResult
+from filters.zone import is_soft, route_value
 from sessions.manager import SessionManager
 from tracker.marketplace import (ResaleItem, SellerFull, fetch_extra_texts, fetch_full_user, fetch_gift_owner,
                                  fetch_full_user_failover, fetch_gift_texts,
@@ -232,19 +233,8 @@ class ListingPipeline:
 
     @staticmethod
     def _soft(l) -> bool:
-        """Мягкие фильтры — для всех тем, КРОМЕ 300-1000 (строгая зона, там скама больше).
-        Тема считается так же, как при отправке (ROUTE_BY=floor → по флору коллекции, фон-маршруты
-        первыми). Раньше мягкость считалась по цене лота, а тема — по флору: лот с флором 500 за
-        1500⭐ попадал в тему 300-1000 с мягкими фильтрами, а флор 1500 за 900⭐ — наоборот."""
-        soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
-        if not soft:
-            return False
-        if l.backdrop and any(name.lower() in l.backdrop.lower() for name, _c, _t in settings.backdrop_routes):
-            return True                      # отдельная тема по фону (Black) — не 300-1000
-        value = l.floor_stars if (settings.route_by == "floor" and l.floor_stars) else l.stars_price
-        if value is None:
-            value = l.stars_price
-        return bool(value and value >= soft)
+        """Мягкие фильтры — для всех тем, КРОМЕ 300-1000 (см. filters/zone.py)."""
+        return is_soft(l)
 
     @staticmethod
     def _is_expensive(l) -> bool:
@@ -404,6 +394,8 @@ class ListingPipeline:
                 # сразу, в том же заходе (иначе это ещё одна пауза аккаунта после профиля)
                 want_texts = (settings.russian_only and settings.unknown_seller_policy == "block"
                               and not (tc and now_m - tc[0] < settings.seller_cache_ttl))
+                if self._soft(l):
+                    want_nfts = want_texts = False      # вне 300-1000 NFT и тексты не проверяются — не тратим запросы
                 if self._is_expensive(l) and (want_nfts or want_texts):
                     # дорогой лот: профиль + число NFT + тексты подарков одним заходом
                     (full, nfts, texts), _ = await self.sessions.run(
@@ -523,8 +515,8 @@ class ListingPipeline:
         n = settings.max_same_collection_streak
         if n <= 0:
             return None
-        if self._is_expensive(l):
-            return None     # дорогие лоты никогда не режем за «та же коллекция подряд»
+        if self._is_expensive(l) or self._soft(l):
+            return None     # дорогие лоты и всё вне темы 300-1000 не режем за «та же коллекция подряд»
         if l.gift_id in self._sending_gift_ids:
             return "same collection is being sent right now"
         # «подряд» — только пока прошлый пост свежий: через 5 минут та же коллекция снова можно
@@ -650,6 +642,26 @@ class ListingPipeline:
             pre = self.seller_filter.check(l, soft=soft_applies)
             can_lookup = (pre.code not in _HIDDEN_HARD_REJECT
                           or (soft_applies and pre.code not in ("BLACKLIST", "ARABIC_SCRIPT")))
+            if can_lookup and soft_applies and settings.early_post:
+                # EARLY_POST: вне темы 300-1000 не ждём бота поиска (ответ + капча = 5–60 с) —
+                # пост уходит сразу с пометкой «ищу владельца», а когда владелец найдётся,
+                # пост редактируется (@юз продавца, кнопка «Написать»). Если найденный продавец
+                # не проходит жёсткие фильтры (платные ЛС, арабы, ЧС) — пост удаляется.
+                early = await self._sent_before(l)
+                if early:
+                    l.status, l.reason = ListingStatus.FILTERED_DUPLICATE, early
+                    self.stats["filtered_repeat"] += 1
+                    llog("FILTER", f"#{l.listing_id} repeat skipped: {early}")
+                    await self.db.update_listing(l)
+                    return
+                l.owner_pending = True
+                self.stats["early_post"] = self.stats.get("early_post", 0) + 1
+                await self._send_stage(ev, l, base, t_start)
+                if l.sent and l.message_id and l.target_chat_id:
+                    t = asyncio.get_running_loop().create_task(self._late_owner(l))
+                    self._lookup_tasks.add(t)
+                    t.add_done_callback(self._lookup_tasks.discard)
+                return
             if can_lookup:
                 t = asyncio.get_running_loop().create_task(self._lookup_then_process(l))
                 self._lookup_tasks.add(t)
@@ -928,13 +940,20 @@ class ListingPipeline:
             # LEVEL_TOO_HIGH всё равно проверяются ниже.
             soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
             if self._soft(l):
-                l.owner_not_found = True
+                if not getattr(l, "owner_pending", False):
+                    l.owner_not_found = True
                 llog("FILTER", f"#{l.listing_id} NO_USERNAME на before-send, но цена "
                                f"{l.stars_price}⭐ ≥ SOFT_FILTER_STARS={soft} — пропускаем "
                                "с пометкой profile hidden")
             else:
                 guard = ("NO_USERNAME", "у продавца нет @username / владелец не подтверждён")
-        if not guard and settings.require_free_messages and l.messages != "бесплатно":
+        # ЛС: «неизвестно» (None) у скрытого/ненайденного владельца в мягкой зоне — не повод резать:
+        # профиля нет, проверять нечего. Раньше этот guard молча убивал ВСЕ «спасённые» лоты
+        # (owner_not_found) — пометка ставилась, а пост не уходил («ЛС: не удалось проверить»).
+        unknown_ok = (l.messages is None and self._soft(l)
+                      and (getattr(l, "owner_not_found", False) or getattr(l, "owner_pending", False)))
+        if (not guard and settings.require_free_messages and l.messages != "бесплатно"
+                and not unknown_ok):
             guard = ("PAID_MESSAGES", f"ЛС: {l.messages or 'не удалось проверить'}")
         elif (not guard and settings.max_seller_level > 0 and not self._soft(l)
               and (l.level or 0) > settings.max_seller_level):
@@ -987,8 +1006,7 @@ class ListingPipeline:
             l.status = ListingStatus.SENDING          # если процесс упадёт во время отправки — не дублируем
             await self.db.update_listing(l)
             # тема по реальной стоимости гифта (флор коллекции), а не по цене, которую поставил продавец
-            _value = l.floor_stars if (settings.route_by == "floor" and l.floor_stars) else l.stars_price
-            _chat, _thread = settings.route_chat(_value, l.backdrop)
+            _chat, _thread = settings.route_chat(route_value(l), l.backdrop)
             res = await self.sender.send_listing(text, l.gift_link, listing_keyboard(l),
                                                  listing_keyboard(l, with_seller=False),
                                                  target=_chat, thread=_thread,
@@ -1151,6 +1169,83 @@ class ListingPipeline:
                 await self.db.update_listing(l)
             except Exception:
                 pass
+
+    async def _seller_sent_before(self, l: Listing) -> bool:
+        """Продавец (по ключу u<id> или @юзу) уже отправлялся — без учёта самого NFT."""
+        since = None
+        if settings.seller_repeat_hours > 0:
+            since = (datetime.now(timezone.utc) - timedelta(hours=settings.seller_repeat_hours)
+                     ).isoformat(timespec="seconds")
+        try:
+            if l.seller_key and not l.seller_key.startswith("n") \
+                    and await self.db.seller_already_sent(l.seller_key, since):
+                return True
+            if l.seller_username and await self.db.username_already_sent(l.seller_username, since):
+                return True
+        except Exception as e:
+            log.debug("seller dedup check failed: %s", e)
+        return False
+
+    async def _late_owner(self, l: Listing) -> None:
+        """EARLY_POST: пост уже в канале. Ищем владельца и обновляем пост.
+        найден и прошёл фильтры → редактируем (@юз, «Написать»);
+        найден, но платные ЛС / арабы / ЧС → удаляем пост;
+        не найден → пометка «владелец не найден» (как раньше у «спасённых» дорогих лотов)."""
+        chat, mid = l.target_chat_id, l.message_id
+        timeout = max(60.0, min(600.0, (settings.lookup_captcha_wait + settings.lookup_timeout) * 5 + 30))
+        try:
+            found = await asyncio.wait_for(self._lookup_owner(l), timeout=timeout)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:                              # в т.ч. TimeoutError
+            log.info("late owner lookup %s failed: %s", l.listing_id, e)
+            found = False
+        l.lookup_done = True
+        l.owner_pending = False
+        verdict = "not_found"
+        if found:
+            try:
+                sr = await asyncio.wait_for(self._check_seller(l), timeout=60)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.info("late owner check %s failed: %s", l.listing_id, e)
+                sr = SellerResult(True, "OWNER_FOUND_UNCHECKED", "профиль не прочитан")
+            l.seller_filter_result = sr.code
+            paid = (settings.require_free_messages and l.messages is not None and l.messages != "бесплатно")
+            if (not sr.passed and sr.code in ("BLACKLIST", "ARABIC_SCRIPT", "PAID_MESSAGES")) or paid:
+                verdict = "reject"
+                l.reason = sr.reason if not sr.passed else f"ЛС: {l.messages}"
+            elif settings.unique_sellers and await self._seller_sent_before(l):
+                # UNIQUE_SELLERS: этот продавец уже был в канале — повтор убираем
+                verdict = "reject"
+                l.seller_filter_result, l.reason = "DUPLICATE_SELLER", "this seller was already sent"
+            else:
+                verdict = "found"
+        else:
+            l.owner_not_found = True
+        try:
+            if verdict == "reject":
+                try:
+                    await self.sender.bot.delete_message(chat_id=chat, message_id=mid)
+                except Exception as e:
+                    log.info("late owner: delete %s/%s failed: %s", chat, mid, e)
+                l.status = ListingStatus.FILTERED_SELLER
+                l.message_id = None                      # sent остаётся 1 — этот NFT повторно не пошлём
+                self.stats["early_post_deleted"] = self.stats.get("early_post_deleted", 0) + 1
+                llog("FILTER", f"#{l.listing_id} early post deleted: {l.seller_filter_result} ({l.reason})")
+            else:
+                text = self.formatter.render(l)
+                ok = await self.sender.edit_listing(chat, mid, text, l.gift_link,
+                                                    listing_keyboard(l), listing_keyboard(l, with_seller=False))
+                key = "early_post_found" if verdict == "found" else "early_post_not_found"
+                self.stats[key] = self.stats.get(key, 0) + 1
+                llog("SEND", f"listing={l.listing_id} early post updated ({verdict}, edit={'ok' if ok else 'fail'})")
+            await self.db.update_listing(l)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("late owner update %s failed", l.listing_id)
 
     async def _still_on_sale(self, l: Listing) -> bool | None:
         """True — лот на маркете, False — продан/снят, None — не удалось проверить (не мешаем отправке)."""

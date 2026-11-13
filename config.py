@@ -250,6 +250,8 @@ class Settings:
     # Платные ЛС и «только Premium» — всё равно отсеиваем независимо от цены.
     soft_filter_stars: int = 1000             # Maker: 300-1000 — строго, всё остальное мягче
                                               # (RUSSIAN_ONLY к ним неприменим — профиля просто нет)
+    early_post: bool = True                   # вне темы 300-1000: скрытый владелец → пост сразу,
+                                              # продавец дописывается, когда его найдёт бот поиска
     lookup_bot_username: str = ""             # @username бота ручного поиска (напр. "funstat") —
                                               # для лотов со скрытым владельцем в пост добавится
                                               # кнопка «🔍 Найти в @<бот>». Пусто = кнопки нет.
@@ -439,6 +441,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "PHONE_MISMATCH_BLOCKS": ("phone_mismatch_blocks", _bool_strict),
     "ALLOW_HIDDEN_OWNER": ("allow_hidden_owner", _bool_strict),
     "SOFT_FILTER_STARS": ("soft_filter_stars", lambda v: max(0, int(v))),
+    "EARLY_POST": ("early_post", _bool_strict),
     "LOOKUP_BOT_USERNAME": ("lookup_bot_username", _lookup_bot_username),
     "LOOKUP_BOTS": ("lookup_bots", _bot_list),
     "LOOKUP_CMD_TEMPLATE": ("lookup_cmd_template",
@@ -533,6 +536,7 @@ def _from_env() -> Settings:
         phone_mismatch_blocks=_bool(e("PHONE_MISMATCH_BLOCKS"), True),
         allow_hidden_owner=_bool(e("ALLOW_HIDDEN_OWNER"), False),
         soft_filter_stars=max(0, _int(e("SOFT_FILTER_STARS"), 1000)),
+        early_post=_bool(e("EARLY_POST"), True),
         lookup_bot_username=_lookup_bot_username(e("LOOKUP_BOT_USERNAME")),
         lookup_bots=_bot_list(e("LOOKUP_BOTS")),
         lookup_cmd_template=((e("LOOKUP_CMD_TEMPLATE") or "/human {name}").strip() or "/human {name}"),

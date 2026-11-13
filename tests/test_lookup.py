@@ -486,6 +486,7 @@ async def main():
     from tracker.queue import ListingEvent
     import time as _t
     settings.lookup_required = True
+    settings.early_post = False          # классический путь: сначала поиск, потом пост
     p = pipeline(FakeClient(REPLY, gifts, users))
     l = hidden()
     check(p._needs_lookup(l), "лот со скрытым владельцем требует поиска")
@@ -538,6 +539,72 @@ async def main():
     await p.process(ListingEvent(l, _t.monotonic(), "live"))
     await asyncio.gather(*list(p._lookup_tasks))
     check(l.owner_not_found, "дорогой лот без владельца — помечен «владелец не найден» (SOFT_FILTER_STARS)")
+
+    # EARLY_POST: вне 300-1000 пост уходит сразу, владелец дописывается правкой поста
+    settings.early_post = True
+
+    class FakeSender:
+        def __init__(self):
+            self.edits, self.deleted = [], []
+            outer = self
+            class B:
+                async def delete_message(self, chat_id, message_id):
+                    outer.deleted.append(message_id)
+            self.bot = B()
+        async def edit_listing(self, chat, mid, text, preview, markup=None, fallback_markup=None):
+            self.edits.append((mid, text, markup))
+            return True
+
+    def early_pipeline(client):
+        p = pipeline(client)
+        p.sender = FakeSender()
+        p.formatter = MessageFormatter(settings.path(settings.template_path))
+        async def send_stage(ev, l, base, t0):
+            p.sent_l = l
+            p.sent_text = p.formatter.render(l)
+            l.sent, l.message_id, l.target_chat_id = True, 77, -100
+        p._send_stage = send_stage
+        async def seller_before(l):
+            return False
+        p._seller_sent_before = seller_before
+        return p
+
+    p = early_pipeline(FakeClient(REPLY, gifts, users))
+    l = hidden()
+    await p.process(ListingEvent(l, _t.monotonic(), "live"))
+    check(p.sent_l is l and "ищу владельца" in p.sent_text and len(p._lookup_tasks) == 1,
+          "EARLY_POST: пост ушёл сразу, с пометкой «ищу владельца», поиск в фоне")
+    await asyncio.gather(*list(p._lookup_tasks))
+    check(p.sender.edits and "@ivan_222" in p.sender.edits[-1][1] and not p.sender.deleted,
+          "EARLY_POST: владелец найден → пост отредактирован, в нём @юз продавца")
+
+    p = early_pipeline(FakeClient(REPLY, {111: [], 222: [], 333: []}, users))
+    l = hidden()
+    await p.process(ListingEvent(l, _t.monotonic(), "live"))
+    await asyncio.gather(*list(p._lookup_tasks))
+    check(p.sender.edits and "не найден" in p.sender.edits[-1][1],
+          "EARLY_POST: владелец не найден → пометка «владелец не найден»")
+
+    p = early_pipeline(FakeClient(REPLY, gifts, users))
+    async def paid_check(l):
+        l.messages = "платные (50 ⭐)"
+        from filters.seller_filter import SellerResult
+        return SellerResult(False, "PAID_MESSAGES", "paid")
+    p._check_seller = paid_check
+    l = hidden()
+    await p.process(ListingEvent(l, _t.monotonic(), "live"))
+    await asyncio.gather(*list(p._lookup_tasks))
+    check(p.sender.deleted == [77] and l.message_id is None,
+          "EARLY_POST: найденный продавец с платными ЛС → пост удалён")
+
+    p = early_pipeline(FakeClient(REPLY, gifts, users))
+    l = hidden()
+    l.stars_price = 500                                     # тема 300-1000 — строго, без early post
+    await p.process(ListingEvent(l, _t.monotonic(), "live"))
+    check(p.sent_l is None and len(p._lookup_tasks) == 1,
+          "тема 300-1000: пост только после проверки владельца")
+    await asyncio.gather(*list(p._lookup_tasks))
+    settings.early_post = False
 
     # лот продали, пока искали владельца → не шлём
     settings.lookup_check_onsale = True

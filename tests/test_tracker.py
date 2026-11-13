@@ -360,9 +360,13 @@ async def test_11_filters_and_repeats():
     assert e.pipe.stats["filtered_price"] == 1 and len(e.sender.sent) == 1
     settings.max_same_collection_streak = 1
     pf, settings.priority_floor = settings.priority_floor, 100000
+    sf, settings.soft_filter_stars = settings.soft_filter_stars, 100000   # строгая зона (тема 300-1000)
+    br, settings.backdrop_routes = settings.backdrop_routes, []            # фон Black — своя тема, мягкая
     e.market.list_new(e.market.item(9000))
     await e.poll()
     assert len(e.sender.sent) == 1, "та же коллекция подряд не отправляется"
+    settings.soft_filter_stars = sf
+    settings.backdrop_routes = br
     settings.priority_floor = pf
     e.market.list_new(e.market.item(60000))          # но дорогой ЛОТ (не только коллекция) не режем
     await e.poll()
