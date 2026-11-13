@@ -1764,8 +1764,14 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                          reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn("В меню", "danger", callback_data="sub:home")]]))
         await q.answer()
 
+    _PROMO_RE = re.compile(r"^[A-Za-zА-Яа-яЁё0-9_-]{2,32}$")
+
     def _awaiting_promo(m: Message) -> bool:
         if m.chat.type != "private" or not m.text or m.text.startswith("/") or m.from_user is None:
+            return False
+        # кодом считаем только «слово» (буквы/цифры/_/-): кнопки админ-панели и обычные фразы
+        # не перехватываются и уходят своим обработчикам
+        if not _PROMO_RE.match(m.text.strip()):
             return False
         u = subs.state["users"].get(str(m.from_user.id)) or {}
         return time.time() - float(u.get("await_promo") or 0) < 600
@@ -1839,9 +1845,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         ton, stars = game_ticket(plan)
         rows = []
         if stars:
-            rows.append([btn(f"{stars} ⭐", "primary", callback_data=f"sub:gpay:{ball}:stars:{plan}")])
+            rows.append([btn(f"{stars}", "primary", E.STAR, callback_data=f"sub:gpay:{ball}:stars:{plan}")])
         if settings.sub_ton_address:
-            rows.append([btn(f"{ton:g} TON", "success", callback_data=f"sub:gpay:{ball}:ton:{plan}")])
+            rows.append([btn(f"{ton:g}", "success", E.TON, callback_data=f"sub:gpay:{ball}:ton:{plan}")])
         rows.append([btn("« Назад", "danger", callback_data=f"sub:game:{plan}")])
         await _safe_edit(q.message, f"<b>Мяч: {emoji}</b>\n\nВыберите способ оплаты билета:",
                          reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
@@ -2035,11 +2041,11 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         # кастомные эмодзи в кнопках — через icon_custom_emoji_id (utils.emoji)
         rows: list[list[InlineKeyboardButton]] = []
         if stars:
-            rows.append([btn(f"{stars} ⭐", "primary", callback_data=f"sub:pay:{plan}:stars")])
+            rows.append([btn(f"{stars}", "primary", E.STAR, callback_data=f"sub:pay:{plan}:stars")])
         if settings.sub_ton_address:
-            rows.append([btn(f"{price:.4g} TON", "success", callback_data=f"sub:pay:{plan}:ton")])
+            rows.append([btn(f"{price:.4g}", "success", E.TON, callback_data=f"sub:pay:{plan}:ton")])
         if settings.game_enabled and (settings.sub_ton_address or game_ticket(plan)[1]):
-            rows.append([btn("Испытать удачу", "danger", E.GIFT, callback_data=f"sub:game:{plan}")])
+            rows.append([btn("Испытать удачу", "danger", E.CLOUD, callback_data=f"sub:game:{plan}")])
         rows.append([btn("« Назад", "primary", callback_data="sub:menu")])
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
         stars_part = f" или <b>{stars}</b> {_tg_emoji(EMOJI_STAR, '⭐')}" if stars else ""

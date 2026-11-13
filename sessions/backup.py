@@ -268,12 +268,27 @@ class SessionBackup:
 
     # ------------------------------------------------------------------ save
     def candidate_chats(self, hint: int | None = None) -> list[int]:
+        """Куда можно класть копию сессий. НИКОГДА — в общий канал/группу с лотами или подписчиками:
+        там файл может скачать любой участник, а это все аккаунты трекера."""
+        public = {c for c in (settings.target_chat_id, getattr(settings, "sub_chat_id", None),
+                              getattr(settings, "test_chat_id", None)) if c}
+        for _rng in (getattr(settings, "price_routes", None) or []):      # (от, до, чат, тема)
+            try:
+                public.add(int(_rng[2]))
+            except Exception:
+                pass
+        for _r in (getattr(settings, "backdrop_routes", None) or []):
+            try:
+                public.add(int(_r[1]))
+            except Exception:
+                pass
         out: list[int] = []
-        # общий канал — только в самом крайнем случае (подписчикам служебные файлы ни к чему)
-        for c in ([hint, settings.sessions_backup_chat_id] + sorted(self._admins())
-                  + [self._last_chat, settings.target_chat_id]):
-            if c and c not in out:
-                out.append(c)
+        for c in [hint, settings.sessions_backup_chat_id] + sorted(self._admins()) + [self._last_chat]:
+            if not c or c in out:
+                continue
+            if c in public and c != settings.sessions_backup_chat_id:
+                continue          # общий чат — копию туда не кладём
+            out.append(c)
         return out
 
     async def save(self, chat_hint: int | None = None, allow_shrink: bool = False) -> bool:
