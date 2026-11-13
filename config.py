@@ -319,6 +319,8 @@ class Settings:
                                               # кнопка «Написать» открывает его с готовым
                                               # оффером: «@<бот> <ссылка на NFT> <сниженная_цена>».
                                               # Пусто = обычная кнопка «Написать» продавцу.
+    offer_in_button: bool = True              # Maker: у ВСЕХ лотов кнопка «Написать» сразу с оффером
+                                              # (сниженная цена по шкале). false = пустой ЛС, оффер только по /фа.
     require_free_messages: bool = True        # продавцу можно написать бесплатно (без платных сообщений / Premium-only)
     max_seller_nfts: int = 20                 # не больше N NFT в профиле продавца (0 = не проверять). Maker: 12→20 (фильтры чуть слабее)
     max_seller_level: int = 6                 # максимальный Level продавца (0 = не проверять). Maker: 4→6 (фильтры чуть слабее)
@@ -502,6 +504,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOOKUP_NOMATCH_CHECK": ("lookup_nomatch_check", lambda v: max(0, min(10, int(v)))),
     "LOOKUP_MAX_CANDIDATES": ("lookup_max_candidates", lambda v: max(1, min(30, int(v)))),
     "TRADE_BOT_USERNAME": ("trade_bot_username", lambda v: v.strip().lstrip("@")),
+    "OFFER_IN_BUTTON": ("offer_in_button", _bool_strict),
     "SELLER_PHONE_PREFIXES": ("seller_phone_prefixes", _str_list),
     "TRACKER_INTERVAL": ("tracker_interval", _rng(0.2, 3600)),
     "PAGE_LIMIT": ("page_limit", lambda v: max(1, min(100, int(v)))),
@@ -605,6 +608,7 @@ def _from_env() -> Settings:
         lookup_max_candidates=max(1, min(30, _int(e("LOOKUP_MAX_CANDIDATES"), 3))),
         lookup_trust_name_match=_bool(e("LOOKUP_TRUST_NAME_MATCH"), True),
         trade_bot_username=(e("TRADE_BOT_USERNAME") or "").strip().lstrip("@"),
+        offer_in_button=_bool(e("OFFER_IN_BUTTON"), True),
         unique_gifts=_bool(e("UNIQUE_GIFTS"), True),
         require_free_messages=_bool(e("REQUIRE_FREE_MESSAGES"), True),
         max_seller_nfts=max(0, _int(e("MAX_SELLER_NFTS"), 12)),

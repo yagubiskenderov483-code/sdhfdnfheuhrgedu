@@ -75,15 +75,37 @@ def seller_url(l: Listing) -> str | None:
     return None
 
 
+def _ton_discount(ton: int) -> int:
+    """Скидка в граммах по сумме в TON (Maker): <25 → −1; 25–49 → −2; 50–80 → −3; 80+ → −5."""
+    if ton < 25:
+        return 1
+    if ton < 50:
+        return 2
+    if ton <= 80:
+        return 3
+    return 5
+
+
+def _stars_discount(stars: int) -> int:
+    """Скидка в ⭐ по цене лота (Maker):
+      ≤1000 → −30 (1000→970); 1001–2000 → −50; 2001–3500 → −120;
+      3501–5000 → −170; 5001–10000 → −250; 10001+ → −350."""
+    if stars <= 1000:
+        return 30
+    if stars <= 2000:
+        return 50
+    if stars <= 3500:
+        return 120
+    if stars <= 5000:
+        return 170
+    if stars <= 10000:
+        return 250
+    return 350
+
+
 def _trade_offer(l: Listing) -> tuple[int, str] | None:
     """Сумма и единица для оффера в торговый бот со СКИДКОЙ от текущей цены лота.
-
-    Maker просит сниженную цену обратно (раньше временно ставили ровную).
-    Шкала скидок:
-      Stars: ≤1000 → −30; 1001–1800 → −50; 1801–2500 → −60; 2501–5000 → −100;
-             5001–10000 → −140; 10001+ → −215.
-      TON (округляем до целого): <48 → −1 g; ≥48 → −2 g.
-    Для ton-only лотов используется TON, иначе — Stars. Если ни того ни другого — None."""
+    Для ton-only лотов используется TON (граммы), иначе — Stars. Если ни того ни другого — None."""
     stars = l.stars_price
     ton_int = 0
     if l.ton_price and l.ton_price > 0:
@@ -92,25 +114,11 @@ def _trade_offer(l: Listing) -> tuple[int, str] | None:
         ton_int = max(1, int(Decimal(str(l.ton_price)).quantize(Decimal("1"),
                                                                   rounding=ROUND_HALF_UP)))
     if getattr(l, "ton_only", False) and ton_int > 0:
-        off = ton_int - (2 if ton_int >= 48 else 1)
-        return (max(1, off), "g")
+        return (max(1, ton_int - _ton_discount(ton_int)), "g")
     if stars and stars > 0:
-        if stars <= 1000:
-            d = 30
-        elif stars <= 1800:
-            d = 50
-        elif stars <= 2500:
-            d = 60
-        elif stars <= 5000:
-            d = 100
-        elif stars <= 10000:
-            d = 140
-        else:
-            d = 215
-        return (max(1, stars - d), "")
+        return (max(1, stars - _stars_discount(stars)), "")
     if ton_int > 0:
-        off = ton_int - (2 if ton_int >= 48 else 1)
-        return (max(1, off), "g")
+        return (max(1, ton_int - _ton_discount(ton_int)), "g")
     return None
 
 

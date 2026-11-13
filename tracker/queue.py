@@ -1013,8 +1013,9 @@ class ListingPipeline:
             await self.db.update_listing(l)
             # тема по реальной стоимости гифта (флор коллекции), а не по цене, которую поставил продавец
             _chat, _thread = settings.route_chat(route_value(l), l.backdrop)
-            res = await self.sender.send_listing(text, l.gift_link, listing_keyboard(l),
-                                                 listing_keyboard(l, with_seller=False),
+            _wo = settings.offer_in_button      # Maker: у всех лотов кнопка «Написать» сразу с оффером
+            res = await self.sender.send_listing(text, l.gift_link, listing_keyboard(l, with_offer=_wo),
+                                                 listing_keyboard(l, with_seller=False, with_offer=_wo),
                                                  target=_chat, thread=_thread,
                                                  priority=self._is_expensive(l))
             if res.ok:
@@ -1249,8 +1250,10 @@ class ListingPipeline:
                 llog("FILTER", f"#{l.listing_id} early post deleted: {l.seller_filter_result} ({l.reason})")
             else:
                 text = self.formatter.render(l)
+                _wo = settings.offer_in_button
                 ok = await self.sender.edit_listing(chat, mid, text, l.gift_link,
-                                                    listing_keyboard(l), listing_keyboard(l, with_seller=False))
+                                                    listing_keyboard(l, with_offer=_wo),
+                                                    listing_keyboard(l, with_seller=False, with_offer=_wo))
                 key = "early_post_found" if verdict == "found" else "early_post_not_found"
                 self.stats[key] = self.stats.get(key, 0) + 1
                 llog("SEND", f"listing={l.listing_id} early post updated ({verdict}, edit={'ok' if ok else 'fail'})")
