@@ -1662,8 +1662,10 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             subs._remember_who(u, m.from_user)
             u.setdefault("first_seen", time.time())
             u["last_start"] = time.time()
-        # новый пользователь → durable-копия в Telegram (переживает деплой); повтор — только локально
-        await subs.save(backup=is_new)
+        # Пишем состояние ТОЛЬКО для нового юзера (durable-копия в Telegram переживает деплой).
+        # Повторный /start не трогает БД — иначе на спаме /start лишняя нагрузка json.dumps на event loop.
+        if is_new:
+            await subs.save(backup=True)
         if not await subs.in_channel(m.bot, uid):
             await m.answer(GATE_TEXT, reply_markup=subs.channel_gate_kb())
             return
