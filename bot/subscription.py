@@ -443,6 +443,10 @@ class Subscriptions:
                 return "Вы уже использовали этот промокод."
             u["promo"] = code
             u.pop("await_promo", None)
+            # запоминаем, кто вводил промокод (для /promo_users)
+            al = p.setdefault("activated_by", [])
+            if uid not in al:
+                al.append(uid)
             await self.save(backup=True)
         return f"Промокод <b>{html.escape(code)}</b> активирован: скидка <b>−{int(p.get('pct') or 0)}%</b> на следующую оплату."
 
@@ -1658,6 +1662,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 await subs.register_ref(uid, int(mt.group(1)), m.from_user)
             except Exception as e:
                 log.warning("register ref failed: %s", e)
+        mt_promo = re.match(r"^/start(?:@\w+)?\s+promo_([A-Za-z0-9_\-]{3,32})\s*$", m.text or "")
         if subs.is_banned(uid):
             await m.answer("Доступ к боту заблокирован.")
             return
@@ -1679,6 +1684,10 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             # закрыто для новых, но у кого подписка есть — должен иметь возможность взять новую ссылку
             await m.answer(CLOSED_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                 btn("Моя подписка", "primary", E.SUB, callback_data="sub:my")]]))
+            return
+        # пришёл по ссылке «Активировать» из канала — сразу применяем промокод
+        if mt_promo and subs.ready.is_set():
+            await _promo_reply(m, mt_promo.group(1))
             return
         await m.answer(WELCOME, reply_markup=subs.main_kb())
 
@@ -2694,10 +2703,27 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         code = parts[0].upper()
         async with subs._lock:
             subs.state.setdefault("promos", {})[code] = {"pct": pct, "max": lim or None, "uses": 0,
-                                                         "created": time.time()}
+                                                         "created": time.time(), "activated_by": []}
             await subs.save(backup=True)
         await m.answer(f"Промокод <code>{code}</code>: −{pct}%" + (f", {lim} активаций" if lim else ", без лимита")
-                       + "\nПользователь вводит его кнопкой «Промокод» или <code>/promo " + code + "</code>.")
+                       + "\nПользователь вводит его кнопкой «Промокод» или <code>/promo " + code + "</code>."
+                       + "\n\nКто вводил: <code>/promo_users " + code + "</code>")
+        # авто-пост в канал с кнопкой «Активировать» (ведёт в бота прямо к промокоду)
+        ch = settings.required_channel
+        if ch:
+            try:
+                bot_un = await _bot_username(m.bot)
+                lim_part = f", {lim} активаций" if lim else ""
+                text = (f"🎁 Лови скидку по промокоду <b>{code}</b>: <b>−{pct}%</b>{lim_part}\n\n"
+                        "Успей — свежие лоты ждут вас!\n\n"
+                        f"Активируйте в: @{bot_un}")
+                kb = InlineKeyboardMarkup(inline_keyboard=[[
+                    btn("Активировать", "success", url=f"https://t.me/{bot_un}?start=promo_{code}")]])
+                await m.bot.send_message(ch, text, reply_markup=kb)
+                await m.answer(f"Опубликовал промокод в канал {ch}.")
+            except Exception as e:
+                await m.answer(f"Создал, но в канал не запостил: {html.escape(str(e))}\n"
+                               f"Проверь, что бот — админ в {ch}.")
 
     @r.message(Command("promo_del"), _ADM)
     async def cmd_promo_del(m: Message, command: CommandObject) -> None:
@@ -2714,11 +2740,33 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
     @r.message(Command("promos"), _ADM)
     async def cmd_promos(m: Message) -> None:
         await subs.load()
-        rows = [f"<code>{c}</code> −{p.get('pct')}% · {p.get('uses', 0)}"
-                + (f"/{p['max']}" if p.get("max") else "") + (" · выкл" if p.get("off") else "")
+        rows = [f"<code>{c}</code> −{p.get('pct')}% · оплат {p.get('uses', 0)}"
+                + (f"/{p['max']}" if p.get("max") else "") + f" · ввели {len(p.get('activated_by') or [])}"
+                + (" · выкл" if p.get("off") else "")
                 for c, p in (subs.state.get("promos") or {}).items()]
         await m.answer("<b>Промокоды</b>\n" + ("\n".join(rows) or "нет") +
-                       "\n\nСоздать: <code>/promo_add КОД 30 [лимит]</code> · выключить: <code>/promo_del КОД</code>")
+                       "\n\nКто вводил код: <code>/promo_users КОД</code>\n"
+                       "Создать: <code>/promo_add КОД 30 [лимит]</code> · выключить: <code>/promo_del КОД</code>")
+
+    @r.message(Command("promo_users"), _ADM)
+    async def cmd_promo_users(m: Message, command: CommandObject) -> None:
+        await subs.load()
+        code = (command.args or "").strip().upper()
+        p = (subs.state.get("promos") or {}).get(code)
+        if not p:
+            await m.answer("Нет такого промокода. Список: /promos")
+            return
+        ids = p.get("activated_by") or []
+        if not ids:
+            await m.answer(f"Промокод <code>{code}</code> пока никто не вводил.")
+            return
+        lines = [f"<b>Вводили промокод {code} ({len(ids)}):</b>", ""]
+        for uid in ids[-100:]:
+            u = subs.state["users"].get(str(uid)) or {}
+            who = ("@" + u["username"]) if u.get("username") else (u.get("name") or "")
+            paid = " ✅оплатил" if code in [x for x in (u.get("promos_used") or [])] else ""
+            lines.append(f"<code>{uid}</code> {html.escape(str(who))}{paid}")
+        await m.answer("\n".join(lines))
 
     # ---------------- шорткат: "<ID> а" в личке от админа → подписка навсегда
     #     (а|н|навсегда|forever|∞ — любое из этих слов). Это ускорение для /grant <id> навсегда.
