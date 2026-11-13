@@ -1091,10 +1091,9 @@ class App:
         cmds.append(BotCommand(command="revoke", description="Забрать подписку: /revoke ID|@юз"))
         cmds.append(BotCommand(command="broadcast", description="Рассылка всем пользователям бота"))
         try:
-            # всем — /start и /help; полное меню — только админам из ADMIN_IDS
-            await self.bot.set_my_commands([BotCommand(command="start", description="Главное меню"),
-                                            BotCommand(command="help", description="Все команды и что они делают")],
-                                           scope=BotCommandScopeDefault())
+            # Обычным пользователям — пустое меню команд (синяя кнопка без админ-команд).
+            # Полный список команд — только админам, персональным scope по их chat_id.
+            await self.bot.delete_my_commands(scope=BotCommandScopeDefault())
             for admin in (settings.admin_ids or all_admins()):
                 try:
                     await self.bot.set_my_commands(cmds, scope=BotCommandScopeChat(chat_id=admin))
