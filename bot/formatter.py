@@ -29,7 +29,7 @@ DASH = "-"
 # кастомные эмодзи в тексте лота (Maker)
 STAR_TG = '<tg-emoji emoji-id="6028338546736107668">⭐️</tg-emoji>'
 BOLT_TG = '<tg-emoji emoji-id="5936088245560419529">⚡️</tg-emoji>'
-TON_TG = '<tg-emoji emoji-id="5424905554432631390">👽</tg-emoji>'  # цена в TON (раньше была обычным словом «TON» → в теме 5000+ смотрелось не как кастом)
+TON_TG = '<tg-emoji emoji-id="5956405141677548170">💎</tg-emoji>'  # цена в TON (раньше была обычным словом «TON» → в теме 5000+ смотрелось не как кастом)
 
 
 def _units(s: str) -> str:

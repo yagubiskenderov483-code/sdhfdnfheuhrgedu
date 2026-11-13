@@ -57,7 +57,7 @@ REMIND_BEFORE = 60 * 60          # напомнить о продлении за
 # (Premium-юзеры видят кастомку, остальные — fallback). Maker прислал ID:
 EMOJI_DIAMOND = "6032742198179532882"     # — для 'Подписка', 'Тариф'
 EMOJI_STAR    = "6028338546736107668"     # — цена в Stars
-EMOJI_TON     = "5424905554432631390"     # цена в TON
+EMOJI_TON     = "5956405141677548170"     # 💎 цена в TON (Maker)
 EMOJI_GIFT    = "6032644646587338669"     # — '30 минут бесплатно'
 EMOJI_PAID    = "6039486778597970865"     # — 'Оплата получена, ожидайте.'
 EMOJI_SUB     = "5927118708873892465"     # — 'Подписка' (меню)
@@ -410,7 +410,7 @@ class Subscriptions:
     def plans_text(self, uid: int) -> str:
         """«Подписка» + цены тарифов: 1.2 <TON> / 150 <Stars> (кастомные эмодзи Maker'а)."""
         pct = self.promo_pct(uid)
-        t, st = _tg_emoji(EMOJI_TON, "👽"), _tg_emoji(EMOJI_STAR, "⭐️")
+        t, st = _tg_emoji(EMOJI_TON, "💎"), _tg_emoji(EMOJI_STAR, "⭐️")
         lines = []
         for _code, (title, price, _, stars) in PLANS.items():
             p_ton = _disc(price, pct)
