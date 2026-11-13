@@ -124,7 +124,7 @@ def listing_keyboard(l: Listing, with_seller: bool = True, with_offer: bool = Fa
     кнопка становится «С оффером» и в поле ввода уже стоит оффер
     «@<бот> <ссылка на NFT> <сниженная_цена>» — остаётся нажать «Отправить»."""
     # цвета у всех кнопок разные: «Занять» — зелёная, «Лот» — синяя, «Написать» — красная
-    rows = [[InlineKeyboardButton(text="Занять", style="success", **_icon(E.PAID),
+    rows = [[InlineKeyboardButton(text="Занять", style="success", **_icon(E.PERSON),
                                   callback_data=f"take:{l.gift_unique_id}"[:64])]]
     second = []
     if l.gift_link:
@@ -149,7 +149,7 @@ def listing_keyboard(l: Listing, with_seller: bool = True, with_offer: bool = Fa
         # «Написать» — красная, «Написать с оффером» — обычная со звездой (сразу видно лот с оффером)
         kw = {"style": "danger"} if not has_offer else {}
         second.append(InlineKeyboardButton(text="Написать с оффером" if has_offer else "Написать",
-                                           **kw, **_icon(E.STAR if has_offer else E.SUB), url=url))
+                                           **kw, **_icon(E.PENCIL), url=url))
     if second:
         rows.append(second)
     return InlineKeyboardMarkup(inline_keyboard=rows)

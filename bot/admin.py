@@ -40,6 +40,8 @@ if TYPE_CHECKING:
     from main import App
 
 log = get_logger("admin")
+from utils import emoji as E  # noqa: E402
+from utils.emoji import icon as _icon  # noqa: E402
 ADMINS_FILE = DATA_DIR / "admins.json"
 
 
@@ -655,7 +657,8 @@ def build_routers(app: "App") -> list[Router]:
         who = f"@{u.username}" if u.username else (u.full_name or str(u.id))
         original = msg.html_text or ""
         links = kb.inline_keyboard[1:]
-        rows = [[InlineKeyboardButton(text="Отменить", style="danger", callback_data=f"untake:{u.id}")]]
+        rows = [[InlineKeyboardButton(text="Отменить", style="danger", **_icon(E.PERSON),
+                                      callback_data=f"untake:{u.id}")]]
 
         async def release() -> None:
             async with claim_lock:

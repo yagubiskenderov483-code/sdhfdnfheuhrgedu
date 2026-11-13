@@ -935,9 +935,11 @@ class ListingPipeline:
             return
         no_valid_user = ((settings.require_username and not l.seller_username) or l.seller_type != "user"
                          or not l.seller_id or l.seller_id <= 0)
-        if settings.only_with_username and not l.seller_username:
-            # без @username нет кнопки «Написать» — такие лоты не постим ни в одной теме
-            guard = ("NO_USERNAME", "у продавца нет @username")
+        if settings.only_with_username and (not l.seller_username or l.seller_type != "user"
+                                            or not l.seller_id or l.seller_id <= 0):
+            # во ВСЕХ темах: только продавец с @username и ID (найден напрямую или ботом поиска).
+            # Без них нет кнопки «Написать», а в посте была бы пометка «владелец не найден»
+            guard = ("NO_USERNAME", "у продавца нет @username / ID")
         elif no_valid_user:
             # Maker: для лотов >= SOFT_FILTER_STARS отсутствие @юза / неподтверждённого владельца
             # не блокирует отправку — пост уходит с пометкой 'profile hidden'. Платные ЛС и
@@ -1224,7 +1226,8 @@ class ListingPipeline:
                 # UNIQUE_SELLERS: этот продавец уже был в канале — повтор убираем
                 verdict = "reject"
                 l.seller_filter_result, l.reason = "DUPLICATE_SELLER", "this seller was already sent"
-            elif settings.only_with_username and not l.seller_username:
+            elif settings.only_with_username and (not l.seller_username or not l.seller_id
+                                                  or l.seller_id <= 0):
                 verdict = "reject"
                 l.seller_filter_result, l.reason = "NO_USERNAME", "у продавца нет @username"
             else:

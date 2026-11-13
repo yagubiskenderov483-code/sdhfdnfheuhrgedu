@@ -58,7 +58,7 @@ REMIND_BEFORE = 60 * 60          # напомнить о продлении за
 # (Premium-юзеры видят кастомку, остальные — fallback). Maker прислал ID:
 EMOJI_DIAMOND = "6032742198179532882"     # — для 'Подписка', 'Тариф'
 EMOJI_STAR    = "6028338546736107668"     # — цена в Stars
-EMOJI_TON     = "5377620962390857342"     # цена в TON
+EMOJI_TON     = "5316802593391916971"     # цена в TON
 EMOJI_GIFT    = "6032644646587338669"     # — '30 минут бесплатно'
 EMOJI_PAID    = "6039486778597970865"     # — 'Оплата получена, ожидайте.'
 EMOJI_SUB     = "5927118708873892465"     # — 'Подписка' (меню)
@@ -86,10 +86,23 @@ _LEGACY_PLANS: dict[str, tuple[str, float, float, int | None]] = {
 }
 
 
-GAME_PLAN = "game"
+GAME_PLAN = "game"                 # старый билет (цена/выигрыш из настроек GAME_*)
+GAME_PREFIX = "game_"              # билет на тариф: game_6h — выигрыш 6ч
+GAME_FACTOR = 0.7 / 1.2            # Maker: тариф 1.2 TON → билет 0.7 TON (так же для остальных)
 # Telegram сам решает исход броска (sendDice) — бот на результат не влияет.
-# ⚽: 3,4,5 — гол (3 из 5 = 60%); 🏀: 4,5 — попал (2 из 5 = 40%).
-GAME_BALLS = {"soccer": ("⚽", (3, 4, 5)), "basket": ("🏀", (4, 5))}
+# Maker: шанс 40–50%. ⚽: 4,5 — гол (2 из 5 = 40%); 🏀: 4,5 — попал (2 из 5 = 40%).
+GAME_BALLS = {"soccer": ("⚽", (4, 5)), "basket": ("🏀", (4, 5))}
+
+
+def is_game(code: str | None) -> bool:
+    return bool(code) and (code == GAME_PLAN or code.startswith(GAME_PREFIX))
+
+
+def game_ticket(plan: str) -> tuple[float, int | None]:
+    """Цена билета «Испытать удачу» на тариф: (TON, Stars или None)."""
+    _t, price, _s, stars = PLANS[plan]
+    return (max(0.1, round(price * GAME_FACTOR, 1)),
+            max(1, round(stars * GAME_FACTOR)) if stars else None)
 
 
 def plan_info(code: str) -> tuple[str, float, float, int | None] | None:
@@ -97,6 +110,11 @@ def plan_info(code: str) -> tuple[str, float, float, int | None] | None:
     if code == GAME_PLAN:
         return (f"Билет: {settings.game_prize_hours} ч", float(settings.game_ton),
                 settings.game_prize_hours * 3600.0, int(settings.game_stars) or None)
+    if code and code.startswith(GAME_PREFIX) and code[len(GAME_PREFIX):] in PLANS:
+        base = code[len(GAME_PREFIX):]
+        title, _p, secs, _st = PLANS[base]
+        ton, stars = game_ticket(base)
+        return (f"Билет: {title}", ton, secs, stars)
     return PLANS.get(code) or _LEGACY_PLANS.get(code)
 
 
@@ -377,16 +395,25 @@ class Subscriptions:
         rows = []
         if not self.user(uid).get("trial"):
             rows.append([btn("30 мин бесплатно", "success", E.GIFT, callback_data="sub:trial")])
-        pct = self.promo_pct(uid)
-        styles = ("primary", "danger", "success", None)      # тарифы — разными цветами
+        styles = ("primary", "danger", "success")            # тарифы — разными цветами, без «пустых»
         for i, (code, (title, price, _, stars)) in enumerate(PLANS.items()):
+            label = title
+            rows.append([btn(label, styles[i % len(styles)], E.DIAMOND, callback_data=f"sub:buy:{code}")])
+        rows.append([btn("« Назад", "danger", callback_data="sub:home")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    def plans_text(self, uid: int) -> str:
+        """«Подписка» + цены тарифов: 1.2 <TON> / 150 <Stars> (кастомные эмодзи Maker'а)."""
+        pct = self.promo_pct(uid)
+        t, st = _tg_emoji(EMOJI_TON, "💎"), _tg_emoji(EMOJI_STAR, "⭐")
+        lines = []
+        for _code, (title, price, _, stars) in PLANS.items():
             p_ton = _disc(price, pct)
             p_st = max(1, round(_disc(stars, pct))) if stars else None
-            stars_part = f" / {p_st} Stars" if p_st else ""
-            label = f"{title} · {p_ton:.4g} TON{stars_part}" + (f" (−{pct}%)" if pct else "")
-            rows.append([btn(label, styles[i % len(styles)], E.DIAMOND, callback_data=f"sub:buy:{code}")])
-        rows.append([btn("« Назад", callback_data="sub:home")])
-        return InlineKeyboardMarkup(inline_keyboard=rows)
+            lines.append(f"<b>{title}</b> — {p_ton:.4g} {t}" + (f" / {p_st} {st}" if p_st else ""))
+        disc = f"\n\nСкидка по промокоду: <b>−{pct}%</b>" if pct else ""
+        return (f'{_tg_emoji(EMOJI_SUB, "💎")} <b>Подписка</b>\n\n' + "\n".join(lines) + disc
+                + "\n\nВыберите тариф")
 
     # ------------------------------------------------------------------ промокоды
     def promo_pct(self, uid: int) -> int:
@@ -439,7 +466,7 @@ class Subscriptions:
 
     async def _credit_ref(self, inv: dict) -> None:
         """Каждая оплата подписки приглашённым → +REF_BONUS_MINUTES пригласившему (один раз на счёт)."""
-        if inv.get("ref_credited") or inv.get("plan") == GAME_PLAN or not settings.ref_bonus_minutes:
+        if inv.get("ref_credited") or is_game(inv.get("plan")) or not settings.ref_bonus_minutes:
             return
         uid = int(inv.get("uid") or 0)
         u = self.state["users"].get(str(uid)) or {}
@@ -861,7 +888,7 @@ class Subscriptions:
                 f"?amount={int(inv['nano'])}&text={quote(code)}")
 
     def _promo_for(self, uid: int, plan: str) -> tuple[int, str | None]:
-        if plan == GAME_PLAN:
+        if is_game(plan):
             return 0, None                     # на билет игры промокод не действует
         pct = self.promo_pct(uid)
         return (pct, (self.state["users"].get(str(uid)) or {}).get("promo")) if pct else (0, None)
@@ -913,8 +940,8 @@ class Subscriptions:
         # в правильном боте, а pre_checkout/successful_payment приходили туда.
         url = await self.stars_bot.create_invoice_link(
             title=f"NFT Tracker — {title}",
-            description=(f"Испытать удачу: {GAME_BALLS.get(ball, ('?',))[0]} — выигрыш {settings.game_prize_hours} ч подписки"
-                         if plan == GAME_PLAN else f"Доступ к трекеру: тариф {title}"),
+            description=(f"Испытать удачу: {GAME_BALLS.get(ball, ('?',))[0]} — {title}"
+                         if is_game(plan) else f"Доступ к трекеру: тариф {title}"),
             payload=code,
             currency="XTR",
             prices=[LabeledPrice(label=title, amount=int(stars))],
@@ -1334,7 +1361,7 @@ class Subscriptions:
             return False
         title, price, secs, _stars = pinfo
         uid = int(inv["uid"])
-        if inv.get("plan") == GAME_PLAN:
+        if is_game(inv.get("plan")):
             return await self._play(inv)
         # Maker: короткая строка — только «тариф 6ч.», без 'Оплата 2.2 TON пришла, '.
         reason = f"тариф {title}."
@@ -1405,7 +1432,11 @@ class Subscriptions:
         Результат броска сохраняется ДО выдачи: повторная доставка не перебрасывает мяч."""
         uid = int(inv["uid"])
         emoji, wins = GAME_BALLS.get(inv.get("game") or "soccer", GAME_BALLS["soccer"])
-        prize = settings.game_prize_hours * 3600
+        pinfo = plan_info(inv.get("plan") or GAME_PLAN) or plan_info(GAME_PLAN)
+        prize = pinfo[2]
+        prize_txt = "Навсегда" if prize == FOREVER else _fmt_secs(prize)
+        retry_cb = (f"sub:game:{inv['plan'][len(GAME_PREFIX):]}"
+                    if str(inv.get("plan") or "").startswith(GAME_PREFIX) else "sub:menu")
         if inv.get("dice") is None:
             msg = None
             for bot in self._user_bots():
@@ -1428,13 +1459,13 @@ class Subscriptions:
             await self.save()
             await self._dm_user(uid, "Мимо — билет сгорел. Повезёт в следующий раз!",
                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                    [btn("Ещё попытка", "danger", E.STAR, callback_data="sub:game")],
+                                    [btn("Ещё попытка", "danger", E.STAR, callback_data=retry_cb)],
                                     [btn("Оформить подписку", "success", E.SUB, callback_data="sub:menu")]]))
             return True
         inv["granted"] = "inflight"
         try:
             text = await self.grant(uid, prize, f"{'Гол' if emoji == '⚽' else 'Попадание'}! "
-                                                f"Выигрыш: {settings.game_prize_hours} ч подписки.", inv=inv)
+                                                f"Выигрыш: {prize_txt} подписки.", inv=inv)
         except Exception as e:
             inv["granted"] = False
             await self.save()
@@ -1621,7 +1652,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if closed():
             # закрыто для новых, но у кого подписка есть — должен иметь возможность взять новую ссылку
             await m.answer(CLOSED_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                btn("Моя подписка", callback_data="sub:my")]]))
+                btn("Моя подписка", "primary", E.SUB, callback_data="sub:my")]]))
             return
         await m.answer(WELCOME, reply_markup=subs.main_kb())
 
@@ -1689,7 +1720,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         rows = [[btn("Поделиться ссылкой", "primary", E.GIFT, url=share)]]
         if info["bonus"] >= max(60, need):
             rows.append([btn(f"Активировать {_fmt_secs(info['bonus'])}", "success", E.PAID, callback_data="sub:refuse")])
-        rows.append([btn("В меню", callback_data="sub:home")])
+        rows.append([btn("В меню", "danger", callback_data="sub:home")])
         await _safe_edit(q.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         await q.answer()
 
@@ -1722,7 +1753,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         pct = subs.promo_pct(q.from_user.id)
         cur = f"\n\nСейчас активна скидка <b>−{pct}%</b> на следующую оплату." if pct else ""
         await _safe_edit(q.message, "<b>Промокод</b>\n\nВведите промокод" + cur,
-                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn("В меню", callback_data="sub:home")]]))
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn("В меню", "danger", callback_data="sub:home")]]))
         await q.answer()
 
     def _awaiting_promo(m: Message) -> bool:
@@ -1755,16 +1786,22 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             return
         await _promo_reply(m, command.args.strip().split()[0][:32])
 
-    # ---------------- «Испытать удачу»
-    def _game_text() -> str:
-        stars = f" / {settings.game_stars} Stars" if settings.game_stars else ""
-        return (f"<b>Испытать удачу: {settings.game_prize_hours} ч подписки</b>\n\n"
-                f"Билет в игру: <b>{settings.game_ton:g} TON{stars}</b>\n"
-                "Шанс выигрыша: ⚽ <b>60%</b> (гол) · 🏀 <b>40%</b> (попадание)\n\n"
-                "Мяч бросает сам Telegram — бот на результат не влияет. Не попали — билет сгорает.\n\n"
-                "<b>Выберите мяч для игры:</b>")
+    # ---------------- «Испытать удачу» (с экрана оплаты тарифа: билет дешевле тарифа, выигрыш — тариф)
+    def _game_text(plan: str) -> str:
+        title = PLANS[plan][0]
+        ton, stars = game_ticket(plan)
+        star_part = f" / {stars} {_tg_emoji(EMOJI_STAR, '⭐')}" if stars else ""
+        return (f"<b>Испытать удачу: тариф {title}</b>\n\n"
+                f"Билет: <b>{ton:g} {_tg_emoji(EMOJI_TON, '💎')}</b>{star_part}\n"
+                "Не попали — билет сгорает.\n\n"
+                "<b>Выберите мяч:</b>")
 
-    @r.callback_query(F.data == "sub:game")
+    def _game_plan(q: CallbackQuery, idx: int) -> str | None:
+        parts = (q.data or "").split(":")
+        plan = parts[idx] if len(parts) > idx else "6h"      # старые кнопки без тарифа → 6ч
+        return plan if plan in PLANS else None
+
+    @r.callback_query((F.data == "sub:game") | F.data.startswith("sub:game:"))
     async def cb_game(q: CallbackQuery) -> None:
         if not settings.game_enabled:
             await q.answer("Игра сейчас выключена", show_alert=True)
@@ -1772,26 +1809,32 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if closed():
             await q.answer(CLOSED_TEXT, show_alert=True)
             return
-        await _safe_edit(q.message, _game_text(), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-            [btn("⚽", "primary", callback_data="sub:gball:soccer"),
-             btn("🏀", "danger", callback_data="sub:gball:basket")],
-            [btn("« Назад", callback_data="sub:menu")]]))
+        plan = _game_plan(q, 2)
+        if plan is None:
+            await q.answer("Тариф не найден", show_alert=True)
+            return
+        await _safe_edit(q.message, _game_text(plan), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [btn("⚽", "primary", callback_data=f"sub:gball:soccer:{plan}"),
+             btn("🏀", "danger", callback_data=f"sub:gball:basket:{plan}")],
+            [btn("« Назад", "success", callback_data=f"sub:buy:{plan}")]]))
         await q.answer()
 
     @r.callback_query(F.data.startswith("sub:gball:"))
     async def cb_game_ball(q: CallbackQuery) -> None:
-        ball = q.data.split(":", 2)[2]
-        if ball not in GAME_BALLS or not settings.game_enabled:
+        parts = q.data.split(":")
+        ball = parts[2] if len(parts) > 2 else ""
+        plan = _game_plan(q, 3)
+        if ball not in GAME_BALLS or plan is None or not settings.game_enabled:
             await q.answer("Ошибка", show_alert=True)
             return
         emoji = GAME_BALLS[ball][0]
+        ton, stars = game_ticket(plan)
         rows = []
-        if settings.game_stars:
-            rows.append([btn(f"Stars · {settings.game_stars}", "primary", E.STAR, callback_data=f"sub:gpay:{ball}:stars")])
+        if stars:
+            rows.append([btn(f"{stars}", "primary", E.STAR, callback_data=f"sub:gpay:{ball}:stars:{plan}")])
         if settings.sub_ton_address:
-            rows.append([btn(f"Tonkeeper · {settings.game_ton:g} TON", "success", E.TON,
-                             callback_data=f"sub:gpay:{ball}:ton")])
-        rows.append([btn("« Назад", callback_data="sub:game")])
+            rows.append([btn(f"{ton:g}", "success", E.TON, callback_data=f"sub:gpay:{ball}:ton:{plan}")])
+        rows.append([btn("« Назад", "danger", callback_data=f"sub:game:{plan}")])
         await _safe_edit(q.message, f"<b>Мяч: {emoji}</b>\n\nВыберите способ оплаты билета:",
                          reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         await q.answer()
@@ -1805,31 +1848,36 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             await q.answer(CLOSED_TEXT, show_alert=True)
             return
         parts = q.data.split(":")
-        if len(parts) != 4 or parts[2] not in GAME_BALLS:
+        plan = _game_plan(q, 4)
+        if len(parts) < 4 or parts[2] not in GAME_BALLS or plan is None:
             await q.answer("Ошибка")
             return
         ball, method = parts[2], parts[3]
+        gplan = GAME_PREFIX + plan
+        ton, stars = game_ticket(plan)
         await subs.load()
         subs._remember_who(subs.user(q.from_user.id), q.from_user)
-        back = [btn("« Назад", callback_data=f"sub:gball:{ball}")]
-        if method == "stars" and settings.game_stars:
+        back = [btn("« Назад", "danger", callback_data=f"sub:gball:{ball}:{plan}")]
+        if method == "stars" and stars:
             try:
-                url = await subs.new_stars_invoice(q.from_user.id, GAME_PLAN, ball=ball)
+                url = await subs.new_stars_invoice(q.from_user.id, gplan, ball=ball)
             except Exception as e:
                 log.error("Game stars invoice failed for %s: %s", q.from_user.id, e)
                 await q.answer("Не удалось создать счёт, попробуйте позже", show_alert=True)
                 return
-            await _safe_edit(q.message, f"<b>Билет {GAME_BALLS[ball][0]} — {settings.game_stars} Stars</b>\n\n"
+            await _safe_edit(q.message, f"<b>Билет {GAME_BALLS[ball][0]} — {stars} {_tg_emoji(EMOJI_STAR, '⭐')}</b>\n\n"
                                         "Оплатите — и бот сразу бросит мяч.",
-                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn("Оплатить", "success", E.STAR, url=url)], back]))
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                 [btn("Оплатить", "success", E.STAR, url=url)], back]))
             await q.answer()
             return
         if method == "ton" and settings.sub_ton_address:
-            code = await subs.new_invoice(q.from_user.id, GAME_PLAN, ball=ball)
+            code = await subs.new_invoice(q.from_user.id, gplan, ball=ball)
+            t = _tg_emoji(EMOJI_TON, "💎")
             await _safe_edit(q.message,
-                f"<b>Билет {GAME_BALLS[ball][0]} — {settings.game_ton:g} TON</b>\n\n"
+                f"<b>Билет {GAME_BALLS[ball][0]} — {ton:g} {t}</b>\n\n"
                 "Онлайн: нажмите «Оплатить онлайн» — откроется Tonkeeper с готовой суммой и комментарием.\n\n"
-                f"Вручную: отправьте <b>{settings.game_ton:g} TON</b> на\n<code>{settings.sub_ton_address}</code>\n"
+                f"Вручную: отправьте <b>{ton:g} {t}</b> на\n<code>{settings.sub_ton_address}</code>\n"
                 f"с комментарием <code>{code}</code>.\n\n"
                 "Счёт действует 30 минут. После оплаты бот сам бросит мяч.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
@@ -1849,7 +1897,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
     async def cb_home(q: CallbackQuery) -> None:
         if closed():
             await _safe_edit(q.message, CLOSED_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                btn("Моя подписка", callback_data="sub:my")]]))
+                btn("Моя подписка", "primary", E.SUB, callback_data="sub:my")]]))
         else:
             await _safe_edit(q.message, WELCOME, reply_markup=subs.main_kb())
         await q.answer()
@@ -1864,7 +1912,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             return
         await subs.load()
         await _safe_edit(q.message,
-            f'{_tg_emoji(EMOJI_SUB, "💎")} <b>Подписка</b>\n\nВыберите тариф',
+            subs.plans_text(q.from_user.id),
             reply_markup=subs.plans_kb(q.from_user.id))
         await q.answer()
 
@@ -1915,7 +1963,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         await m.answer("<b>Моя подписка</b>\n\nНажмите кнопку — бот покажет остаток или пришлёт новую ссылку в канал.",
                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                            btn("Моя подписка", "primary", E.SUB, callback_data="sub:my"),
-                           btn("В меню", callback_data="sub:home")]]))
+                           btn("В меню", "danger", callback_data="sub:home")]]))
 
     @r.callback_query(F.data == "sub:trial")
     async def cb_trial(q: CallbackQuery) -> None:
@@ -1979,16 +2027,17 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         # кастомные эмодзи в кнопках — через icon_custom_emoji_id (utils.emoji)
         rows: list[list[InlineKeyboardButton]] = []
         if stars:
-            rows.append([btn(f"Stars · {stars}", "primary", E.STAR, callback_data=f"sub:pay:{plan}:stars")])
+            rows.append([btn(f"{stars}", "primary", E.STAR, callback_data=f"sub:pay:{plan}:stars")])
         if settings.sub_ton_address:
-            rows.append([btn(f"Tonkeeper · {price:.4g} TON", "success", E.TON, callback_data=f"sub:pay:{plan}:ton")])
-        if settings.game_enabled and (settings.sub_ton_address or settings.game_stars):
-            rows.append([btn("Испытать удачу", "danger", E.GIFT, callback_data="sub:game")])
-        rows.append([btn("« Назад", callback_data="sub:menu")])
+            rows.append([btn(f"{price:.4g}", "success", E.TON, callback_data=f"sub:pay:{plan}:ton")])
+        if settings.game_enabled and (settings.sub_ton_address or game_ticket(plan)[1]):
+            g_ton = game_ticket(plan)[0]
+            rows.append([btn(f"Испытать удачу · {g_ton:g}", "danger", E.GIFT, callback_data=f"sub:game:{plan}")])
+        rows.append([btn("« Назад", "danger", callback_data="sub:menu")])
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
-        stars_part = f" или <b>{stars} Stars</b>" if stars else ""
+        stars_part = f" или <b>{stars}</b> {_tg_emoji(EMOJI_STAR, '⭐')}" if stars else ""
         txt = (f"<b>Тариф {title}</b>\n"
-               f"Цена: <b>{price:.4g} TON</b>{stars_part}"
+               f"Цена: <b>{price:.4g}</b> {_tg_emoji(EMOJI_TON, '💎')}{stars_part}"
                + (f" (скидка −{pct}% по промокоду)" if pct else "") + "\n\n"
                "Выберите способ оплаты:")
         await _safe_edit(q.message, txt, reply_markup=kb)
@@ -2017,7 +2066,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         price = round(_disc(price, pct), 4)
         stars = max(1, round(_disc(stars, pct))) if stars else stars
         subs._remember_who(subs.user(q.from_user.id), q.from_user)
-        back_row = [btn("« Другой способ", callback_data=f"sub:buy:{plan}")]
+        back_row = [btn("« Другой способ", "danger", callback_data=f"sub:buy:{plan}")]
 
         if method == "stars":
             if not stars:
@@ -2034,7 +2083,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 back_row,
             ])
             await _safe_edit(q.message,
-                f"<b>Тариф {title} — {stars} Stars</b>\n\n"
+                f"<b>Тариф {title} — {stars}</b> {_tg_emoji(EMOJI_STAR, '⭐')}\n\n"
                 "Нажмите кнопку и подтвердите оплату в Telegram.",
                 reply_markup=kb)
             await q.answer()
@@ -2051,9 +2100,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 back_row,
             ])
             await _safe_edit(q.message,
-                f"<b>Тариф {title} — {price:g} TON</b>\n\n"
+                f"<b>Тариф {title} — {price:g}</b> {_tg_emoji(EMOJI_TON, '💎')}\n\n"
                 "Онлайн: нажмите «Оплатить онлайн» — откроется Tonkeeper с готовой суммой и комментарием.\n\n"
-                f"Вручную: отправьте <b>{price:g} TON</b> на\n"
+                f"Вручную: отправьте <b>{price:g}</b> {_tg_emoji(EMOJI_TON, '💎')} на\n"
                 f"<code>{settings.sub_ton_address}</code>\n"
                 f"с комментарием <code>{code}</code>.\n\n"
                 "Счёт действует 30 минут. После оплаты бот сам пришлёт ссылку.",
@@ -2093,8 +2142,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 return
             # ни API-токена, ни session — статическая ссылка
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text=f"Оплатить {price:g} TON в Crypto Bot",
-                                      url=CRYPTO_PAY_FALLBACK_URL)],
+                [btn(f"Оплатить {price:g} TON в Crypto Bot", "success", E.TON, url=CRYPTO_PAY_FALLBACK_URL)],
                 back_row,
             ])
             await _safe_edit(q.message,
