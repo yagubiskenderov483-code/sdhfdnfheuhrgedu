@@ -25,6 +25,9 @@ from utils import emoji as E
 from utils.emoji import icon as _icon
 
 DASH = "-"
+# кастомные эмодзи в тексте лота (Maker)
+STAR_TG = '<tg-emoji emoji-id="6028338546736107668">⭐️</tg-emoji>'
+BOLT_TG = '<tg-emoji emoji-id="5936088245560419529">⚡️</tg-emoji>'
 
 
 def _e(v) -> str:
@@ -180,7 +183,7 @@ def price_line(l: Listing) -> str:
         return f"{fmt_ton(l.ton_price)} {settings.ton_label} (только TON)"
     parts = []
     if l.stars_price is not None:
-        parts.append(f"{_n(l.stars_price)} ⭐")
+        parts.append(f"{_n(l.stars_price)}⭐")
     if l.ton_price is not None:
         parts.append(f"{fmt_ton(l.ton_price)} {settings.ton_label}")
     return " / ".join(parts) if parts else DASH
@@ -261,7 +264,7 @@ class MessageFormatter:
             meta.append(html.escape(_msgs(l.messages)))
         if l.premium:
             meta.append("Premium")
-        detect_line = (f"\n⚡ Обнаружен за {l.detect_secs:.2f} сек"
+        detect_line = (f"\n{BOLT_TG} Обнаружен за {l.detect_secs:.2f} сек"
                        if l.detect_secs is not None else "")
         deal_badge = ""
         if l.floor_stars and l.stars_price and l.stars_price < l.floor_stars:
@@ -283,8 +286,8 @@ class MessageFormatter:
             model=_e(l.model) + (f" ({html.escape(l.model_rarity)})" if l.model_rarity else ""),
             backdrop=_e(l.backdrop) + (f" ({html.escape(l.backdrop_rarity)})" if l.backdrop_rarity else ""),
             symbol=_e(l.symbol) + (f" ({html.escape(l.symbol_rarity)})" if l.symbol_rarity else ""),
-            price_line=html.escape(price_line(l)),
-            floor_line=html.escape(floor_line(l)),
+            price_line=html.escape(price_line(l)).replace("⭐", STAR_TG),
+            floor_line=html.escape(floor_line(l)).replace("⭐", STAR_TG),
             stars_price=_e(l.stars_price),
             ton_price=_e(fmt_ton(l.ton_price)),
             currency=_e(l.currency),
