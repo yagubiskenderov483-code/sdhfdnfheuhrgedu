@@ -1466,7 +1466,7 @@ class Subscriptions:
         if not inv.get("win"):
             inv["granted"] = True
             await self.save()
-            await self._dm_user(uid, "Мимо — билет сгорел. Повезёт в следующий раз!",
+            await self._dm_user(uid, "Мимо — билет сгорел. Попробуй в следующий раз!",
                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
                                     [btn("Ещё попытка", "danger", E.CLOUD, callback_data=retry_cb)],
                                     [btn("Оформить подписку", "success", E.SUB, callback_data="sub:menu")]]))
@@ -2282,7 +2282,10 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         # 3) Отчитаться юзеру коротким alert-ом
         if inv.get("paid"):
             if inv.get("granted") is True:
-                await q.answer("Оплата пришла — ссылка в чате", show_alert=True)
+                # у игры «Испытать удачу» в чат уходит бросок мяча, а не ссылка
+                msg = ("Оплата пришла — попытка в чате" if is_game(inv.get("plan"))
+                       else "Оплата пришла — ссылка в чате")
+                await q.answer(msg, show_alert=True)
             else:
                 await q.answer("Оплата пришла, выдаю доступ…", show_alert=True)
                 t = asyncio.get_running_loop().create_task(subs._retry_undelivered())
