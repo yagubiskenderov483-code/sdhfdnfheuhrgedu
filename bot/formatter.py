@@ -121,10 +121,11 @@ def listing_keyboard(l: Listing, with_seller: bool = True, with_offer: bool = Fa
     Если админ командой '/<юз_или_id> оффер' подтвердил лот — бот редактирует клавиатуру,
     кнопка становится «С оффером» и в поле ввода уже стоит оффер
     «@<бот> <ссылка на NFT> <сниженная_цена>» — остаётся нажать «Отправить»."""
-    rows = [[InlineKeyboardButton(text="Занять", callback_data=f"take:{l.gift_unique_id}"[:64])]]
+    rows = [[InlineKeyboardButton(text="Занять", style="success",
+                                  callback_data=f"take:{l.gift_unique_id}"[:64])]]
     second = []
     if l.gift_link:
-        second.append(InlineKeyboardButton(text="Лот", url=l.gift_link))
+        second.append(InlineKeyboardButton(text="Лот", style="primary", url=l.gift_link))
     trade_bot = (getattr(settings, "trade_bot_username", "") or "").lstrip("@")
     offer_text = offer_message(l, offer_amount) if with_offer else None
     url = None
@@ -142,7 +143,9 @@ def listing_keyboard(l: Listing, with_seller: bool = True, with_offer: bool = Fa
         # Без админской команды — «Написать» (пустой ЛС). После '/фа <юз|id> оффер' —
         # «Написать с оффером»: в поле ввода уже стоит оффер, остаётся нажать «Отправить».
         has_offer = bool(offer_text) and ("?text=" in url)
-        second.append(InlineKeyboardButton(text="Написать с оффером" if has_offer else "Написать", url=url))
+        # «Написать» — синяя, «Написать с оффером» — красная (сразу видно лот с оффером)
+        second.append(InlineKeyboardButton(text="Написать с оффером" if has_offer else "Написать",
+                                           style="danger" if has_offer else "primary", url=url))
     if second:
         rows.append(second)
     return InlineKeyboardMarkup(inline_keyboard=rows)

@@ -35,6 +35,18 @@ _TRUE = {"1", "true", "yes", "on", "да", "y", "t"}
 _FALSE = {"0", "false", "no", "off", "нет", "n", "f"}
 
 
+def _channel_ref(v: str | None, default: str) -> str:
+    """@канал / t.me/канал / -100… → строка для get_chat_member. Пусто → default; off/0 → выкл."""
+    if v is None:
+        return default
+    v = v.strip()
+    if v.lower() in ("", "0", "off", "false", "нет"):
+        return "" if v else default
+    if v.lstrip("-").isdigit():
+        return v
+    return "@" + v.rstrip("/").rsplit("/", 1)[-1].lstrip("@")
+
+
 def _bool_strict(v: str) -> bool:
     """Для /set: явный булев ввод, иначе ValueError (чтобы опечатка не отключала фильтр молча)."""
     s = (v or "").strip().lower()
@@ -250,6 +262,13 @@ class Settings:
     # Платные ЛС и «только Premium» — всё равно отсеиваем независимо от цены.
     soft_filter_stars: int = 1000             # Maker: 300-1000 — строго, всё остальное мягче
                                               # (RUSSIAN_ONLY к ним неприменим — профиля просто нет)
+    required_channel: str = "@trackgiftsx"    # обязательная подписка перед работой с ботом ("" = выкл)
+    ref_bonus_minutes: int = 30               # реф-программа: минут за КАЖДУЮ оплату приглашённого
+    ref_min_minutes: int = 60                 # с какого накопленного бонуса можно активировать
+    game_enabled: bool = True                 # «Испытать удачу»
+    game_prize_hours: int = 72                # выигрыш — часы подписки
+    game_ton: float = 1.6                     # билет в TON
+    game_stars: int = 200                     # билет в Stars (0 = только TON)
     early_post: bool = True                   # вне темы 300-1000: скрытый владелец → пост сразу,
                                               # продавец дописывается, когда его найдёт бот поиска
     lookup_bot_username: str = ""             # @username бота ручного поиска (напр. "funstat") —
@@ -442,6 +461,13 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "ALLOW_HIDDEN_OWNER": ("allow_hidden_owner", _bool_strict),
     "SOFT_FILTER_STARS": ("soft_filter_stars", lambda v: max(0, int(v))),
     "EARLY_POST": ("early_post", _bool_strict),
+    "REQUIRED_CHANNEL": ("required_channel", lambda v: _channel_ref(v, "")),
+    "REF_BONUS_MINUTES": ("ref_bonus_minutes", lambda v: max(0, min(10080, int(v)))),
+    "REF_MIN_MINUTES": ("ref_min_minutes", lambda v: max(0, min(100000, int(v)))),
+    "GAME_ENABLED": ("game_enabled", _bool_strict),
+    "GAME_PRIZE_HOURS": ("game_prize_hours", lambda v: max(1, min(8760, int(v)))),
+    "GAME_TON": ("game_ton", lambda v: max(0.01, min(1000.0, float(v.replace(",", "."))))),
+    "GAME_STARS": ("game_stars", lambda v: max(0, min(100000, int(v)))),
     "LOOKUP_BOT_USERNAME": ("lookup_bot_username", _lookup_bot_username),
     "LOOKUP_BOTS": ("lookup_bots", _bot_list),
     "LOOKUP_CMD_TEMPLATE": ("lookup_cmd_template",
@@ -537,6 +563,13 @@ def _from_env() -> Settings:
         allow_hidden_owner=_bool(e("ALLOW_HIDDEN_OWNER"), False),
         soft_filter_stars=max(0, _int(e("SOFT_FILTER_STARS"), 1000)),
         early_post=_bool(e("EARLY_POST"), True),
+        required_channel=_channel_ref(e("REQUIRED_CHANNEL"), "@trackgiftsx"),
+        ref_bonus_minutes=max(0, _int(e("REF_BONUS_MINUTES"), 30)),
+        ref_min_minutes=max(0, _int(e("REF_MIN_MINUTES"), 60)),
+        game_enabled=_bool(e("GAME_ENABLED"), True),
+        game_prize_hours=max(1, _int(e("GAME_PRIZE_HOURS"), 72)),
+        game_ton=max(0.01, _float(e("GAME_TON"), 1.6)),
+        game_stars=max(0, _int(e("GAME_STARS"), 200)),
         lookup_bot_username=_lookup_bot_username(e("LOOKUP_BOT_USERNAME")),
         lookup_bots=_bot_list(e("LOOKUP_BOTS")),
         lookup_cmd_template=((e("LOOKUP_CMD_TEMPLATE") or "/human {name}").strip() or "/human {name}"),

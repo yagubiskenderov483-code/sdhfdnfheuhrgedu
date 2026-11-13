@@ -274,6 +274,8 @@ HELP = (
     "/test_bots — пинг всех настроенных ботов (бесплатно)\n"
     "/lookup_last — последние 20 lookup-операций с результатом\n"
     "/фа @юз оффер [цена] — кнопка «Написать с оффером» у постов этого продавца\n"
+    "/ban ID|@юз — бан (снять: /unban)\n"
+    "/promo_add КОД 30 [лимит] — промокод −30% · /promos · /promo_del КОД\n"
     "/lookup_cache — состояние кешей, inflight, dead-marks\n"
     "/lookup_memory — обзор памяти найденных владельцев в БД\n"
     "/lookup_debug &lt;имя&gt; — пошагово что будет с таким именем\n"
@@ -653,7 +655,7 @@ def build_routers(app: "App") -> list[Router]:
         who = f"@{u.username}" if u.username else (u.full_name or str(u.id))
         original = msg.html_text or ""
         links = kb.inline_keyboard[1:]
-        rows = [[InlineKeyboardButton(text="Отменить", callback_data=f"untake:{u.id}")]]
+        rows = [[InlineKeyboardButton(text="Отменить", style="danger", callback_data=f"untake:{u.id}")]]
 
         async def release() -> None:
             async with claim_lock:

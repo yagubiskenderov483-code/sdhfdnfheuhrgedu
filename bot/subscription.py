@@ -43,6 +43,9 @@ WELCOME = ("<b>Добро Пожаловать в лучший Telegram Tracker 
            "Tracker - отслеживает все лоты выставленные в настоящее время")
 
 CLOSED_TEXT = "Парсер закрыт"
+GATE_TEXT = ("<b>Подпишитесь на наш канал</b>\n\n"
+             "Чтобы пользоваться ботом, нужна подписка на канал. "
+             "Подпишитесь и нажмите «Я подписался».")
 
 TRIAL_SECONDS = 30 * 60          # Maker: пробный час → 30 минут
 REMIND_BEFORE = 60 * 60          # напомнить о продлении за час до конца
@@ -81,9 +84,29 @@ _LEGACY_PLANS: dict[str, tuple[str, float, float, int | None]] = {
 }
 
 
+GAME_PLAN = "game"
+# Telegram сам решает исход броска (sendDice) — бот на результат не влияет.
+# ⚽: 3,4,5 — гол (3 из 5 = 60%); 🏀: 4,5 — попал (2 из 5 = 40%).
+GAME_BALLS = {"soccer": ("⚽", (3, 4, 5)), "basket": ("🏀", (4, 5))}
+
+
 def plan_info(code: str) -> tuple[str, float, float, int | None] | None:
-    """PLANS + старые коды (для доставки оплат по счёту, выставленному до смены тарифов)."""
+    """PLANS + старые коды (для доставки оплат по счёту, выставленному до смены тарифов) + билет игры."""
+    if code == GAME_PLAN:
+        return (f"Билет: {settings.game_prize_hours} ч", float(settings.game_ton),
+                settings.game_prize_hours * 3600.0, int(settings.game_stars) or None)
     return PLANS.get(code) or _LEGACY_PLANS.get(code)
+
+
+def btn(text: str, style: str | None = None, **kw) -> InlineKeyboardButton:
+    """Кнопка с цветом: 'success' — зелёная, 'primary' — синяя, 'danger' — красная, None — обычная."""
+    if style:
+        kw["style"] = style
+    return InlineKeyboardButton(text=text, **kw)
+
+
+def _disc(value: float, pct: int) -> float:
+    return value * (100 - pct) / 100 if pct else value
 INVOICE_TTL = 30 * 60           # Maker: 'ссылка на оплату действует 30 мин'
 LINK_TTL = 24 * 3600            # ссылка на вход действует сутки
 KV_KEY = "subs_state"
@@ -115,6 +138,12 @@ _BG_TASKS: set[asyncio.Task] = set()
 
 def sub_chat_id() -> int:
     return settings.sub_chat_id or settings.target_chat_id
+
+
+def _fmt_secs(secs: float) -> str:
+    mins = int(round(secs / 60))
+    h, m = divmod(mins, 60)
+    return " ".join(x for x in (f"{h} ч" if h else "", f"{m} мин" if m or not h else "") if x)
 
 
 def _fmt_left(until: float) -> str:
@@ -155,6 +184,9 @@ class Subscriptions:
         # Rate-limit callback'а "проверить оплату": uid → ts последнего выхова. Между
         # кликами < 3 сек — тихий ответ без повторной проверки сети.
         self._check_last_ts: dict[int, float] = {}
+        self._ref_busy: set[int] = set()
+        self._chan_ok: dict[int, float] = {}          # uid → когда подтвердили подписку на канал
+        self._chan_err_logged = 0.0
 
     def _user_bots(self) -> list:
         """Все боты, через которые юзеру может прийти DM со ссылкой (main + sub, если задан).
@@ -293,16 +325,21 @@ class Subscriptions:
     # Maker: 'убери все эмодзи вообще кроме того что в группе' — в UI подписки
     # эмодзи нет, кастомные остались только в постах лотов (formatter.py).
     def main_kb(self) -> InlineKeyboardMarkup:
-        return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Подписка", callback_data="sub:menu")],
-            [InlineKeyboardButton(text="Моя подписка", callback_data="sub:my")],
-        ])
+        rows = [
+            [btn("Оформить подписку", "success", callback_data="sub:menu")],
+            [btn("Моя подписка", callback_data="sub:my")],
+            [btn("Реферальная система", "primary", callback_data="sub:ref")],
+        ]
+        if settings.game_enabled and (settings.sub_ton_address or settings.game_stars):
+            rows.append([btn("Испытать удачу", "primary", callback_data="sub:game")])
+        rows.append([btn("Промокод", callback_data="sub:promo")])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
     def renew_kb() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Продлить подписку", callback_data="sub:menu")],
-            [InlineKeyboardButton(text="Моя подписка", callback_data="sub:my")],
+            [btn("Продлить подписку", "success", callback_data="sub:menu")],
+            [btn("Моя подписка", callback_data="sub:my")],
         ])
 
     async def _notify_expired(self, uid: int, u: dict | None) -> None:
@@ -334,14 +371,147 @@ class Subscriptions:
     def plans_kb(self, uid: int) -> InlineKeyboardMarkup:
         rows = []
         if not self.user(uid).get("trial"):
-            rows.append([InlineKeyboardButton(text="30 мин бесплатно",
-                                              callback_data="sub:trial")])
+            rows.append([btn("30 мин бесплатно", "success", callback_data="sub:trial")])
+        pct = self.promo_pct(uid)
         for code, (title, price, _, stars) in PLANS.items():
-            stars_part = f" / {stars} Stars" if stars else ""
-            label = f"{title} · {price:g} TON{stars_part}"
-            rows.append([InlineKeyboardButton(text=label, callback_data=f"sub:buy:{code}")])
-        rows.append([InlineKeyboardButton(text="« Назад", callback_data="sub:home")])
+            p_ton = _disc(price, pct)
+            p_st = max(1, round(_disc(stars, pct))) if stars else None
+            stars_part = f" / {p_st} Stars" if p_st else ""
+            label = f"{title} · {p_ton:.4g} TON{stars_part}" + (f" (−{pct}%)" if pct else "")
+            rows.append([btn(label, "primary", callback_data=f"sub:buy:{code}")])
+        rows.append([btn("« Назад", callback_data="sub:home")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    # ------------------------------------------------------------------ промокоды
+    def promo_pct(self, uid: int) -> int:
+        """Скидка активированного пользователем промокода (0 — нет)."""
+        u = self.state["users"].get(str(uid)) or {}
+        code = u.get("promo")
+        p = (self.state.get("promos") or {}).get(code) if code else None
+        if not p or p.get("off") or (p.get("max") and int(p.get("uses") or 0) >= int(p["max"])):
+            return 0
+        return max(0, min(95, int(p.get("pct") or 0)))
+
+    async def activate_promo(self, uid: int, code: str) -> str:
+        code = (code or "").strip().upper()
+        async with self._lock:
+            p = (self.state.get("promos") or {}).get(code)
+            if not p or p.get("off"):
+                return "Такого промокода нет."
+            if p.get("max") and int(p.get("uses") or 0) >= int(p["max"]):
+                return "Промокод закончился."
+            u = self.user(uid)
+            if code in (u.get("promos_used") or []):
+                return "Вы уже использовали этот промокод."
+            u["promo"] = code
+            u.pop("await_promo", None)
+            await self.save(backup=True)
+        return f"Промокод <b>{html.escape(code)}</b> активирован: скидка <b>−{int(p.get('pct') or 0)}%</b> на следующую оплату."
+
+    # ------------------------------------------------------------------ рефералы
+    def ref_info(self, uid: int) -> dict:
+        u = self.state["users"].get(str(uid)) or {}
+        return {"count": int(u.get("ref_count") or 0), "paid": int(u.get("ref_paid") or 0),
+                "bonus": float(u.get("ref_bonus") or 0)}
+
+    async def register_ref(self, uid: int, ref: int, user=None) -> bool:
+        """Новый пользователь пришёл по реф-ссылке. Засчитываем один раз и только новым."""
+        if not ref or ref == uid:
+            return False
+        async with self._lock:
+            if str(uid) in self.state["users"] or str(ref) not in self.state["users"]:
+                return False                     # уже был в боте / пригласивший неизвестен
+            u = self.user(uid)
+            u["ref_by"] = int(ref)
+            self._remember_who(u, user)
+            r = self.user(ref)
+            r["ref_count"] = int(r.get("ref_count") or 0) + 1
+            await self.save(backup=True)
+        await self._dm_user(ref, "По вашей ссылке пришёл новый пользователь. Когда он оплатит подписку, "
+                                 f"вам начислится <b>{settings.ref_bonus_minutes} мин</b>.")
+        return True
+
+    async def _credit_ref(self, inv: dict) -> None:
+        """Каждая оплата подписки приглашённым → +REF_BONUS_MINUTES пригласившему (один раз на счёт)."""
+        if inv.get("ref_credited") or inv.get("plan") == GAME_PLAN or not settings.ref_bonus_minutes:
+            return
+        uid = int(inv.get("uid") or 0)
+        u = self.state["users"].get(str(uid)) or {}
+        ref = int(u.get("ref_by") or 0)
+        if not ref or ref == uid:
+            return
+        async with self._lock:
+            inv["ref_credited"] = True
+            r = self.user(ref)
+            r["ref_bonus"] = float(r.get("ref_bonus") or 0) + settings.ref_bonus_minutes * 60
+            r["ref_paid"] = int(r.get("ref_paid") or 0) + 1
+            await self.save(backup=True)
+            total = r["ref_bonus"]
+        need = settings.ref_min_minutes * 60
+        tail = (" — можно активировать в «Реферальная система»." if total >= need
+                else f" Активация от {_fmt_secs(need)}.")
+        await self._dm_user(ref, f"Ваш реферал оплатил подписку: <b>+{settings.ref_bonus_minutes} мин</b>.\n"
+                                 f"Накоплено: <b>{_fmt_secs(total)}</b>." + tail)
+
+    async def activate_ref_bonus(self, uid: int) -> str:
+        if uid in self._ref_busy:
+            return ""
+        self._ref_busy.add(uid)
+        try:
+            async with self._lock:
+                bonus = float(self.user(uid).get("ref_bonus") or 0)
+            if bonus < max(60, settings.ref_min_minutes * 60):
+                return ""
+            text = await self.grant(uid, bonus, f"Реферальный бонус активирован: {_fmt_secs(bonus)}.")
+            async with self._lock:
+                u = self.user(uid)
+                u["ref_bonus"] = max(0.0, float(u.get("ref_bonus") or 0) - bonus)
+                await self.save(backup=True)
+            return text
+        finally:
+            self._ref_busy.discard(uid)
+
+    # ------------------------------------------------------------------ бан / обязательная подписка
+    def is_banned(self, uid: int) -> bool:
+        return bool((self.state["users"].get(str(uid)) or {}).get("banned"))
+
+    async def in_channel(self, bot, uid: int) -> bool:
+        """Подписан ли на REQUIRED_CHANNEL. Если бот не может проверить (не админ канала) —
+        не блокируем людей, а раз в 10 минут пишем в лог."""
+        ch = settings.required_channel
+        if not ch:
+            return True
+        now = time.time()
+        if now - self._chan_ok.get(uid, 0) < 600:
+            return True
+        last_err = None
+        for b in [x for x in (bot, self.bot) if x is not None]:
+            try:
+                m = await b.get_chat_member(ch, uid)
+                status = m.status
+            except Exception as e:
+                last_err = e
+                continue
+            ok = status in ("member", "administrator", "creator") or (
+                status == "restricted" and getattr(m, "is_member", False))
+            if ok:
+                self._chan_ok[uid] = now
+                if len(self._chan_ok) > 50_000:
+                    self._chan_ok = {k: v for k, v in self._chan_ok.items() if now - v < 600}
+            return ok
+        if now - self._chan_err_logged > 600:
+            self._chan_err_logged = now
+            log.warning("Обязательная подписка: не могу проверить %s (%s) — бот должен быть админом "
+                        "канала. Пока пропускаю всех.", ch, last_err)
+        return True
+
+    def channel_gate_kb(self) -> InlineKeyboardMarkup:
+        ch = settings.required_channel
+        url = f"https://t.me/{ch.lstrip('@')}" if ch.startswith("@") else "https://t.me/"
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [btn("Подписаться на канал", "primary", url=url)],
+            [btn("Я подписался", "success", callback_data="sub:chk")],
+        ])
 
     # ------------------------------------------------------------------ invite links
     async def _member_status(self, uid: int) -> str | None:
@@ -684,17 +854,27 @@ class Subscriptions:
         return (f"https://app.tonkeeper.com/transfer/{settings.sub_ton_address}"
                 f"?amount={int(inv['nano'])}&text={quote(code)}")
 
-    async def new_invoice(self, uid: int, plan: str) -> str:
+    def _promo_for(self, uid: int, plan: str) -> tuple[int, str | None]:
+        if plan == GAME_PLAN:
+            return 0, None                     # на билет игры промокод не действует
+        pct = self.promo_pct(uid)
+        return (pct, (self.state["users"].get(str(uid)) or {}).get("promo")) if pct else (0, None)
+
+    async def new_invoice(self, uid: int, plan: str, ball: str | None = None) -> str:
+        pct, promo = self._promo_for(uid, plan)
+        nano = int(round(_disc(plan_info(plan)[1], pct) * 1e9))
         async with self._lock:
-            # один активный счёт на тариф — не плодим новые при повторном нажатии
+            # один активный счёт на тариф (и ту же скидку / тот же мяч) — не плодим новые при повторном нажатии
             for code, inv in self.state["invoices"].items():
                 if (inv["uid"] == uid and inv["plan"] == plan and not inv.get("paid")
-                        and inv.get("kind", "ton") == "ton"
+                        and inv.get("kind", "ton") == "ton" and int(inv.get("pct") or 0) == pct
+                        and inv.get("game") == ball and not inv.get("got")
                         and time.time() - inv["ts"] < INVOICE_TTL):
                     return code
             code = "TRK" + secrets.token_hex(4).upper()
-            self.state["invoices"][code] = {"code": code, "uid": uid, "plan": plan, "nano": int(round(PLANS[plan][1] * 1e9)),
-                                            "ts": time.time(), "paid": False, "kind": "ton"}
+            self.state["invoices"][code] = {"code": code, "uid": uid, "plan": plan, "nano": nano,
+                                            "ts": time.time(), "paid": False, "kind": "ton",
+                                            "pct": pct, "promo": promo, "game": ball}
             await self.save()
         if self.on_change:
             # счёт — и в резервную копию, чтобы оплата после деплоя не потерялась (вне общего лока)
@@ -704,18 +884,21 @@ class Subscriptions:
                 log.warning("Backup after new invoice failed: %s", e)
         return code
 
-    async def new_stars_invoice(self, uid: int, plan: str) -> str:
+    async def new_stars_invoice(self, uid: int, plan: str, ball: str | None = None) -> str:
         """Создать Stars-invoice через Bot API (createInvoiceLink). → https://t.me/$… URL.
         Один живой инвойс на (uid, plan) — повторный клик отдаёт ту же ссылку, чтобы Telegram
         не заваливали десятками активных счетов."""
-        title, _price, _secs, stars = PLANS[plan]
+        title, _price, _secs, stars = plan_info(plan)
         if not stars:
             raise ValueError(f"plan {plan!r} has no stars price")
+        pct, promo = self._promo_for(uid, plan)
+        stars = max(1, int(round(_disc(stars, pct))))
         now = time.time()
         async with self._lock:
             for code, inv in self.state["invoices"].items():
                 if (inv.get("kind") == "stars" and inv["uid"] == uid and inv["plan"] == plan
-                        and not inv.get("paid") and inv.get("stars_url")
+                        and not inv.get("paid") and inv.get("stars_url") and int(inv.get("stars") or 0) == stars
+                        and inv.get("game") == ball
                         and now - inv["ts"] < INVOICE_TTL):
                     return inv["stars_url"]
             code = "STR" + secrets.token_hex(4).upper()
@@ -724,7 +907,8 @@ class Subscriptions:
         # в правильном боте, а pre_checkout/successful_payment приходили туда.
         url = await self.stars_bot.create_invoice_link(
             title=f"NFT Tracker — {title}",
-            description=f"Доступ к трекеру: тариф {title}",
+            description=(f"Испытать удачу: {GAME_BALLS.get(ball, ('?',))[0]} — выигрыш {settings.game_prize_hours} ч подписки"
+                         if plan == GAME_PLAN else f"Доступ к трекеру: тариф {title}"),
             payload=code,
             currency="XTR",
             prices=[LabeledPrice(label=title, amount=int(stars))],
@@ -736,7 +920,7 @@ class Subscriptions:
         async with self._lock:
             self.state["invoices"][code] = {
                 "code": code, "uid": uid, "plan": plan, "kind": "stars", "stars": int(stars),
-                "stars_url": url, "ts": now, "paid": False,
+                "stars_url": url, "ts": now, "paid": False, "pct": pct, "promo": promo, "game": ball,
             }
             await self.save()
         if self.on_change:
@@ -752,11 +936,13 @@ class Subscriptions:
         Основной путь: CRYPTO_BOT_API_TOKEN (merchant API, авто-проверка оплаты).
         Запасной: CryptoBot user-session (inline-mode), ссылка живая, но оплату
         придётся подтверждать админу вручную (или ждать TON-перевод по общему адресу)."""
-        title, price, _secs, _stars = PLANS[plan]
+        title, price, _secs, _stars = plan_info(plan)
+        pct, promo = self._promo_for(uid, plan)
+        price = round(_disc(price, pct), 4)
         now = time.time()
         async with self._lock:
             for code, inv in self.state["invoices"].items():
-                if (inv.get("kind") == "crypto" and inv["uid"] == uid and inv["plan"] == plan
+                if (inv.get("kind") == "crypto" and int(inv.get("pct") or 0) == pct and inv["uid"] == uid and inv["plan"] == plan
                         and not inv.get("paid") and inv.get("pay_url")
                         and now - inv["ts"] < INVOICE_TTL):
                     return inv["pay_url"]
@@ -787,7 +973,7 @@ class Subscriptions:
                     "nano": int(round(price * 1e9)),
                     "pay_url": pay_url, "invoice_id": int(invoice_id),
                     "asset": "TON", "amount": str(price),
-                    "ts": now, "paid": False,
+                    "ts": now, "paid": False, "pct": pct, "promo": promo,
                 }
                 await self.save()
             if self.on_change:
@@ -1142,6 +1328,8 @@ class Subscriptions:
             return False
         title, price, secs, _stars = pinfo
         uid = int(inv["uid"])
+        if inv.get("plan") == GAME_PLAN:
+            return await self._play(inv)
         # Maker: короткая строка — только «тариф 6ч.», без 'Оплата 2.2 TON пришла, '.
         reason = f"тариф {title}."
         # 1) «Оплата получена, ожидайте.» — pre-notice (пока создаём invite-link)
@@ -1159,6 +1347,7 @@ class Subscriptions:
             await self.save()
             log.error("Grant after payment failed for %s: %s (will retry)", uid, e)
             return False
+        await self._after_paid(inv)
         # 2+3) DM с ссылкой — пробуем ОБА бота. Получаем (bot, Message) — нужен message_id
         # для реакции.
         sent_bot, sent_msg = None, None
@@ -1181,6 +1370,71 @@ class Subscriptions:
                 reaction=[ReactionTypeEmoji(emoji="🎉")], is_big=True)
         except Exception as e:
             log.info("reaction 🎉 skipped for %s: %s", uid, e)
+        return True
+
+    async def _after_paid(self, inv: dict) -> None:
+        """После выдачи доступа по оплате: погасить промокод и начислить бонус пригласившему."""
+        try:
+            code = inv.get("promo")
+            if code and not inv.get("promo_used"):
+                async with self._lock:
+                    inv["promo_used"] = True
+                    p = (self.state.get("promos") or {}).get(code)
+                    if p is not None:
+                        p["uses"] = int(p.get("uses") or 0) + 1
+                    u = self.user(int(inv["uid"]))
+                    used = list(u.get("promos_used") or [])
+                    if code not in used:
+                        used.append(code)
+                    u["promos_used"] = used[-50:]
+                    if u.get("promo") == code:
+                        u.pop("promo", None)
+                    await self.save(backup=True)
+            await self._credit_ref(inv)
+        except Exception as e:
+            log.warning("after-paid (promo/ref) failed for %s: %s", inv.get("code"), e)
+
+    async def _play(self, inv: dict) -> bool:
+        """Билет «Испытать удачу» оплачен → бросок мяча (Telegram sendDice — исход решает Telegram).
+        Результат броска сохраняется ДО выдачи: повторная доставка не перебрасывает мяч."""
+        uid = int(inv["uid"])
+        emoji, wins = GAME_BALLS.get(inv.get("game") or "soccer", GAME_BALLS["soccer"])
+        prize = settings.game_prize_hours * 3600
+        if inv.get("dice") is None:
+            msg = None
+            for bot in self._user_bots():
+                try:
+                    msg = await bot.send_dice(uid, emoji=emoji)
+                    break
+                except Exception as e:
+                    log.info("send_dice via bot failed for %s: %s", uid, e)
+            if msg is None or getattr(msg, "dice", None) is None:
+                inv["granted"] = False                  # повторим позже (_retry_undelivered)
+                await self.save()
+                return False
+            async with self._lock:
+                inv["dice"] = int(msg.dice.value)
+                inv["win"] = inv["dice"] in wins
+                await self.save(backup=True)
+            await asyncio.sleep(4.5)                     # даём анимации броска доиграть
+        if not inv.get("win"):
+            inv["granted"] = True
+            await self.save()
+            await self._dm_user(uid, "Мимо — билет сгорел. Повезёт в следующий раз!",
+                                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                                    [btn("Ещё попытка", "primary", callback_data="sub:game")],
+                                    [btn("Оформить подписку", "success", callback_data="sub:menu")]]))
+            return True
+        inv["granted"] = "inflight"
+        try:
+            text = await self.grant(uid, prize, f"{'Гол' if emoji == '⚽' else 'Попадание'}! "
+                                                f"Выигрыш: {settings.game_prize_hours} ч подписки.", inv=inv)
+        except Exception as e:
+            inv["granted"] = False
+            await self.save()
+            log.error("Game prize grant failed for %s: %s (will retry)", uid, e)
+            return False
+        await self._dm_user(uid, text)
         return True
 
     async def _retry_undelivered(self) -> None:
@@ -1242,7 +1496,7 @@ class Subscriptions:
                 f"Подписка закончится через {_fmt_left(float(until))}. "
                 "Продлите, чтобы не потерять доступ.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                    InlineKeyboardButton(text="Продлить", callback_data="sub:menu")]]))
+                    btn("Продлить", "success", callback_data="sub:menu")]]))
             await self.save()
 
     def stats(self) -> dict:
@@ -1344,12 +1598,238 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if m.chat.type != "private":
             return                  # меню подписки и ссылки — только в личке, не в группе
         await subs.load()
+        uid = m.from_user.id if m.from_user else 0
+        # /start ref_<id> — реферальная ссылка (засчитывается только новым пользователям)
+        mt = re.match(r"^/start(?:@\w+)?\s+ref_?(\d{1,16})\s*$", m.text or "")
+        if mt and subs.ready.is_set():
+            try:
+                await subs.register_ref(uid, int(mt.group(1)), m.from_user)
+            except Exception as e:
+                log.warning("register ref failed: %s", e)
+        if subs.is_banned(uid):
+            await m.answer("Доступ к боту заблокирован.")
+            return
+        if not await subs.in_channel(m.bot, uid):
+            await m.answer(GATE_TEXT, reply_markup=subs.channel_gate_kb())
+            return
         if closed():
             # закрыто для новых, но у кого подписка есть — должен иметь возможность взять новую ссылку
             await m.answer(CLOSED_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="Моя подписка", callback_data="sub:my")]]))
+                btn("Моя подписка", callback_data="sub:my")]]))
             return
         await m.answer(WELCOME, reply_markup=subs.main_kb())
+
+    async def _blocked(q: CallbackQuery) -> bool:
+        """Колбэк меню подписки от забаненного или не подписанного на канал → перехватываем."""
+        if not (q.data or "").startswith("sub:") or q.data == "sub:chk" or q.from_user is None:
+            return False
+        uid = q.from_user.id
+        if is_manager(uid):
+            return False
+        return subs.is_banned(uid) or not await subs.in_channel(q.bot, uid)
+
+    @r.callback_query(_blocked)
+    async def cb_gate(q: CallbackQuery) -> None:
+        if subs.is_banned(q.from_user.id):
+            await q.answer("Доступ к боту заблокирован.", show_alert=True)
+            return
+        await q.answer("Сначала подпишитесь на канал", show_alert=True)
+        await _safe_edit(q.message, GATE_TEXT, reply_markup=subs.channel_gate_kb())
+
+    @r.callback_query(F.data == "sub:chk")
+    async def cb_chk(q: CallbackQuery) -> None:
+        uid = q.from_user.id
+        if subs.is_banned(uid):
+            await q.answer("Доступ к боту заблокирован.", show_alert=True)
+            return
+        subs._chan_ok.pop(uid, None)
+        if not await subs.in_channel(q.bot, uid):
+            await q.answer("Подписка не найдена. Подпишитесь и нажмите ещё раз.", show_alert=True)
+            return
+        await q.answer("Готово!")
+        await _safe_edit(q.message, WELCOME, reply_markup=subs.main_kb())
+
+    # ---------------- реферальная система
+    _me_cache: dict[int, str] = {}
+
+    async def _bot_username(bot) -> str:
+        if bot.id not in _me_cache:
+            _me_cache[bot.id] = (await bot.get_me()).username or ""
+        return _me_cache[bot.id]
+
+    @r.callback_query(F.data == "sub:ref")
+    async def cb_ref(q: CallbackQuery) -> None:
+        await subs.load()
+        uid = q.from_user.id
+        subs._remember_who(subs.user(uid), q.from_user)
+        info = subs.ref_info(uid)
+        need = settings.ref_min_minutes * 60
+        try:
+            link = f"https://t.me/{await _bot_username(q.bot)}?start=ref_{uid}"
+        except Exception:
+            await q.answer("Telegram не ответил, попробуйте ещё раз", show_alert=True)
+            return
+        text = ("<b>Реферальная система</b>\n\n"
+                "Приглашайте друзей по вашей ссылке и получайте "
+                f"<b>{settings.ref_bonus_minutes} мин</b> подписки с каждой их оплаты!\n\n"
+                f"Приглашено пользователей: <b>{info['count']}</b>\n"
+                f"Оплат от приглашённых: <b>{info['paid']}</b>\n"
+                f"У вас накопилось <b>{_fmt_secs(info['bonus'])}</b>"
+                + (f" из <b>{_fmt_secs(need)}</b>" if info["bonus"] < need else "") + "\n\n"
+                f"<i>Минимальный порог для активации — {_fmt_secs(max(60, need))}.</i>\n\n"
+                f"<b>Ваша реферальная ссылка:</b>\n<code>{link}</code>")
+        share = "https://t.me/share/url?" + "url=" + quote(link, safe="") + "&text=" + quote(
+            "Трекер NFT-маркета Telegram — лоты в реальном времени", safe="")
+        rows = [[btn("Поделиться ссылкой", "primary", url=share)]]
+        if info["bonus"] >= max(60, need):
+            rows.append([btn(f"Активировать {_fmt_secs(info['bonus'])}", "success", callback_data="sub:refuse")])
+        rows.append([btn("В меню", callback_data="sub:home")])
+        await _safe_edit(q.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await q.answer()
+
+    @r.callback_query(F.data == "sub:refuse")
+    async def cb_ref_use(q: CallbackQuery) -> None:
+        if not subs.ready.is_set():
+            await q.answer("Бот перезапускается, попробуйте через минуту", show_alert=True)
+            return
+        try:
+            text = await subs.activate_ref_bonus(q.from_user.id)
+        except Exception as e:
+            log.error("ref bonus activation failed for %s: %s", q.from_user.id, e)
+            await q.answer("Не удалось активировать, попробуйте позже", show_alert=True)
+            return
+        if not text:
+            await q.answer("Бонуса пока недостаточно", show_alert=True)
+            return
+        await q.answer("Бонус активирован!")
+        try:
+            await q.bot.send_message(q.from_user.id, text)
+        except Exception:
+            await subs._dm_user(q.from_user.id, text)
+
+    # ---------------- промокоды
+    @r.callback_query(F.data == "sub:promo")
+    async def cb_promo(q: CallbackQuery) -> None:
+        await subs.load()
+        async with subs._lock:
+            subs.user(q.from_user.id)["await_promo"] = time.time()
+        pct = subs.promo_pct(q.from_user.id)
+        cur = f"\n\nСейчас активна скидка <b>−{pct}%</b> на следующую оплату." if pct else ""
+        await _safe_edit(q.message, "<b>Промокод</b>\n\nОтправьте промокод одним сообщением." + cur,
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn("В меню", callback_data="sub:home")]]))
+        await q.answer()
+
+    def _awaiting_promo(m: Message) -> bool:
+        if m.chat.type != "private" or not m.text or m.text.startswith("/") or m.from_user is None:
+            return False
+        u = subs.state["users"].get(str(m.from_user.id)) or {}
+        return time.time() - float(u.get("await_promo") or 0) < 600
+
+    async def _promo_reply(m: Message, code: str) -> None:
+        uid = m.from_user.id
+        if subs.is_banned(uid):
+            return
+        if not await subs.in_channel(m.bot, uid):
+            await m.answer(GATE_TEXT, reply_markup=subs.channel_gate_kb())
+            return
+        res = await subs.activate_promo(uid, code)
+        kb = InlineKeyboardMarkup(inline_keyboard=[[btn("Оформить подписку", "success", callback_data="sub:menu")],
+                                                   [btn("В меню", callback_data="sub:home")]])
+        await m.answer(res, reply_markup=kb)
+
+    @r.message(F.text, _awaiting_promo)
+    async def msg_promo(m: Message) -> None:
+        await _promo_reply(m, (m.text or "").strip().split()[0][:32])
+
+    @r.message(Command("promo"), F.chat.type == "private")
+    async def cmd_promo(m: Message, command: CommandObject) -> None:
+        await subs.load()
+        if not (command.args or "").strip():
+            await m.answer("Формат: <code>/promo КОД</code>")
+            return
+        await _promo_reply(m, command.args.strip().split()[0][:32])
+
+    # ---------------- «Испытать удачу»
+    def _game_text() -> str:
+        stars = f" / {settings.game_stars} Stars" if settings.game_stars else ""
+        return (f"<b>Испытать удачу: {settings.game_prize_hours} ч подписки</b>\n\n"
+                f"Билет в игру: <b>{settings.game_ton:g} TON{stars}</b>\n"
+                "Шанс выигрыша: ⚽ <b>60%</b> (гол) · 🏀 <b>40%</b> (попадание)\n\n"
+                "Мяч бросает сам Telegram — бот на результат не влияет. Не попали — билет сгорает.\n\n"
+                "<b>Выберите мяч для игры:</b>")
+
+    @r.callback_query(F.data == "sub:game")
+    async def cb_game(q: CallbackQuery) -> None:
+        if not settings.game_enabled:
+            await q.answer("Игра сейчас выключена", show_alert=True)
+            return
+        if closed():
+            await q.answer(CLOSED_TEXT, show_alert=True)
+            return
+        await _safe_edit(q.message, _game_text(), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [btn("⚽", "primary", callback_data="sub:gball:soccer"),
+             btn("🏀", "primary", callback_data="sub:gball:basket")],
+            [btn("« Назад", callback_data="sub:home")]]))
+        await q.answer()
+
+    @r.callback_query(F.data.startswith("sub:gball:"))
+    async def cb_game_ball(q: CallbackQuery) -> None:
+        ball = q.data.split(":", 2)[2]
+        if ball not in GAME_BALLS or not settings.game_enabled:
+            await q.answer("Ошибка", show_alert=True)
+            return
+        emoji = GAME_BALLS[ball][0]
+        rows = []
+        if settings.game_stars:
+            rows.append([btn(f"Stars · {settings.game_stars}", "success", callback_data=f"sub:gpay:{ball}:stars")])
+        if settings.sub_ton_address:
+            rows.append([btn(f"Tonkeeper · {settings.game_ton:g} TON", "success",
+                             callback_data=f"sub:gpay:{ball}:ton")])
+        rows.append([btn("« Назад", callback_data="sub:game")])
+        await _safe_edit(q.message, f"<b>Мяч: {emoji}</b>\n\nВыберите способ оплаты билета:",
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+        await q.answer()
+
+    @r.callback_query(F.data.startswith("sub:gpay:"))
+    async def cb_game_pay(q: CallbackQuery) -> None:
+        if not subs.ready.is_set():
+            await q.answer("Бот перезапускается, попробуйте через минуту", show_alert=True)
+            return
+        if closed() or not settings.game_enabled:
+            await q.answer(CLOSED_TEXT, show_alert=True)
+            return
+        parts = q.data.split(":")
+        if len(parts) != 4 or parts[2] not in GAME_BALLS:
+            await q.answer("Ошибка")
+            return
+        ball, method = parts[2], parts[3]
+        await subs.load()
+        subs._remember_who(subs.user(q.from_user.id), q.from_user)
+        back = [btn("« Назад", callback_data=f"sub:gball:{ball}")]
+        if method == "stars" and settings.game_stars:
+            try:
+                url = await subs.new_stars_invoice(q.from_user.id, GAME_PLAN, ball=ball)
+            except Exception as e:
+                log.error("Game stars invoice failed for %s: %s", q.from_user.id, e)
+                await q.answer("Не удалось создать счёт, попробуйте позже", show_alert=True)
+                return
+            await _safe_edit(q.message, f"<b>Билет {GAME_BALLS[ball][0]} — {settings.game_stars} Stars</b>\n\n"
+                                        "Оплатите — и бот сразу бросит мяч.",
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn("Оплатить", "success", url=url)], back]))
+            await q.answer()
+            return
+        if method == "ton" and settings.sub_ton_address:
+            code = await subs.new_invoice(q.from_user.id, GAME_PLAN, ball=ball)
+            await _safe_edit(q.message,
+                f"<b>Билет {GAME_BALLS[ball][0]} — {settings.game_ton:g} TON</b>\n\n"
+                f"Вручную: отправьте <b>{settings.game_ton:g} TON</b> на\n<code>{settings.sub_ton_address}</code>\n"
+                f"с комментарием <code>{code}</code>.\n\nПосле оплаты бот сам бросит мяч.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [btn("Оплатить", "success", url=subs.invoice_url(code))],
+                    [btn("Проверить оплату", "primary", callback_data=f"sub:check:{code}")], back]))
+            await q.answer()
+            return
+        await q.answer("Способ оплаты недоступен", show_alert=True)
 
     @r.chat_member()
     async def on_member(ev: ChatMemberUpdated) -> None:
@@ -1361,7 +1841,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
     async def cb_home(q: CallbackQuery) -> None:
         if closed():
             await _safe_edit(q.message, CLOSED_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(text="Моя подписка", callback_data="sub:my")]]))
+                btn("Моя подписка", callback_data="sub:my")]]))
         else:
             await _safe_edit(q.message, WELCOME, reply_markup=subs.main_kb())
         await q.answer()
@@ -1472,6 +1952,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             await q.answer("Тариф не найден", show_alert=True)
             return
         title, price, _secs, stars = PLANS[plan]
+        pct = subs.promo_pct(q.from_user.id)
+        price = _disc(price, pct)
+        stars = max(1, round(_disc(stars, pct))) if stars else stars
         if not stars and not settings.sub_ton_address:
             await q.answer("Оплата временно недоступна", show_alert=True)
             return
@@ -1481,16 +1964,15 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         # Поэтому в кнопках обычные /TON, а в тексте сверху — кастомки от Maker.
         rows: list[list[InlineKeyboardButton]] = []
         if stars:
-            rows.append([InlineKeyboardButton(text=f"Stars · {stars}",
-                                              callback_data=f"sub:pay:{plan}:stars")])
+            rows.append([btn(f"Stars · {stars}", "success", callback_data=f"sub:pay:{plan}:stars")])
         if settings.sub_ton_address:
-            rows.append([InlineKeyboardButton(text=f"Tonkeeper · {price:g} TON",
-                                              callback_data=f"sub:pay:{plan}:ton")])
-        rows.append([InlineKeyboardButton(text="« Назад", callback_data="sub:menu")])
+            rows.append([btn(f"Tonkeeper · {price:.4g} TON", "success", callback_data=f"sub:pay:{plan}:ton")])
+        rows.append([btn("« Назад", callback_data="sub:menu")])
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
         stars_part = f" или <b>{stars} Stars</b>" if stars else ""
         txt = (f"<b>Тариф {title}</b>\n"
-               f"Цена: <b>{price:g} TON</b>{stars_part}\n\n"
+               f"Цена: <b>{price:.4g} TON</b>{stars_part}"
+               + (f" (скидка −{pct}% по промокоду)" if pct else "") + "\n\n"
                "Выберите способ оплаты:")
         await _safe_edit(q.message, txt, reply_markup=kb)
         await q.answer()
@@ -1514,8 +1996,11 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             await q.answer("Тариф не найден", show_alert=True)
             return
         title, price, _secs, stars = PLANS[plan]
+        pct = subs.promo_pct(q.from_user.id)
+        price = round(_disc(price, pct), 4)
+        stars = max(1, round(_disc(stars, pct))) if stars else stars
         subs._remember_who(subs.user(q.from_user.id), q.from_user)
-        back_row = [InlineKeyboardButton(text="« Другой способ", callback_data=f"sub:buy:{plan}")]
+        back_row = [btn("« Другой способ", callback_data=f"sub:buy:{plan}")]
 
         if method == "stars":
             if not stars:
@@ -1528,7 +2013,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 await q.answer("Не удалось создать счёт в Stars, попробуйте позже", show_alert=True)
                 return
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Оплатить", url=url)],
+                [btn("Оплатить", "success", url=url)],
                 back_row,
             ])
             await _safe_edit(q.message,
@@ -1544,9 +2029,8 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 return
             code = await subs.new_invoice(q.from_user.id, plan)
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="Оплатить", url=subs.invoice_url(code))],
-                [InlineKeyboardButton(text="Проверить оплату",
-                                      callback_data=f"sub:check:{code}")],
+                [btn("Оплатить", "success", url=subs.invoice_url(code))],
+                [btn("Проверить оплату", "primary", callback_data=f"sub:check:{code}")],
                 back_row,
             ])
             await _safe_edit(q.message,
@@ -1577,7 +2061,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                     return
                 is_session = (not settings.crypto_bot_api_token) and has_cb_session
                 kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text=f"Оплатить {price:g} TON в Crypto Bot", url=url)],
+                    [btn(f"Оплатить {price:g} TON в Crypto Bot", "success", url=url)],
                     back_row,
                 ])
                 note = ("Как только оплата пройдёт, бот сам пришлёт ссылку для входа."
@@ -1868,6 +2352,103 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         await subs.flush_backup()
         await m.answer(f"Доступ {uid} забран" if ok else
                        f"Доступ {uid} снят, но выгнать из канала сейчас не вышло — бот повторит сам")
+
+    # ---------------- бан
+    @r.message(Command("ban"), _ADM)
+    async def cmd_ban(m: Message, command: CommandObject) -> None:
+        await subs.load()
+        arg = (command.args or "").strip().split()
+        uid = _resolve_user(arg[0]) if arg else None
+        if uid is None:
+            await m.answer("Формат: <code>/ban ID</code> или <code>/ban @username</code>\n"
+                           "(юз — только если человек уже писал боту)")
+            return
+        if uid in settings.admin_ids:
+            await m.answer("Админа забанить нельзя.")
+            return
+        async with subs._lock:
+            await subs._revoke_links(uid)
+            u = subs.user(uid)
+            u.update({"banned": True, "until": 0, "pending": 0, "in_chat": False})
+            await subs.save(backup=True)
+        await subs.flush_backup()
+        kicked = True
+        try:
+            await subs.bot.ban_chat_member(sub_chat_id(), uid)       # без unban — в ЧС канала
+        except Exception as e:
+            es = str(e).lower()
+            kicked = "participant" in es or "not found" in es
+            if not kicked:
+                log.warning("ban %s in channel failed: %s", uid, e)
+        who = f"@{u['username']}" if u.get("username") else ""
+        await m.answer(f"Забанен <code>{uid}</code> {html.escape(who)}: подписка снята, бот ему недоступен"
+                       + ("" if kicked else ".\nИз канала удалить не вышло — проверьте права бота.")
+                       + "\nСнять бан: <code>/unban " + str(uid) + "</code>")
+
+    @r.message(Command("unban"), _ADM)
+    async def cmd_unban(m: Message, command: CommandObject) -> None:
+        await subs.load()
+        arg = (command.args or "").strip().split()
+        uid = _resolve_user(arg[0]) if arg else None
+        if uid is None:
+            await m.answer("Формат: <code>/unban ID</code> или <code>/unban @username</code>")
+            return
+        async with subs._lock:
+            subs.user(uid).pop("banned", None)
+            await subs.save(backup=True)
+        try:
+            await subs.bot.unban_chat_member(sub_chat_id(), uid, only_if_banned=True)
+        except Exception as e:
+            log.info("unban %s in channel: %s", uid, e)
+        await m.answer(f"Бан снят: <code>{uid}</code>")
+
+    # ---------------- промокоды (админ)
+    @r.message(Command("promo_add"), _ADM)
+    async def cmd_promo_add(m: Message, command: CommandObject) -> None:
+        await subs.load()
+        parts = (command.args or "").split()
+        usage = ("Создать промокод: <code>/promo_add КОД [скидка%] [лимит]</code>\n"
+                 "Пример: <code>/promo_add GIFT30 30 100</code> — −30%, 100 активаций (без лимита — не указывать)")
+        if not parts or not re.fullmatch(r"[A-Za-z0-9_\-]{3,32}", parts[0]):
+            await m.answer(usage)
+            return
+        try:
+            pct = int(parts[1].rstrip("%")) if len(parts) > 1 else 30
+            lim = int(parts[2]) if len(parts) > 2 else 0
+        except ValueError:
+            await m.answer(usage)
+            return
+        if not 1 <= pct <= 95 or lim < 0:
+            await m.answer("Скидка 1–95%, лимит ≥ 0.\n\n" + usage)
+            return
+        code = parts[0].upper()
+        async with subs._lock:
+            subs.state.setdefault("promos", {})[code] = {"pct": pct, "max": lim or None, "uses": 0,
+                                                         "created": time.time()}
+            await subs.save(backup=True)
+        await m.answer(f"Промокод <code>{code}</code>: −{pct}%" + (f", {lim} активаций" if lim else ", без лимита")
+                       + "\nПользователь вводит его кнопкой «Промокод» или <code>/promo " + code + "</code>.")
+
+    @r.message(Command("promo_del"), _ADM)
+    async def cmd_promo_del(m: Message, command: CommandObject) -> None:
+        await subs.load()
+        code = (command.args or "").strip().upper()
+        async with subs._lock:
+            p = (subs.state.get("promos") or {}).get(code)
+            if p is not None:
+                p["off"] = True
+                await subs.save(backup=True)
+        await m.answer(f"Промокод <code>{html.escape(code)}</code> выключен." if p is not None
+                       else "Нет такого промокода. Список: /promos")
+
+    @r.message(Command("promos"), _ADM)
+    async def cmd_promos(m: Message) -> None:
+        await subs.load()
+        rows = [f"<code>{c}</code> −{p.get('pct')}% · {p.get('uses', 0)}"
+                + (f"/{p['max']}" if p.get("max") else "") + (" · выкл" if p.get("off") else "")
+                for c, p in (subs.state.get("promos") or {}).items()]
+        await m.answer("<b>Промокоды</b>\n" + ("\n".join(rows) or "нет") +
+                       "\n\nСоздать: <code>/promo_add КОД 30 [лимит]</code> · выключить: <code>/promo_del КОД</code>")
 
     # ---------------- шорткат: "<ID> а" в личке от админа → подписка навсегда
     #     (а|н|навсегда|forever|∞ — любое из этих слов). Это ускорение для /grant <id> навсегда.
