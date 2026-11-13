@@ -2430,6 +2430,53 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             await m.answer(f"Выдано <code>{uid}</code>, но написать ему бот не может (он не нажимал /start).\n"
                            f"Перешлите ему это:\n\n{text}")
 
+    @r.message(Command("offer_grant", "offer_access"), _ADM)
+    async def cmd_offer_grant(m: Message, command: CommandObject) -> None:
+        """Доступ к офферу (независимо от подписки): после «Занять» в личной копии лота
+        у такого пользователя кнопка «Написать с оффером», у остальных — обычная."""
+        await subs.load()
+        arg = (command.args or "").strip()
+        if not arg:
+            await m.answer("Выдать доступ к офферу:\n<code>/offer_grant @username</code> или "
+                           "<code>/offer_grant ID</code>\n\nУ кого есть доступ — после «Занять» в личной "
+                           "копии лота кнопка «Написать с оффером». Снять: /offer_revoke · список: /offer_list")
+            return
+        uid = _resolve_user(arg.split()[0])
+        if uid is None:
+            await m.answer("Не нашёл пользователя. Укажите числовой ID или пусть он сначала напишет боту /start.")
+            return
+        async with subs._lock:
+            subs.user(uid)["offer_access"] = True
+        await subs.save(backup=True)
+        await m.answer(f"✅ Доступ к офферу выдан <code>{uid}</code>. Снять: <code>/offer_revoke {uid}</code>")
+
+    @r.message(Command("offer_revoke"), _ADM)
+    async def cmd_offer_revoke(m: Message, command: CommandObject) -> None:
+        await subs.load()
+        arg = (command.args or "").strip()
+        uid = _resolve_user(arg.split()[0]) if arg else None
+        if uid is None:
+            await m.answer("Снять доступ к офферу: <code>/offer_revoke @username</code> или ID")
+            return
+        async with subs._lock:
+            subs.user(uid).pop("offer_access", None)
+        await subs.save(backup=True)
+        await m.answer(f"Доступ к офферу снят с <code>{uid}</code>.")
+
+    @r.message(Command("offer_list"), _ADM)
+    async def cmd_offer_list(m: Message) -> None:
+        await subs.load()
+        rows = [(k, u) for k, u in subs.state["users"].items()
+                if isinstance(u, dict) and u.get("offer_access")]
+        if not rows:
+            await m.answer("Доступ к офферу пока ни у кого. Выдать: <code>/offer_grant @username</code>")
+            return
+        lines = [f"<b>Доступ к офферу ({len(rows)}):</b>"]
+        for k, u in rows[:100]:
+            who = ("@" + u["username"]) if u.get("username") else (u.get("name") or k)
+            lines.append(f"<code>{k}</code> {html.escape(str(who))}")
+        await m.answer("\n".join(lines))
+
     def _resolve_user(arg: str) -> int | None:
         arg = arg.strip()
         if re.fullmatch(r"[1-9]\d{0,15}", arg, re.ASCII):

@@ -294,6 +294,7 @@ HELP = (
     "<b>Подписки</b>\n"
     "/subs — подписчики и выручка\n"
     "/grant ID|@юз 24|3д|навсегда — выдать · /revoke ID|@юз — забрать\n"
+    "/offer_grant ID|@юз — доступ к офферу (кнопка «Написать с оффером» в личной копии) · /offer_revoke · /offer_list\n"
     "/broadcast текст — рассылка всем, кто запускал бота (или ответом на сообщение)\n\n"
     "/help — эта справка · /test — проверка работы · /reload — перечитать .env и файлы · /cancel — отменить диалог"
 )
@@ -679,11 +680,11 @@ def build_routers(app: "App") -> list[Router]:
         who = f"@{u.username}" if u.username else (u.full_name or str(u.id))
         original = msg.html_text or ""
         links = kb.inline_keyboard[1:]
-        # Оффер — только тем, кому выдан доступ (активная подписка/админ): в личной копии
-        # лота кнопка «Написать» становится «Написать с оффером». У остальных — обычная.
+        # Оффер — только тем, кому выдан доступ к офферу (/offer_grant) или админу: в личной
+        # копии лота кнопка «Написать» становится «Написать с оффером». У остальных — обычная.
         try:
             subs = app.subs
-            if u.id in settings.admin_ids or subs._has_access(subs.user(u.id)):
+            if u.id in settings.admin_ids or subs.user(u.id).get("offer_access"):
                 row = await app.db.listing_by_message(msg.chat.id, msg.message_id)
                 if row:
                     from tracker.queue import listing_from_row
