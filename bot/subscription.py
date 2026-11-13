@@ -2364,6 +2364,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if not total:
             await m.answer("Пока некому рассылать — ни один пользователь не запускал бота.")
             return
+        log.warning("AUDIT [broadcast] админ=%s получателей=%s", m.from_user.id if m.from_user else "?", total)
         await m.answer(f"📣 Рассылка запущена. Получателей: <b>{total}</b>.\n\n"
                        "<b>Текст, который получат пользователи:</b>\n\n" + text)
 
@@ -2423,6 +2424,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if secs is None:
             await m.answer("Не понял срок.\n\n" + usage)
             return
+        log.warning("AUDIT [grant] админ=%s → uid=%s срок=%s", m.from_user.id if m.from_user else "?", uid, parts[1])
         try:
             text = await subs.grant(uid, secs, "Вам выдан доступ администратором.")
         except Exception as e:
@@ -2451,6 +2453,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if uid is None:
             await m.answer("Не нашёл пользователя. Укажите числовой ID или пусть он сначала напишет боту /start.")
             return
+        log.warning("AUDIT [offer_grant] админ=%s → uid=%s", m.from_user.id if m.from_user else "?", uid)
         async with subs._lock:
             subs.user(uid)["offer_access"] = True
         await subs.save(backup=True)
@@ -2488,6 +2491,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             await m.answer("Не нашёл пользователя. Укажите числовой ID (партнёру не обязательно быть в боте) "
                            "или @username того, кто уже писал боту.")
             return
+        log.warning("AUDIT [partner] админ=%s → uid=%s", m.from_user.id if m.from_user else "?", uid)
         async with subs._lock:
             u = subs.user(uid)
             u["partner"] = True

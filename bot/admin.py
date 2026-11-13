@@ -1196,6 +1196,7 @@ def build_routers(app: "App") -> list[Router]:
             await q.answer("Только для админов", show_alert=True)
             return
         await q.answer("Сношу все сессии…")
+        log.warning("AUDIT [sessions_wipe] админ=%s", q.from_user.id)
         names = list(app.sessions.workers.keys())
         done = 0
         for name in names:
