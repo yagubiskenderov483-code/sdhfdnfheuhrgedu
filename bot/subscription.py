@@ -1891,15 +1891,15 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 log.error("Game stars invoice failed for %s: %s", q.from_user.id, e)
                 await q.answer("Не удалось создать счёт, попробуйте позже", show_alert=True)
                 return
-            await _safe_edit(q.message, f"<b>Билет {GAME_BALLS[ball][0]} — {stars} Stars</b>\n\n"
+            await _safe_edit(q.message, f"<b>Билет {GAME_BALLS[ball][0]} — {stars} {_tg_emoji(EMOJI_STAR, '⭐')}</b>\n\n"
                                         "Оплатите — и бот сразу бросит мяч.",
                              reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                 [btn("Оплатить", "success", E.STAR, url=url)], back]))
+                                 [btn("Оплатить", "success", None, url=url)], back]))
             await q.answer()
             return
         if method == "ton" and settings.sub_ton_address:
             code = await subs.new_invoice(q.from_user.id, gplan, ball=ball)
-            t = "GRAM"
+            t = _tg_emoji(EMOJI_TON, "💎")
             await _safe_edit(q.message,
                 f"<b>Билет {GAME_BALLS[ball][0]} — {ton:g} {t}</b>\n\n"
                 "Онлайн: нажмите «Оплатить» — откроется Tonkeeper с готовой суммой и комментарием.\n\n"
@@ -1907,7 +1907,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 f"с комментарием <code>{code}</code>.\n\n"
                 "Счёт действует 30 минут. После оплаты бот сам бросит мяч.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [btn("Оплатить", "success", E.TON, url=subs.invoice_url(code))],
+                    [btn("Оплатить", "success", None, url=subs.invoice_url(code))],
                     [btn("Проверить оплату", "primary", E.CHECK, callback_data=f"sub:check:{code}")], back]))
             await q.answer()
             return
@@ -2060,9 +2060,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             rows.append([btn("Испытать удачу", "danger", E.CLOUD, callback_data=f"sub:game:{plan}")])
         rows.append([btn("Назад", "primary", E.BACK, callback_data="sub:menu")])
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
-        stars_part = f" или <b>{stars}</b> Stars" if stars else ""
+        stars_part = f" или <b>{stars}</b> {_tg_emoji(EMOJI_STAR, '⭐')}" if stars else ""
         txt = (f"<b>Тариф {title}</b>\n"
-               f"Цена: <b>{price:.4g}</b> GRAM{stars_part}"
+               f"Цена: <b>{price:.4g}</b> {_tg_emoji(EMOJI_TON, '💎')}{stars_part}"
                + (f" (скидка −{pct}% по промокоду)" if pct else "") + "\n\n"
                "Выберите способ оплаты:")
         await _safe_edit(q.message, txt, reply_markup=kb)
@@ -2104,11 +2104,11 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 await q.answer("Не удалось создать счёт в Stars, попробуйте позже", show_alert=True)
                 return
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [btn("Оплатить", "success", E.STAR, url=url)],
+                [btn("Оплатить", "success", None, url=url)],
                 back_row,
             ])
             await _safe_edit(q.message,
-                f"<b>Тариф {title} — {stars}</b> Stars\n\n"
+                f"<b>Тариф {title} — {stars}</b> {_tg_emoji(EMOJI_STAR, '⭐')}\n\n"
                 "Нажмите кнопку и подтвердите оплату в Telegram.",
                 reply_markup=kb)
             await q.answer()
@@ -2120,14 +2120,14 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 return
             code = await subs.new_invoice(q.from_user.id, plan)
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [btn("Оплатить", "success", E.TON, url=subs.invoice_url(code))],
+                [btn("Оплатить", "success", None, url=subs.invoice_url(code))],
                 [btn("Проверить оплату", "primary", E.CHECK, callback_data=f"sub:check:{code}")],
                 back_row,
             ])
             await _safe_edit(q.message,
-                f"<b>Тариф {title} — {price:g}</b> GRAM\n\n"
+                f"<b>Тариф {title} — {price:g}</b> {_tg_emoji(EMOJI_TON, '💎')}\n\n"
                 "Онлайн: нажмите «Оплатить» — откроется Tonkeeper с готовой суммой и комментарием.\n\n"
-                f"Вручную: отправьте <b>{price:g}</b> GRAM на\n"
+                f"Вручную: отправьте <b>{price:g}</b> {_tg_emoji(EMOJI_TON, '💎')} на\n"
                 f"<code>{settings.sub_ton_address}</code>\n"
                 f"с комментарием <code>{code}</code>.\n\n"
                 "Счёт действует 30 минут. После оплаты бот сам пришлёт ссылку.",
@@ -2152,7 +2152,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                     return
                 is_session = (not settings.crypto_bot_api_token) and has_cb_session
                 kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [btn(f"Оплатить {price:g} TON в Crypto Bot", "success", E.TON, url=url)],
+                    [btn(f"Оплатить {price:g} TON в Crypto Bot", "success", None, url=url)],
                     back_row,
                 ])
                 note = ("Как только оплата пройдёт, бот сам пришлёт ссылку для входа."
@@ -2167,7 +2167,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 return
             # ни API-токена, ни session — статическая ссылка
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [btn(f"Оплатить {price:g} TON в Crypto Bot", "success", E.TON, url=CRYPTO_PAY_FALLBACK_URL)],
+                [btn(f"Оплатить {price:g} TON в Crypto Bot", "success", None, url=CRYPTO_PAY_FALLBACK_URL)],
                 back_row,
             ])
             await _safe_edit(q.message,
