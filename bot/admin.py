@@ -663,11 +663,19 @@ def build_routers(app: "App") -> list[Router]:
 
         # 1) сначала лот — в личку тому, кто занял. Не дошло (человек не запускал бота) → лот не трогаем,
         #    иначе он пропал бы и из канала, и у человека
-        try:
-            dm = await app.bot.send_message(
-                u.id, "Вы заняли лот:\n\n" + original,
-                reply_markup=InlineKeyboardMarkup(inline_keyboard=links) if links else None)
-        except Exception:
+        # пробуем основной бот, затем бот подписки: подписчики часто запускали только его
+        dm = None
+        for b in (app.bot, getattr(app, "sub_bot", None)):
+            if b is None:
+                continue
+            try:
+                dm = await b.send_message(
+                    u.id, "Вы заняли лот:\n\n" + original,
+                    reply_markup=InlineKeyboardMarkup(inline_keyboard=links) if links else None)
+                break
+            except Exception as e:
+                log.info("take: DM to %s via bot %s failed: %s", u.id, getattr(b, "id", "?"), e)
+        if dm is None:
             await release()
             try:
                 me = await app.bot.me()

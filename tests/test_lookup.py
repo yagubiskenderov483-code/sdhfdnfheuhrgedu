@@ -11,6 +11,7 @@ from telethon import types
 from telethon.tl.functions.payments import GetSavedStarGiftsRequest
 
 from config import settings
+settings.only_with_username = False   # старые сценарии мягкой зоны / EARLY_POST
 from database.models import Listing
 import tracker.lookup as L
 

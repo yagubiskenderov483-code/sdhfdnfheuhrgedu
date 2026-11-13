@@ -642,7 +642,8 @@ class ListingPipeline:
             pre = self.seller_filter.check(l, soft=soft_applies)
             can_lookup = (pre.code not in _HIDDEN_HARD_REJECT
                           or (soft_applies and pre.code not in ("BLACKLIST", "ARABIC_SCRIPT")))
-            if can_lookup and soft_applies and settings.early_post:
+            if (can_lookup and soft_applies and settings.early_post
+                    and not settings.only_with_username):
                 # EARLY_POST: вне темы 300-1000 не ждём бота поиска (ответ + капча = 5–60 с) —
                 # пост уходит сразу с пометкой «ищу владельца», а когда владелец найдётся,
                 # пост редактируется (@юз продавца, кнопка «Написать»). Если найденный продавец
@@ -723,7 +724,7 @@ class ListingPipeline:
             # Maker: дорогие лоты (>= SOFT_FILTER_STARS) пропускаем даже без @юза —
             # пост уйдёт с пометкой профиля, а не отфильтруется
             soft = int(getattr(settings, "soft_filter_stars", 0) or 0)
-            if self._soft(l):
+            if self._soft(l) and not settings.only_with_username:
                 llog("FILTER", f"#{l.listing_id} no @username, но цена {l.stars_price}⭐ ≥ "
                                f"SOFT_FILTER_STARS={soft} — пропускаем")
             else:
@@ -934,7 +935,10 @@ class ListingPipeline:
             return
         no_valid_user = ((settings.require_username and not l.seller_username) or l.seller_type != "user"
                          or not l.seller_id or l.seller_id <= 0)
-        if no_valid_user:
+        if settings.only_with_username and not l.seller_username:
+            # без @username нет кнопки «Написать» — такие лоты не постим ни в одной теме
+            guard = ("NO_USERNAME", "у продавца нет @username")
+        elif no_valid_user:
             # Maker: для лотов >= SOFT_FILTER_STARS отсутствие @юза / неподтверждённого владельца
             # не блокирует отправку — пост уходит с пометкой 'profile hidden'. Платные ЛС и
             # LEVEL_TOO_HIGH всё равно проверяются ниже.
@@ -1220,8 +1224,14 @@ class ListingPipeline:
                 # UNIQUE_SELLERS: этот продавец уже был в канале — повтор убираем
                 verdict = "reject"
                 l.seller_filter_result, l.reason = "DUPLICATE_SELLER", "this seller was already sent"
+            elif settings.only_with_username and not l.seller_username:
+                verdict = "reject"
+                l.seller_filter_result, l.reason = "NO_USERNAME", "у продавца нет @username"
             else:
                 verdict = "found"
+        elif settings.only_with_username:
+            verdict = "reject"
+            l.seller_filter_result, l.reason = "NO_USERNAME", "владелец не найден — нет @username"
         else:
             l.owner_not_found = True
         try:

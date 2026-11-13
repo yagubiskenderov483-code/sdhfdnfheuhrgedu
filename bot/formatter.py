@@ -21,6 +21,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import settings
 from database.models import Listing
+from utils import emoji as E
+from utils.emoji import icon as _icon
 
 DASH = "-"
 
@@ -121,11 +123,12 @@ def listing_keyboard(l: Listing, with_seller: bool = True, with_offer: bool = Fa
     Если админ командой '/<юз_или_id> оффер' подтвердил лот — бот редактирует клавиатуру,
     кнопка становится «С оффером» и в поле ввода уже стоит оффер
     «@<бот> <ссылка на NFT> <сниженная_цена>» — остаётся нажать «Отправить»."""
-    rows = [[InlineKeyboardButton(text="Занять", style="success",
+    # цвета у всех кнопок разные: «Занять» — зелёная, «Лот» — синяя, «Написать» — красная
+    rows = [[InlineKeyboardButton(text="Занять", style="success", **_icon(E.PAID),
                                   callback_data=f"take:{l.gift_unique_id}"[:64])]]
     second = []
     if l.gift_link:
-        second.append(InlineKeyboardButton(text="Лот", style="primary", url=l.gift_link))
+        second.append(InlineKeyboardButton(text="Лот", style="primary", **_icon(E.GIFT), url=l.gift_link))
     trade_bot = (getattr(settings, "trade_bot_username", "") or "").lstrip("@")
     offer_text = offer_message(l, offer_amount) if with_offer else None
     url = None
@@ -143,9 +146,10 @@ def listing_keyboard(l: Listing, with_seller: bool = True, with_offer: bool = Fa
         # Без админской команды — «Написать» (пустой ЛС). После '/фа <юз|id> оффер' —
         # «Написать с оффером»: в поле ввода уже стоит оффер, остаётся нажать «Отправить».
         has_offer = bool(offer_text) and ("?text=" in url)
-        # «Написать» — синяя, «Написать с оффером» — красная (сразу видно лот с оффером)
+        # «Написать» — красная, «Написать с оффером» — обычная со звездой (сразу видно лот с оффером)
+        kw = {"style": "danger"} if not has_offer else {}
         second.append(InlineKeyboardButton(text="Написать с оффером" if has_offer else "Написать",
-                                           style="danger" if has_offer else "primary", url=url))
+                                           **kw, **_icon(E.STAR if has_offer else E.SUB), url=url))
     if second:
         rows.append(second)
     return InlineKeyboardMarkup(inline_keyboard=rows)

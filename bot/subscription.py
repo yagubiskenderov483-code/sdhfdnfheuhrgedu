@@ -32,6 +32,8 @@ from aiogram.types import (CallbackQuery, ChatMemberUpdated, InlineKeyboardButto
                            LabeledPrice, Message, PreCheckoutQuery)
 
 from config import settings
+from utils import emoji as E
+from utils.emoji import icon as _icon
 from utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -98,10 +100,12 @@ def plan_info(code: str) -> tuple[str, float, float, int | None] | None:
     return PLANS.get(code) or _LEGACY_PLANS.get(code)
 
 
-def btn(text: str, style: str | None = None, **kw) -> InlineKeyboardButton:
-    """Кнопка с цветом: 'success' — зелёная, 'primary' — синяя, 'danger' — красная, None — обычная."""
+def btn(text: str, style: str | None = None, icon: str | None = None, **kw) -> InlineKeyboardButton:
+    """Кнопка с цветом: 'success' — зелёная, 'primary' — синяя, 'danger' — красная, None — обычная.
+    icon — ID кастомного эмодзи слева от текста (utils.emoji)."""
     if style:
         kw["style"] = style
+    kw.update(_icon(icon))
     return InlineKeyboardButton(text=text, **kw)
 
 
@@ -327,21 +331,20 @@ class Subscriptions:
     def main_kb(self) -> InlineKeyboardMarkup:
         # по две кнопки в ряд, у каждой свой цвет: зелёная, синяя, красная, обычная
         # (Telegram даёт кнопкам только эти 4 варианта цвета)
+        # «Испытать удачу» — не здесь, а на экране выбора способа оплаты тарифа
         buttons = [
-            btn("Оформить подписку", "success", callback_data="sub:menu"),
-            btn("Реферальная система", "primary", callback_data="sub:ref"),
+            btn("Оформить подписку", "success", E.SUB, callback_data="sub:menu"),
+            btn("Реферальная система", "primary", E.GIFT, callback_data="sub:ref"),
+            btn("Промокод", "danger", E.DIAMOND, callback_data="sub:promo"),
         ]
-        if settings.game_enabled and (settings.sub_ton_address or settings.game_stars):
-            buttons.append(btn("Испытать удачу", "danger", callback_data="sub:game"))
-        buttons.append(btn("Промокод", callback_data="sub:promo"))
         rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
     def renew_kb() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(inline_keyboard=[
-            [btn("Продлить подписку", "success", callback_data="sub:menu"),
-             btn("В меню", callback_data="sub:home")],
+            [btn("Продлить подписку", "success", E.SUB, callback_data="sub:menu"),
+             btn("В меню", "primary", callback_data="sub:home")],
         ])
 
     async def _notify_expired(self, uid: int, u: dict | None) -> None:
@@ -373,14 +376,15 @@ class Subscriptions:
     def plans_kb(self, uid: int) -> InlineKeyboardMarkup:
         rows = []
         if not self.user(uid).get("trial"):
-            rows.append([btn("30 мин бесплатно", "success", callback_data="sub:trial")])
+            rows.append([btn("30 мин бесплатно", "success", E.GIFT, callback_data="sub:trial")])
         pct = self.promo_pct(uid)
-        for code, (title, price, _, stars) in PLANS.items():
+        styles = ("primary", "danger", "success", None)      # тарифы — разными цветами
+        for i, (code, (title, price, _, stars)) in enumerate(PLANS.items()):
             p_ton = _disc(price, pct)
             p_st = max(1, round(_disc(stars, pct))) if stars else None
             stars_part = f" / {p_st} Stars" if p_st else ""
             label = f"{title} · {p_ton:.4g} TON{stars_part}" + (f" (−{pct}%)" if pct else "")
-            rows.append([btn(label, "primary", callback_data=f"sub:buy:{code}")])
+            rows.append([btn(label, styles[i % len(styles)], E.DIAMOND, callback_data=f"sub:buy:{code}")])
         rows.append([btn("« Назад", callback_data="sub:home")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
@@ -511,8 +515,8 @@ class Subscriptions:
         ch = settings.required_channel
         url = f"https://t.me/{ch.lstrip('@')}" if ch.startswith("@") else "https://t.me/"
         return InlineKeyboardMarkup(inline_keyboard=[
-            [btn("Подписаться на канал", "primary", url=url)],
-            [btn("Я подписался", "success", callback_data="sub:chk")],
+            [btn("Подписаться на канал", "primary", E.SUB, url=url)],
+            [btn("Я подписался", "success", E.PAID, callback_data="sub:chk")],
         ])
 
     # ------------------------------------------------------------------ invite links
@@ -1424,8 +1428,8 @@ class Subscriptions:
             await self.save()
             await self._dm_user(uid, "Мимо — билет сгорел. Повезёт в следующий раз!",
                                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                                    [btn("Ещё попытка", "primary", callback_data="sub:game")],
-                                    [btn("Оформить подписку", "success", callback_data="sub:menu")]]))
+                                    [btn("Ещё попытка", "danger", E.STAR, callback_data="sub:game")],
+                                    [btn("Оформить подписку", "success", E.SUB, callback_data="sub:menu")]]))
             return True
         inv["granted"] = "inflight"
         try:
@@ -1682,9 +1686,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 f"<b>Ваша реферальная ссылка:</b>\n<code>{link}</code>")
         share = "https://t.me/share/url?" + "url=" + quote(link, safe="") + "&text=" + quote(
             "Трекер NFT-маркета Telegram — лоты в реальном времени", safe="")
-        rows = [[btn("Поделиться ссылкой", "primary", url=share)]]
+        rows = [[btn("Поделиться ссылкой", "primary", E.GIFT, url=share)]]
         if info["bonus"] >= max(60, need):
-            rows.append([btn(f"Активировать {_fmt_secs(info['bonus'])}", "success", callback_data="sub:refuse")])
+            rows.append([btn(f"Активировать {_fmt_secs(info['bonus'])}", "success", E.PAID, callback_data="sub:refuse")])
         rows.append([btn("В меню", callback_data="sub:home")])
         await _safe_edit(q.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         await q.answer()
@@ -1735,8 +1739,8 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             await m.answer(GATE_TEXT, reply_markup=subs.channel_gate_kb())
             return
         res = await subs.activate_promo(uid, code)
-        kb = InlineKeyboardMarkup(inline_keyboard=[[btn("Оформить подписку", "success", callback_data="sub:menu")],
-                                                   [btn("В меню", callback_data="sub:home")]])
+        kb = InlineKeyboardMarkup(inline_keyboard=[[btn("Оформить подписку", "success", E.SUB, callback_data="sub:menu")],
+                                                   [btn("В меню", "primary", callback_data="sub:home")]])
         await m.answer(res, reply_markup=kb)
 
     @r.message(F.text, _awaiting_promo)
@@ -1770,8 +1774,8 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             return
         await _safe_edit(q.message, _game_text(), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [btn("⚽", "primary", callback_data="sub:gball:soccer"),
-             btn("🏀", "primary", callback_data="sub:gball:basket")],
-            [btn("« Назад", callback_data="sub:home")]]))
+             btn("🏀", "danger", callback_data="sub:gball:basket")],
+            [btn("« Назад", callback_data="sub:menu")]]))
         await q.answer()
 
     @r.callback_query(F.data.startswith("sub:gball:"))
@@ -1783,9 +1787,9 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         emoji = GAME_BALLS[ball][0]
         rows = []
         if settings.game_stars:
-            rows.append([btn(f"Stars · {settings.game_stars}", "success", callback_data=f"sub:gpay:{ball}:stars")])
+            rows.append([btn(f"Stars · {settings.game_stars}", "primary", E.STAR, callback_data=f"sub:gpay:{ball}:stars")])
         if settings.sub_ton_address:
-            rows.append([btn(f"Tonkeeper · {settings.game_ton:g} TON", "success",
+            rows.append([btn(f"Tonkeeper · {settings.game_ton:g} TON", "success", E.TON,
                              callback_data=f"sub:gpay:{ball}:ton")])
         rows.append([btn("« Назад", callback_data="sub:game")])
         await _safe_edit(q.message, f"<b>Мяч: {emoji}</b>\n\nВыберите способ оплаты билета:",
@@ -1817,7 +1821,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 return
             await _safe_edit(q.message, f"<b>Билет {GAME_BALLS[ball][0]} — {settings.game_stars} Stars</b>\n\n"
                                         "Оплатите — и бот сразу бросит мяч.",
-                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn("Оплатить", "success", url=url)], back]))
+                             reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn("Оплатить", "success", E.STAR, url=url)], back]))
             await q.answer()
             return
         if method == "ton" and settings.sub_ton_address:
@@ -1829,8 +1833,8 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 f"с комментарием <code>{code}</code>.\n\n"
                 "Счёт действует 30 минут. После оплаты бот сам бросит мяч.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [btn("Оплатить онлайн", "success", url=subs.invoice_url(code))],
-                    [btn("Проверить оплату", "primary", callback_data=f"sub:check:{code}")], back]))
+                    [btn("Оплатить онлайн", "success", E.TON, url=subs.invoice_url(code))],
+                    [btn("Проверить оплату", "primary", E.PAID, callback_data=f"sub:check:{code}")], back]))
             await q.answer()
             return
         await q.answer("Способ оплаты недоступен", show_alert=True)
@@ -1910,7 +1914,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         """Кнопку «Моя подписка» убрали из меню — статус и новая ссылка доступны по /my."""
         await m.answer("<b>Моя подписка</b>\n\nНажмите кнопку — бот покажет остаток или пришлёт новую ссылку в канал.",
                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                           btn("Моя подписка", "primary", callback_data="sub:my"),
+                           btn("Моя подписка", "primary", E.SUB, callback_data="sub:my"),
                            btn("В меню", callback_data="sub:home")]]))
 
     @r.callback_query(F.data == "sub:trial")
@@ -1972,13 +1976,14 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             return
         subs._remember_who(subs.user(q.from_user.id), q.from_user)
         # Шаг 1: выбор валюты. Карточку оплаты (URL) рисуем ТОЛЬКО когда способ уже выбран.
-        # Bot API не поддерживает custom emoji в тексте кнопок — только в сообщении.
-        # Поэтому в кнопках обычные /TON, а в тексте сверху — кастомки от Maker.
+        # кастомные эмодзи в кнопках — через icon_custom_emoji_id (utils.emoji)
         rows: list[list[InlineKeyboardButton]] = []
         if stars:
-            rows.append([btn(f"Stars · {stars}", "success", callback_data=f"sub:pay:{plan}:stars")])
+            rows.append([btn(f"Stars · {stars}", "primary", E.STAR, callback_data=f"sub:pay:{plan}:stars")])
         if settings.sub_ton_address:
-            rows.append([btn(f"Tonkeeper · {price:.4g} TON", "success", callback_data=f"sub:pay:{plan}:ton")])
+            rows.append([btn(f"Tonkeeper · {price:.4g} TON", "success", E.TON, callback_data=f"sub:pay:{plan}:ton")])
+        if settings.game_enabled and (settings.sub_ton_address or settings.game_stars):
+            rows.append([btn("Испытать удачу", "danger", E.GIFT, callback_data="sub:game")])
         rows.append([btn("« Назад", callback_data="sub:menu")])
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
         stars_part = f" или <b>{stars} Stars</b>" if stars else ""
@@ -2025,7 +2030,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 await q.answer("Не удалось создать счёт в Stars, попробуйте позже", show_alert=True)
                 return
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [btn("Оплатить", "success", url=url)],
+                [btn("Оплатить", "success", E.STAR, url=url)],
                 back_row,
             ])
             await _safe_edit(q.message,
@@ -2041,8 +2046,8 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 return
             code = await subs.new_invoice(q.from_user.id, plan)
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [btn("Оплатить онлайн", "success", url=subs.invoice_url(code))],
-                [btn("Проверить оплату", "primary", callback_data=f"sub:check:{code}")],
+                [btn("Оплатить онлайн", "success", E.TON, url=subs.invoice_url(code))],
+                [btn("Проверить оплату", "primary", E.PAID, callback_data=f"sub:check:{code}")],
                 back_row,
             ])
             await _safe_edit(q.message,
@@ -2073,7 +2078,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                     return
                 is_session = (not settings.crypto_bot_api_token) and has_cb_session
                 kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [btn(f"Оплатить {price:g} TON в Crypto Bot", "success", url=url)],
+                    [btn(f"Оплатить {price:g} TON в Crypto Bot", "success", E.TON, url=url)],
                     back_row,
                 ])
                 note = ("Как только оплата пройдёт, бот сам пришлёт ссылку для входа."

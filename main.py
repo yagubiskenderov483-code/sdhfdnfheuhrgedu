@@ -68,10 +68,29 @@ async def _html_fallback(make_request, bot, method):
             await asyncio.sleep(1.5)
 
 
+def _strip_button_icons(markup) -> bool:
+    """Убрать icon_custom_emoji_id у всех inline-кнопок. True — если что-то убрали."""
+    rows = getattr(markup, "inline_keyboard", None)
+    if not rows:
+        return False
+    changed = False
+    for row in rows:
+        for b in row:
+            if getattr(b, "icon_custom_emoji_id", None):
+                b.icon_custom_emoji_id = None
+                changed = True
+    return changed
+
+
 async def _html_fallback_once(make_request, bot, method):
     try:
         return await make_request(bot, method)
     except TelegramBadRequest as e:
+        # Telegram не принял кастомные эмодзи в кнопках (нет Premium у владельца бота и т.п.) →
+        # убираем иконки и шлём ещё раз, чтобы пост / меню не потерялись
+        if _strip_button_icons(getattr(method, "reply_markup", None)):
+            log.warning("Button icons rejected (%s) — resending without custom emoji", e)
+            return await _html_fallback_once(make_request, bot, method)
         if "can't parse entities" not in str(e) or not isinstance(getattr(method, "text", None), str):
             raise
         log.warning("HTML parse error, resending as plain text: %s", e)

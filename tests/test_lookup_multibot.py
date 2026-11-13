@@ -11,6 +11,7 @@ import time
 sys.path.insert(0, os.getcwd())
 
 from config import settings
+settings.only_with_username = False   # старые сценарии мягкой зоны / EARLY_POST
 import tracker.lookup as L
 
 ok_count = 0

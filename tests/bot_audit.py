@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 sys.path.insert(0, os.getcwd())
 from config import settings
+settings.only_with_username = False   # старые сценарии мягкой зоны / EARLY_POST
 import main
 from aiogram.types import Update, Message, Chat, User, CallbackQuery, InlineKeyboardMarkup
 from aiogram import methods, Bot

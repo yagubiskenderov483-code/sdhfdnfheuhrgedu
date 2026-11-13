@@ -17,6 +17,7 @@ import tracker.coordinator as coord_mod
 from bot.formatter import MessageFormatter
 from bot.sender import SendResult
 from config import settings
+settings.only_with_username = False   # старые сценарии мягкой зоны / EARLY_POST
 from database.db import Database
 from filters.price_filter import PriceFilter
 from filters.seller_filter import SellerFilter
