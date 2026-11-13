@@ -263,6 +263,7 @@ HELP = (
     "/reset_speeds — сброс замедления аккаунтов (после шторма)\n"
     "/removed — удалённые за 14 дней · /revive ИМЯ|all — вернуть\n"
     "/sessions_clean — убрать все мёртвые (разлогиненные) сессии разом\n"
+    "/sessions_wipe — снести ВСЕ сессии + очистить бэкап (чистый старт)\n"
     "/proxies — прокси для аккаунтов\n\n"
     "<b>Маршруты и фильтры</b>\n"
     "/routes — PRICE_ROUTES и BACKDROP_ROUTES в удобной форме\n"
@@ -1144,6 +1145,45 @@ def build_routers(app: "App") -> list[Router]:
             pass
         await _edit_or_send(q, f"Убрано мёртвых сессий: <b>{done}</b>. Осталось загружено: "
                                f"<b>{len(app.sessions.workers)}</b>.\nВернуть: /revive &lt;имя&gt; или /revive all.")
+
+    @admin.message(Command("sessions_wipe"))
+    async def cmd_sessions_wipe(m: Message) -> None:
+        total = len(app.sessions.workers)
+        if not total:
+            await m.answer("Сессий нет — сносить нечего.")
+            return
+        kb = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=f"⚠️ Снести ВСЕ {total}", callback_data="sesswipe_ok"),
+            InlineKeyboardButton(text="Отмена", callback_data="rmsess_no")]])
+        await m.answer(
+            f"⚠️ Снести <b>ВСЕ {total}</b> сессий подчистую И очистить их из бэкапа, чтобы после "
+            f"деплоя они НЕ вернулись?\n\nТрекер остановится, пока не загрузишь сессии заново. "
+            f"Отмена будет невозможна.", reply_markup=kb)
+
+    @public.callback_query(F.data == "sesswipe_ok")
+    async def cb_sesswipe_ok(q: CallbackQuery) -> None:
+        if not is_manager(q.from_user.id):
+            await q.answer("Только для админов", show_alert=True)
+            return
+        await q.answer("Сношу все сессии…")
+        names = list(app.sessions.workers.keys())
+        done = 0
+        for name in names:
+            try:
+                await app.sessions.remove(name)
+                done += 1
+            except Exception as e:
+                log.warning("sessions_wipe: не удалось снести %s: %s", name, e)
+        cleared = False
+        try:
+            cleared = await app.backup.save(allow_shrink=True)       # перезаписать бэкап пустым → деплой не вернёт
+        except Exception as e:
+            log.warning("sessions_wipe: очистка бэкапа упала: %s", e)
+        note = ("бэкап очищен — после деплоя не вернутся" if cleared else
+                f"бэкап очистить не удалось ({html.escape(app.backup.last_error or '')}) — повтори /sessions_wipe через минуту")
+        await _edit_or_send(q, f"Снесено сессий: <b>{done}</b>. {note}.\n\n"
+                               f"Теперь загрузи сессии заново: перешли боту файл <code>sessions.backup</code> "
+                               f"или добавь каждый аккаунт через /add_session.")
 
     @admin.message(or_f(Command("pause", "off"), F.text == BTN_PAUSE))
     async def cmd_pause(m: Message) -> None:
