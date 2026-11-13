@@ -264,7 +264,7 @@ class Settings:
                                               # (RUSSIAN_ONLY к ним неприменим — профиля просто нет)
     required_channel: str = "@trackgiftsx"    # обязательная подписка перед работой с ботом ("" = выкл)
     ref_bonus_minutes: int = 30               # реф-программа: минут за КАЖДУЮ оплату приглашённого
-    ref_min_minutes: int = 60                 # с какого накопленного бонуса можно активировать
+    ref_min_minutes: int = 300                # с какого накопленного бонуса можно активировать
     game_enabled: bool = True                 # «Испытать удачу»
     game_prize_hours: int = 72                # выигрыш — часы подписки
     game_ton: float = 1.6                     # билет в TON
@@ -565,7 +565,7 @@ def _from_env() -> Settings:
         early_post=_bool(e("EARLY_POST"), True),
         required_channel=_channel_ref(e("REQUIRED_CHANNEL"), "@trackgiftsx"),
         ref_bonus_minutes=max(0, _int(e("REF_BONUS_MINUTES"), 30)),
-        ref_min_minutes=max(0, _int(e("REF_MIN_MINUTES"), 60)),
+        ref_min_minutes=max(0, _int(e("REF_MIN_MINUTES"), 300)),
         game_enabled=_bool(e("GAME_ENABLED"), True),
         game_prize_hours=max(1, _int(e("GAME_PRIZE_HOURS"), 72)),
         game_ton=max(0.01, _float(e("GAME_TON"), 1.6)),

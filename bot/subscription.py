@@ -325,21 +325,23 @@ class Subscriptions:
     # Maker: 'убери все эмодзи вообще кроме того что в группе' — в UI подписки
     # эмодзи нет, кастомные остались только в постах лотов (formatter.py).
     def main_kb(self) -> InlineKeyboardMarkup:
-        rows = [
-            [btn("Оформить подписку", "success", callback_data="sub:menu")],
-            [btn("Моя подписка", callback_data="sub:my")],
-            [btn("Реферальная система", "primary", callback_data="sub:ref")],
+        # по две кнопки в ряд, у каждой свой цвет: зелёная, синяя, красная, обычная
+        # (Telegram даёт кнопкам только эти 4 варианта цвета)
+        buttons = [
+            btn("Оформить подписку", "success", callback_data="sub:menu"),
+            btn("Реферальная система", "primary", callback_data="sub:ref"),
         ]
         if settings.game_enabled and (settings.sub_ton_address or settings.game_stars):
-            rows.append([btn("Испытать удачу", "primary", callback_data="sub:game")])
-        rows.append([btn("Промокод", callback_data="sub:promo")])
+            buttons.append(btn("Испытать удачу", "danger", callback_data="sub:game"))
+        buttons.append(btn("Промокод", callback_data="sub:promo"))
+        rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     @staticmethod
     def renew_kb() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(inline_keyboard=[
-            [btn("Продлить подписку", "success", callback_data="sub:menu")],
-            [btn("Моя подписка", callback_data="sub:my")],
+            [btn("Продлить подписку", "success", callback_data="sub:menu"),
+             btn("В меню", callback_data="sub:home")],
         ])
 
     async def _notify_expired(self, uid: int, u: dict | None) -> None:
@@ -1715,7 +1717,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             subs.user(q.from_user.id)["await_promo"] = time.time()
         pct = subs.promo_pct(q.from_user.id)
         cur = f"\n\nСейчас активна скидка <b>−{pct}%</b> на следующую оплату." if pct else ""
-        await _safe_edit(q.message, "<b>Промокод</b>\n\nОтправьте промокод одним сообщением." + cur,
+        await _safe_edit(q.message, "<b>Промокод</b>\n\nВведите промокод" + cur,
                          reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn("В меню", callback_data="sub:home")]]))
         await q.answer()
 
@@ -1822,10 +1824,12 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             code = await subs.new_invoice(q.from_user.id, GAME_PLAN, ball=ball)
             await _safe_edit(q.message,
                 f"<b>Билет {GAME_BALLS[ball][0]} — {settings.game_ton:g} TON</b>\n\n"
+                "Онлайн: нажмите «Оплатить онлайн» — откроется Tonkeeper с готовой суммой и комментарием.\n\n"
                 f"Вручную: отправьте <b>{settings.game_ton:g} TON</b> на\n<code>{settings.sub_ton_address}</code>\n"
-                f"с комментарием <code>{code}</code>.\n\nПосле оплаты бот сам бросит мяч.",
+                f"с комментарием <code>{code}</code>.\n\n"
+                "Счёт действует 30 минут. После оплаты бот сам бросит мяч.",
                 reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                    [btn("Оплатить", "success", url=subs.invoice_url(code))],
+                    [btn("Оплатить онлайн", "success", url=subs.invoice_url(code))],
                     [btn("Проверить оплату", "primary", callback_data=f"sub:check:{code}")], back]))
             await q.answer()
             return
@@ -1900,6 +1904,14 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 await q.answer("Не удалось создать ссылку, попробуйте позже", show_alert=True)
             return
         await q.answer("У вас нет активной подписки.", show_alert=True)
+
+    @r.message(Command("my"), F.chat.type == "private")
+    async def cmd_my(m: Message) -> None:
+        """Кнопку «Моя подписка» убрали из меню — статус и новая ссылка доступны по /my."""
+        await m.answer("<b>Моя подписка</b>\n\nНажмите кнопку — бот покажет остаток или пришлёт новую ссылку в канал.",
+                       reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                           btn("Моя подписка", "primary", callback_data="sub:my"),
+                           btn("В меню", callback_data="sub:home")]]))
 
     @r.callback_query(F.data == "sub:trial")
     async def cb_trial(q: CallbackQuery) -> None:
@@ -2029,17 +2041,17 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 return
             code = await subs.new_invoice(q.from_user.id, plan)
             kb = InlineKeyboardMarkup(inline_keyboard=[
-                [btn("Оплатить", "success", url=subs.invoice_url(code))],
+                [btn("Оплатить онлайн", "success", url=subs.invoice_url(code))],
                 [btn("Проверить оплату", "primary", callback_data=f"sub:check:{code}")],
                 back_row,
             ])
             await _safe_edit(q.message,
                 f"<b>Тариф {title} — {price:g} TON</b>\n\n"
+                "Онлайн: нажмите «Оплатить онлайн» — откроется Tonkeeper с готовой суммой и комментарием.\n\n"
                 f"Вручную: отправьте <b>{price:g} TON</b> на\n"
                 f"<code>{settings.sub_ton_address}</code>\n"
                 f"с комментарием <code>{code}</code>.\n\n"
-                "Либо оплатите через инлайн кнопку.\n\n\n"
-                "Счёт действует 30 минут, После оплаты бот сам пришлёт ссылку.",
+                "Счёт действует 30 минут. После оплаты бот сам пришлёт ссылку.",
                 reply_markup=kb)
             await q.answer()
             return
