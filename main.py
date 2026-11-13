@@ -68,18 +68,16 @@ async def _html_fallback(make_request, bot, method):
             await asyncio.sleep(1.5)
 
 
-def _strip_button_icons(markup) -> bool:
-    """Убрать icon_custom_emoji_id у всех inline-кнопок. True — если что-то убрали."""
+def _strip_button_icons(method) -> bool:
+    """Убрать icon_custom_emoji_id у всех inline-кнопок запроса. True — если что-то убрали.
+    Модели aiogram могут быть неизменяемыми — поэтому собираем копию клавиатуры."""
+    markup = getattr(method, "reply_markup", None)
     rows = getattr(markup, "inline_keyboard", None)
-    if not rows:
+    if not rows or not any(getattr(b, "icon_custom_emoji_id", None) for row in rows for b in row):
         return False
-    changed = False
-    for row in rows:
-        for b in row:
-            if getattr(b, "icon_custom_emoji_id", None):
-                b.icon_custom_emoji_id = None
-                changed = True
-    return changed
+    new_rows = [[b.model_copy(update={"icon_custom_emoji_id": None}) for b in row] for row in rows]
+    method.reply_markup = markup.model_copy(update={"inline_keyboard": new_rows})
+    return True
 
 
 async def _html_fallback_once(make_request, bot, method):
@@ -88,7 +86,11 @@ async def _html_fallback_once(make_request, bot, method):
     except TelegramBadRequest as e:
         # Telegram не принял кастомные эмодзи в кнопках (нет Premium у владельца бота и т.п.) →
         # убираем иконки и шлём ещё раз, чтобы пост / меню не потерялись
-        if _strip_button_icons(getattr(method, "reply_markup", None)):
+        es = str(e)
+        unrelated = any(k in es for k in ("BUTTON_USER", "BUTTON_URL", "not modified", "chat not found",
+                                          "TOPIC_", "thread not found", "THREAD_NOT_FOUND",
+                                          "can't parse entities", "message to edit not found"))
+        if not unrelated and _strip_button_icons(method):
             log.warning("Button icons rejected (%s) — resending without custom emoji", e)
             return await _html_fallback_once(make_request, bot, method)
         if "can't parse entities" not in str(e) or not isinstance(getattr(method, "text", None), str):
