@@ -291,8 +291,9 @@ HELP = (
     "/health — статус HTTP-endpoint'а (HEALTH_PORT) /health /stats /metrics\n\n"
     "<b>Подписки</b>\n"
     "/subs — подписчики и выручка\n"
-    "/grant ID|@юз 24|3д|навсегда — выдать · /revoke ID|@юз — забрать\n\n"
-    "/test — проверка работы · /reload — перечитать .env и файлы · /cancel — отменить диалог"
+    "/grant ID|@юз 24|3д|навсегда — выдать · /revoke ID|@юз — забрать\n"
+    "/broadcast текст — рассылка всем, кто запускал бота (или ответом на сообщение)\n\n"
+    "/help — эта справка · /test — проверка работы · /reload — перечитать .env и файлы · /cancel — отменить диалог"
 )
 
 
@@ -631,6 +632,24 @@ def build_routers(app: "App") -> list[Router]:
         else:
             await m.answer(f"Ваш Telegram ID: <code>{m.from_user.id if m.from_user else '?'}</code>\n"
                            "Доступ только для администраторов.")
+
+    @public.message(Command("help"))
+    async def cmd_help(m: Message) -> None:
+        """Полная справка по командам. Админам — панель, владельцам аккаунтов — трекер,
+        обычным пользователям — команды бота-подписки."""
+        uid = m.from_user.id if m.from_user else 0
+        tail = f"\n\nВаш Telegram ID: <code>{uid}</code>"
+        if is_manager(uid):
+            await _answer_long(m, HELP + tail, reply_markup=MAIN_KB)
+        elif is_allowed(uid):
+            await _answer_long(m, USER_HELP + tail, reply_markup=MAIN_KB)
+        else:
+            await m.answer(
+                "<b>Трекер NFT — команды</b>\n\n"
+                "/start — главное меню и оформить подписку\n"
+                "/my — моя подписка: тариф и сколько осталось\n"
+                "/promo — ввести промокод на скидку\n\n"
+                "Доступ к лотам — по подписке. Нажмите /start, чтобы выбрать тариф." + tail)
 
     @public.callback_query(F.data.startswith("take:"))
     async def cb_take(q: CallbackQuery) -> None:

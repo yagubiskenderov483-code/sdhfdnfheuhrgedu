@@ -45,9 +45,8 @@ WELCOME = ("<b>Добро Пожаловать в лучший Telegram Tracker 
            "Tracker - отслеживает все лоты выставленные в настоящее время")
 
 CLOSED_TEXT = "Парсер закрыт"
-GATE_TEXT = ("<b>Подпишитесь на наш канал</b>\n\n"
-             "Чтобы пользоваться ботом, нужна подписка на канал. "
-             "Подпишитесь и нажмите «Я подписался».")
+GATE_TEXT = ('<tg-emoji emoji-id="6030563507299160824">❗️</tg-emoji> '
+             "Для использование бота нужно подписаться на канал")
 
 TRIAL_SECONDS = 30 * 60          # Maker: пробный час → 30 минут
 REMIND_BEFORE = 60 * 60          # напомнить о продлении за час до конца
@@ -362,7 +361,7 @@ class Subscriptions:
     def renew_kb() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(inline_keyboard=[
             [btn("Продлить подписку", "success", E.SUB, callback_data="sub:menu"),
-             btn("В меню", "primary", E.SPARK, callback_data="sub:home")],
+             btn("В меню", "primary", E.BACK, callback_data="sub:home")],
         ])
 
     async def _notify_expired(self, uid: int, u: dict | None) -> None:
@@ -404,13 +403,13 @@ class Subscriptions:
             label = f"{title} • {p_ton:.4g} TON" + (f" / {p_st} ⭐" if p_st else "")
             rows.append([btn(label, styles[i % len(styles)], E.DIAMOND if secs_ == FOREVER else E.CLOCK,
                              callback_data=f"sub:buy:{code}")])
-        rows.append([btn("« Назад", "danger", E.SPARK, callback_data="sub:home")])
+        rows.append([btn("Назад", "danger", E.BACK, callback_data="sub:home")])
         return InlineKeyboardMarkup(inline_keyboard=rows)
 
     def plans_text(self, uid: int) -> str:
         """«Подписка» + цены тарифов: 1.2 <TON> / 150 <Stars> (кастомные эмодзи Maker'а)."""
         pct = self.promo_pct(uid)
-        t, st = _tg_emoji(EMOJI_TON, "💎"), _tg_emoji(EMOJI_STAR, "⭐")
+        t, st = _tg_emoji(EMOJI_TON, "👽"), _tg_emoji(EMOJI_STAR, "⭐️")
         lines = []
         for _code, (title, price, _, stars) in PLANS.items():
             p_ton = _disc(price, pct)
@@ -547,8 +546,8 @@ class Subscriptions:
         ch = settings.required_channel
         url = f"https://t.me/{ch.lstrip('@')}" if ch.startswith("@") else "https://t.me/"
         return InlineKeyboardMarkup(inline_keyboard=[
-            [btn("Подписаться на канал", "primary", E.SUB, url=url)],
-            [btn("Я подписался", "success", E.PAID, callback_data="sub:chk")],
+            [btn("Подписаться", "primary", E.POINT, url=url)],
+            [btn("Проверить подписку", "success", E.ROBOT, callback_data="sub:chk")],
         ])
 
     # ------------------------------------------------------------------ invite links
@@ -1655,6 +1654,15 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if subs.is_banned(uid):
             await m.answer("Доступ к боту заблокирован.")
             return
+        # запоминаем всех, кто запускал бота (для рассылки и чтобы список переживал деплой через бэкап)
+        async with subs._lock:
+            is_new = str(uid) not in subs.state["users"]
+            u = subs.user(uid)
+            subs._remember_who(u, m.from_user)
+            u.setdefault("first_seen", time.time())
+            u["last_start"] = time.time()
+        # новый пользователь → durable-копия в Telegram (переживает деплой); повтор — только локально
+        await subs.save(backup=is_new)
         if not await subs.in_channel(m.bot, uid):
             await m.answer(GATE_TEXT, reply_markup=subs.channel_gate_kb())
             return
@@ -1726,10 +1734,10 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 f"<b>Ваша реферальная ссылка:</b>\n<code>{link}</code>")
         share = "https://t.me/share/url?" + "url=" + quote(link, safe="") + "&text=" + quote(
             "Трекер NFT-маркета Telegram — лоты в реальном времени", safe="")
-        rows = [[btn("Поделиться ссылкой", "primary", E.GIFT, url=share)]]
+        rows = [[btn("Поделиться ссылкой", "primary", E.SHARE, url=share)]]
         if info["bonus"] >= max(60, need):
             rows.append([btn(f"Активировать {_fmt_secs(info['bonus'])}", "success", E.PAID, callback_data="sub:refuse")])
-        rows.append([btn("В меню", "danger", E.SPARK, callback_data="sub:home")])
+        rows.append([btn("В меню", "danger", E.BACK, callback_data="sub:home")])
         await _safe_edit(q.message, text, reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         await q.answer()
 
@@ -1762,7 +1770,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         pct = subs.promo_pct(q.from_user.id)
         cur = f"\n\nСейчас активна скидка <b>−{pct}%</b> на следующую оплату." if pct else ""
         await _safe_edit(q.message, "<b>Промокод</b>\n\nВведите промокод" + cur,
-                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn("В меню", "danger", E.SPARK, callback_data="sub:home")]]))
+                         reply_markup=InlineKeyboardMarkup(inline_keyboard=[[btn("В меню", "danger", E.BACK, callback_data="sub:home")]]))
         await q.answer()
 
     _PROMO_RE = re.compile(r"^[A-Za-zА-Яа-яЁё0-9_-]{2,32}$")
@@ -1786,7 +1794,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             return
         res = await subs.activate_promo(uid, code)
         kb = InlineKeyboardMarkup(inline_keyboard=[[btn("Оформить подписку", "success", E.SUB, callback_data="sub:menu")],
-                                                   [btn("В меню", "primary", E.SPARK, callback_data="sub:home")]])
+                                                   [btn("В меню", "primary", E.BACK, callback_data="sub:home")]])
         await m.answer(res, reply_markup=kb)
 
     @r.message(F.text, _awaiting_promo)
@@ -1831,7 +1839,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         await _safe_edit(q.message, _game_text(plan), reply_markup=InlineKeyboardMarkup(inline_keyboard=[
             [btn("⚽", "primary", callback_data=f"sub:gball:soccer:{plan}"),
              btn("🏀", "danger", callback_data=f"sub:gball:basket:{plan}")],
-            [btn("« Назад", "success", E.SPARK, callback_data=f"sub:buy:{plan}")]]))
+            [btn("Назад", "success", E.BACK, callback_data=f"sub:buy:{plan}")]]))
         await q.answer()
 
     @r.callback_query(F.data.startswith("sub:gball:"))
@@ -1849,7 +1857,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             rows.append([btn(f"{stars}", "primary", E.STAR, callback_data=f"sub:gpay:{ball}:stars:{plan}")])
         if settings.sub_ton_address:
             rows.append([btn(f"{ton:g}", "success", E.TON, callback_data=f"sub:gpay:{ball}:ton:{plan}")])
-        rows.append([btn("« Назад", "danger", E.SPARK, callback_data=f"sub:game:{plan}")])
+        rows.append([btn("Назад", "danger", E.BACK, callback_data=f"sub:game:{plan}")])
         await _safe_edit(q.message, f"<b>Мяч: {emoji}</b>\n\nВыберите способ оплаты билета:",
                          reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
         await q.answer()
@@ -1872,7 +1880,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         ton, stars = game_ticket(plan)
         await subs.load()
         subs._remember_who(subs.user(q.from_user.id), q.from_user)
-        back = [btn("« Назад", "danger", E.SPARK, callback_data=f"sub:gball:{ball}:{plan}")]
+        back = [btn("Назад", "danger", E.BACK, callback_data=f"sub:gball:{ball}:{plan}")]
         if method == "stars" and stars:
             try:
                 url = await subs.new_stars_invoice(q.from_user.id, gplan, ball=ball)
@@ -1978,7 +1986,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         await m.answer("<b>Моя подписка</b>\n\nНажмите кнопку — бот покажет остаток или пришлёт новую ссылку в канал.",
                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
                            btn("Моя подписка", "primary", E.SUB, callback_data="sub:my"),
-                           btn("В меню", "danger", E.SPARK, callback_data="sub:home")]]))
+                           btn("В меню", "danger", E.BACK, callback_data="sub:home")]]))
 
     @r.callback_query(F.data == "sub:trial")
     async def cb_trial(q: CallbackQuery) -> None:
@@ -2047,7 +2055,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             rows.append([btn(f"{price:.4g}", "success", E.TON, callback_data=f"sub:pay:{plan}:ton")])
         if settings.game_enabled and (settings.sub_ton_address or game_ticket(plan)[1]):
             rows.append([btn("Испытать удачу", "danger", E.CLOUD, callback_data=f"sub:game:{plan}")])
-        rows.append([btn("« Назад", "primary", E.SPARK, callback_data="sub:menu")])
+        rows.append([btn("Назад", "primary", E.BACK, callback_data="sub:menu")])
         kb = InlineKeyboardMarkup(inline_keyboard=rows)
         stars_part = f" или <b>{stars}</b> {_tg_emoji(EMOJI_STAR, '⭐')}" if stars else ""
         txt = (f"<b>Тариф {title}</b>\n"
@@ -2080,7 +2088,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         price = round(_disc(price, pct), 4)
         stars = max(1, round(_disc(stars, pct))) if stars else stars
         subs._remember_who(subs.user(q.from_user.id), q.from_user)
-        back_row = [btn("« Другой способ", "danger", E.SPARK, callback_data=f"sub:buy:{plan}")]
+        back_row = [btn("Другой способ", "danger", E.BACK, callback_data=f"sub:buy:{plan}")]
 
         if method == "stars":
             if not stars:
@@ -2318,6 +2326,67 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                        f"сутки: {st['stars_day']} ({st['stars_day_count']})\n"
                        "Выдать вручную: <code>/grant ID часы</code> или <code>/grant ID навсегда</code>\n"
                        "Забрать: <code>/revoke ID</code>")
+
+    @r.message(Command("broadcast"), _ADM)
+    async def cmd_broadcast(m: Message, command: CommandObject) -> None:
+        """Рассылка всем, кто когда-либо запускал бота. HTML и кастом-эмодзи поддерживаются."""
+        await subs.load()
+        text = (command.args or "").strip()
+        # можно ответить /broadcast на сообщение — разошлётся его текст (с форматированием)
+        if not text and m.reply_to_message:
+            text = m.reply_to_message.html_text or m.reply_to_message.text or ""
+        if not text:
+            await m.answer(
+                "<b>Рассылка всем пользователям бота</b>\n\n"
+                "<code>/broadcast текст</code> — отправить текст всем, кто запускал бота.\n"
+                "Поддерживается HTML и кастом-эмодзи. Либо ответьте <code>/broadcast</code> на "
+                "сообщение, которое нужно разослать.")
+            return
+        # получатели: все, кто запускал бота (кроме забаненных)
+        uids = [int(k) for k, u in subs.state["users"].items()
+                if str(k).lstrip("-").isdigit() and int(k) > 0
+                and not (isinstance(u, dict) and u.get("banned"))]
+        total = len(uids)
+        if not total:
+            await m.answer("Пока некому рассылать — ни один пользователь не запускал бота.")
+            return
+        await m.answer(f"📣 Рассылка запущена. Получателей: <b>{total}</b>.\n\n"
+                       "<b>Текст, который получат пользователи:</b>\n\n" + text)
+
+        async def _run() -> None:
+            from aiogram.exceptions import TelegramRetryAfter, TelegramForbiddenError
+            bot = app.bot
+            sent = blocked = failed = 0
+            for uid in uids:
+                try:
+                    await bot.send_message(uid, text)
+                    sent += 1
+                except TelegramRetryAfter as e:
+                    await asyncio.sleep(float(getattr(e, "retry_after", 5)) + 1)
+                    try:
+                        await bot.send_message(uid, text)
+                        sent += 1
+                    except Exception:
+                        failed += 1
+                except TelegramForbiddenError:
+                    blocked += 1           # пользователь заблокировал бота / удалил чат
+                except Exception as e:
+                    failed += 1
+                    log.info("broadcast to %s failed: %s", uid, e)
+                await asyncio.sleep(0.05)  # ~20 сообщений/с — в пределах лимитов Telegram
+            try:
+                await bot.send_message(
+                    m.chat.id,
+                    f"✅ Рассылка завершена.\n"
+                    f"Доставлено: <b>{sent}</b> из {total}\n"
+                    f"Заблокировали бота: {blocked}\n"
+                    f"Ошибки: {failed}")
+            except Exception:
+                pass
+
+        t = asyncio.get_running_loop().create_task(_run(), name="broadcast")
+        _BG_TASKS.add(t)
+        t.add_done_callback(_BG_TASKS.discard)
 
     @r.message(Command("grant"), _ADM)
     async def cmd_grant(m: Message, command: CommandObject) -> None:

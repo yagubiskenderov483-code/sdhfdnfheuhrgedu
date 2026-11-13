@@ -1059,6 +1059,7 @@ class App:
         """Команды в синей кнопке «Меню» рядом с полем ввода."""
         cmds = [
             BotCommand(command="start", description="Главное меню"),
+            BotCommand(command="help", description="Все команды и что они делают"),
             BotCommand(command="dashboard", description="Единая сводка (главный экран админа)"),
             BotCommand(command="add_session", description="Добавить аккаунт"),
             BotCommand(command="sessions", description="Мои аккаунты / удалить"),
@@ -1088,9 +1089,11 @@ class App:
         cmds.append(BotCommand(command="subs", description="Подписчики и выручка"))
         cmds.append(BotCommand(command="grant", description="Выдать подписку: /grant ID|@юз 24|3д|навсегда"))
         cmds.append(BotCommand(command="revoke", description="Забрать подписку: /revoke ID|@юз"))
+        cmds.append(BotCommand(command="broadcast", description="Рассылка всем пользователям бота"))
         try:
-            # всем — только /start; полное меню — только админам из ADMIN_IDS
-            await self.bot.set_my_commands([BotCommand(command="start", description="Главное меню")],
+            # всем — /start и /help; полное меню — только админам из ADMIN_IDS
+            await self.bot.set_my_commands([BotCommand(command="start", description="Главное меню"),
+                                            BotCommand(command="help", description="Все команды и что они делают")],
                                            scope=BotCommandScopeDefault())
             for admin in (settings.admin_ids or all_admins()):
                 try:

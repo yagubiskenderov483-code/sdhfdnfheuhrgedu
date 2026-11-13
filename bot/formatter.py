@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import html
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -28,6 +29,19 @@ DASH = "-"
 # кастомные эмодзи в тексте лота (Maker)
 STAR_TG = '<tg-emoji emoji-id="6028338546736107668">⭐️</tg-emoji>'
 BOLT_TG = '<tg-emoji emoji-id="5936088245560419529">⚡️</tg-emoji>'
+TON_TG = '<tg-emoji emoji-id="5424905554432631390">👽</tg-emoji>'  # цена в TON (раньше была обычным словом «TON» → в теме 5000+ смотрелось не как кастом)
+
+
+def _units(s: str) -> str:
+    """Заменяем единицы цены на кастомные эмодзи Maker'а: ⭐ и метку TON.
+    Применяется к уже экранированному price_line / floor_line.
+    TON меняем только когда он стоит единицей после числа (напр. «18.72 TON»),
+    чтобы не задеть пояснение «(только TON)»."""
+    s = s.replace("⭐", STAR_TG)
+    label = html.escape(settings.ton_label)
+    if label:
+        s = re.sub(r"(?<=\d)(\s*)" + re.escape(label) + r"\b", r"\1" + TON_TG, s)
+    return s
 
 
 def _e(v) -> str:
@@ -286,8 +300,8 @@ class MessageFormatter:
             model=_e(l.model) + (f" ({html.escape(l.model_rarity)})" if l.model_rarity else ""),
             backdrop=_e(l.backdrop) + (f" ({html.escape(l.backdrop_rarity)})" if l.backdrop_rarity else ""),
             symbol=_e(l.symbol) + (f" ({html.escape(l.symbol_rarity)})" if l.symbol_rarity else ""),
-            price_line=html.escape(price_line(l)).replace("⭐", STAR_TG),
-            floor_line=html.escape(floor_line(l)).replace("⭐", STAR_TG),
+            price_line=_units(html.escape(price_line(l))),
+            floor_line=_units(html.escape(floor_line(l))),
             stars_price=_e(l.stars_price),
             ton_price=_e(fmt_ton(l.ton_price)),
             currency=_e(l.currency),
