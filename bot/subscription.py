@@ -436,17 +436,21 @@ class Subscriptions:
             p = (self.state.get("promos") or {}).get(code)
             if not p or p.get("off"):
                 return "Такого промокода нет."
-            if p.get("max") and int(p.get("uses") or 0) >= int(p["max"]):
-                return "Промокод закончился."
             u = self.user(uid)
+            al = p.setdefault("activated_by", [])
+            # этот пользователь уже активировал код — не считаем повторно, но и не отказываем
+            if uid in al:
+                u["promo"] = code
+                return f"Промокод <b>{html.escape(code)}</b> уже активирован: скидка <b>−{int(p.get('pct') or 0)}%</b>."
+            # лимит по АКТИВАЦИЯМ (вводам), а не по оплатам — после N вводов код недействителен
+            mx = int(p.get("max") or 0)
+            if mx and len(al) >= mx:
+                return "Промокод недействителен — закончились активации."
             if code in (u.get("promos_used") or []):
                 return "Вы уже использовали этот промокод."
             u["promo"] = code
             u.pop("await_promo", None)
-            # запоминаем, кто вводил промокод (для /promo_users)
-            al = p.setdefault("activated_by", [])
-            if uid not in al:
-                al.append(uid)
+            al.append(uid)                       # запоминаем, кто вводил (для /promo_users и лимита)
             await self.save(backup=True)
         return f"Промокод <b>{html.escape(code)}</b> активирован: скидка <b>−{int(p.get('pct') or 0)}%</b> на следующую оплату."
 
@@ -2758,8 +2762,8 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
     @r.message(Command("promos"), _ADM)
     async def cmd_promos(m: Message) -> None:
         await subs.load()
-        rows = [f"<code>{c}</code> −{p.get('pct')}% · оплат {p.get('uses', 0)}"
-                + (f"/{p['max']}" if p.get("max") else "") + f" · ввели {len(p.get('activated_by') or [])}"
+        rows = [f"<code>{c}</code> −{p.get('pct')}% · ввели {len(p.get('activated_by') or [])}"
+                + (f"/{p['max']}" if p.get("max") else "") + f" · оплат {p.get('uses', 0)}"
                 + (" · выкл" if p.get("off") else "")
                 for c, p in (subs.state.get("promos") or {}).items()]
         await m.answer("<b>Промокоды</b>\n" + ("\n".join(rows) or "нет") +
