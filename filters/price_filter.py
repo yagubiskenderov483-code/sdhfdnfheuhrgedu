@@ -65,6 +65,14 @@ class PriceFilter:
                 else:
                     return FilterResult(False, f"{l.stars_price} Stars = +{over:.0f}% к флору {l.floor_stars}; "
                                                "нет редкой модели/фона и не монохром")
+        # Абсолютный потолок: дороже флора на HARD_ABOVE_FLOOR% не слать ДАЖЕ редкие/дорогие
+        # (редкость его не обходит — в отличие от MAX_ABOVE_FLOOR). Maker: >1000% от флора — не трекерим.
+        hard = settings.hard_above_floor
+        if hard and l.floor_stars and l.floor_stars > 0 and l.stars_price and l.stars_price > l.floor_stars * (1 + hard / 100):
+            over = (l.stars_price - l.floor_stars) / l.floor_stars * 100
+            return FilterResult(False, f"{l.stars_price} Stars = +{over:.0f}% к флору {l.floor_stars} — "
+                                       f"жёсткий потолок {hard}% (даже для редких)")
+
         # Один порог: если задан COLLECTION_MIN_FLOOR, лоты идут от него же (флор 3000 → лоты от 3000).
         # MIN_STARS используется, только когда флор не задан (COLLECTION_MIN_FLOOR=0).
         min_stars = settings.collection_min_floor or settings.min_stars
