@@ -470,8 +470,9 @@ class Subscriptions:
         return True
 
     async def _credit_ref(self, inv: dict) -> None:
-        """Каждая оплата подписки приглашённым → +REF_BONUS_MINUTES пригласившему (один раз на счёт)."""
-        if inv.get("ref_credited") or is_game(inv.get("plan")) or not settings.ref_bonus_minutes:
+        """Оплата подписки приглашённым → засчитываем пригласившему/партнёру (кол-во оплат + выручка),
+        и, если задан REF_BONUS_MINUTES, начисляем бонус-минуты. Один раз на счёт."""
+        if inv.get("ref_credited") or is_game(inv.get("plan")):
             return
         uid = int(inv.get("uid") or 0)
         u = self.state["users"].get(str(uid)) or {}
@@ -481,15 +482,18 @@ class Subscriptions:
         async with self._lock:
             inv["ref_credited"] = True
             r = self.user(ref)
-            r["ref_bonus"] = float(r.get("ref_bonus") or 0) + settings.ref_bonus_minutes * 60
             r["ref_paid"] = int(r.get("ref_paid") or 0) + 1
+            r["ref_revenue_nano"] = int(r.get("ref_revenue_nano") or 0) + int(inv.get("nano") or 0)
+            if settings.ref_bonus_minutes:
+                r["ref_bonus"] = float(r.get("ref_bonus") or 0) + settings.ref_bonus_minutes * 60
             await self.save(backup=True)
-            total = r["ref_bonus"]
-        need = settings.ref_min_minutes * 60
-        tail = (" — можно активировать в «Реферальная система»." if total >= need
-                else f" Активация от {_fmt_secs(need)}.")
-        await self._dm_user(ref, f"Ваш реферал оплатил подписку: <b>+{settings.ref_bonus_minutes} мин</b>.\n"
-                                 f"Накоплено: <b>{_fmt_secs(total)}</b>." + tail)
+            total = float(r.get("ref_bonus") or 0)
+        if settings.ref_bonus_minutes:
+            need = settings.ref_min_minutes * 60
+            tail = (" — можно активировать в «Реферальная система»." if total >= need
+                    else f" Активация от {_fmt_secs(need)}.")
+            await self._dm_user(ref, f"Ваш реферал оплатил подписку: <b>+{settings.ref_bonus_minutes} мин</b>.\n"
+                                     f"Накоплено: <b>{_fmt_secs(total)}</b>." + tail)
 
     async def activate_ref_bonus(self, uid: int) -> str:
         if uid in self._ref_busy:
@@ -2464,6 +2468,63 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             subs.user(uid).pop("offer_access", None)
         await subs.save(backup=True)
         await m.answer(f"Доступ к офферу снят с <code>{uid}</code>.")
+
+    @r.message(Command("partner"), _ADM)
+    async def cmd_partner(m: Message, command: CommandObject) -> None:
+        """Партнёрская ссылка: даёшь человеку, он кидает её в свою группу, покупки пришедших
+        по ней засчитываются ему (кол-во оплат + выручка). Работает поверх реф-системы."""
+        await subs.load()
+        parts = (command.args or "").split(maxsplit=1)
+        if not parts:
+            await m.answer("Партнёрская ссылка:\n<code>/partner @username</code> или "
+                           "<code>/partner ID [имя]</code>\n\nСоздаёт реф-ссылку для партнёра — он кидает её "
+                           "в свою группу, покупки пришедших засчитываются ему. Список и выручка: /partners")
+            return
+        arg0 = parts[0].strip()
+        uid = _resolve_user(arg0)
+        if uid is None and re.fullmatch(r"[1-9]\d{0,15}", arg0, re.ASCII):
+            uid = int(arg0)               # по числовому ID заведём запись, даже если он ещё не писал боту
+        if uid is None:
+            await m.answer("Не нашёл пользователя. Укажите числовой ID (партнёру не обязательно быть в боте) "
+                           "или @username того, кто уже писал боту.")
+            return
+        async with subs._lock:
+            u = subs.user(uid)
+            u["partner"] = True
+            if len(parts) > 1:
+                u["partner_name"] = parts[1].strip()
+        await subs.save(backup=True)
+        try:
+            link = f"https://t.me/{await _bot_username(m.bot)}?start=ref_{uid}"
+        except Exception:
+            link = f"?start=ref_{uid}"
+        info = subs.ref_info(uid)
+        rev = int(subs.user(uid).get("ref_revenue_nano") or 0) / 1e9
+        name = html.escape(parts[1].strip()) if len(parts) > 1 else str(uid)
+        await m.answer(f"<b>Партнёр: {name}</b>\n\n"
+                       f"Ссылка (дайте партнёру, он кидает её в свою группу):\n<code>{link}</code>\n\n"
+                       f"Пришло по ссылке: <b>{info['count']}</b>\n"
+                       f"Оплатили: <b>{info['paid']}</b>\n"
+                       f"Выручка от его людей: <b>{rev:.2f} TON</b>\n\n"
+                       f"Все партнёры и выручка: /partners")
+
+    @r.message(Command("partners"), _ADM)
+    async def cmd_partners(m: Message) -> None:
+        await subs.load()
+        rows = [(k, u) for k, u in subs.state["users"].items()
+                if isinstance(u, dict) and (u.get("partner") or int(u.get("ref_count") or 0) > 0)]
+        rows.sort(key=lambda kv: (-int(kv[1].get("ref_revenue_nano") or 0), -int(kv[1].get("ref_paid") or 0)))
+        if not rows:
+            await m.answer("Партнёров и рефереров пока нет. Создать: <code>/partner @username</code>")
+            return
+        lines = [f"<b>Партнёры / рефереры ({len(rows)}):</b>", ""]
+        for k, u in rows[:50]:
+            who = u.get("partner_name") or (("@" + u["username"]) if u.get("username") else k)
+            rev = int(u.get("ref_revenue_nano") or 0) / 1e9
+            mark = "⭐ " if u.get("partner") else ""
+            lines.append(f"{mark}<code>{k}</code> {html.escape(str(who))} — пришло "
+                         f"{int(u.get('ref_count') or 0)}, оплат {int(u.get('ref_paid') or 0)}, {rev:.2f} TON")
+        await m.answer("\n".join(lines))
 
     @r.message(Command("offer_list"), _ADM)
     async def cmd_offer_list(m: Message) -> None:
