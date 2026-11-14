@@ -354,9 +354,9 @@ class Subscriptions:
         # (Telegram даёт кнопкам только эти 4 варианта цвета)
         # «Испытать удачу» — не здесь, а на экране выбора способа оплаты тарифа
         buttons = [
-            btn("Оформить подписку", "success", None, callback_data="sub:menu"),
-            btn("Реферальная система", "primary", None, callback_data="sub:ref"),
-            btn("Промокод", "danger", None, callback_data="sub:promo"),
+            btn("Оформить подписку", "success", E.PROFILE, callback_data="sub:menu"),
+            btn("Реферальная система", "primary", E.SHOP, callback_data="sub:ref"),
+            btn("Промокод", "danger", E.TAG, callback_data="sub:promo"),
         ]
         rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
         return InlineKeyboardMarkup(inline_keyboard=rows)
