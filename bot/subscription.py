@@ -190,7 +190,8 @@ class Subscriptions:
         self.stars_bot = app.bot            # перезаписывается на sub_bot в main.py если задан
         self.state: dict[str, Any] = {"users": {}, "invoices": {}, "links": {}, "seen_tx": [],
                                       "seen_charges": [],   # charge_id Stars-платежей — идемпотентность при ретрае getUpdates
-                                      "trials_used": []}    # uid тех, кто УЖЕ брал пробный — durable, не теряется при деплое
+                                      "trials_used": [],    # uid тех, кто УЖЕ брал пробный — durable, не теряется при деплое
+                                      "link_dm": {}}        # uid → message_id DM со ссылкой (удаляем при входе)
         self._lock = asyncio.Lock()
         self._loaded = False
         # пока копия подписок не восстановлена после деплоя — никого не кикаем и не выдаём пробный час
@@ -225,11 +226,15 @@ class Subscriptions:
         return bots
 
     async def _dm_user(self, uid: int, text: str, **kw) -> bool:
-        """Отправить DM пользователю через любой доступный бот. → True если дошло."""
+        """Отправить DM пользователю через любой доступный бот. → True если дошло.
+        Если в тексте ссылка для входа — запоминаем message_id, чтобы удалить его при входе."""
         last_err = None
+        is_link = ("t.me/+" in text) or ("ссылк" in text.lower())
         for bot in self._user_bots():
             try:
-                await bot.send_message(int(uid), text, **kw)
+                msg = await bot.send_message(int(uid), text, **kw)
+                if is_link and getattr(msg, "message_id", None):
+                    self.state.setdefault("link_dm", {})[str(uid)] = msg.message_id
                 return True
             except Exception as e:
                 last_err = e
@@ -237,6 +242,18 @@ class Subscriptions:
         if last_err is not None:
             log.info("DM to %s failed on all bots: %s", uid, last_err)
         return False
+
+    async def _delete_link_dm(self, uid: int) -> None:
+        """Удалить ранее отправленный DM со ссылкой для входа (человек уже зашёл — ссылка не нужна)."""
+        mid = (self.state.get("link_dm") or {}).pop(str(uid), None)
+        if not mid:
+            return
+        for bot in self._user_bots():
+            try:
+                await bot.delete_message(int(uid), mid)
+                break
+            except Exception:
+                continue
 
     # ------------------------------------------------------------------ storage
     async def load(self) -> None:
@@ -753,6 +770,7 @@ class Subscriptions:
             except Exception as e:
                 log.warning("Re-issue link to %s failed: %s", owner, e)
             return
+        await self._delete_link_dm(uid)     # человек зашёл — удаляем DM со ссылкой
         try:
             await self._dm_user(uid, f"Вы в канале! Доступ: <b>{_fmt_left(self.user(uid)['until'])}</b>.")
         except Exception:
@@ -1475,6 +1493,8 @@ class Subscriptions:
             try:
                 sent_msg = await bot.send_message(uid, text)
                 sent_bot = bot
+                if ("t.me/+" in text) and getattr(sent_msg, "message_id", None):
+                    self.state.setdefault("link_dm", {})[str(uid)] = sent_msg.message_id
                 break
             except Exception as e:
                 log.info("DM via bot failed: %s", e)

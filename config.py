@@ -236,8 +236,8 @@ class Settings:
     low_priority_hot_min: float = 10.0       # дешёвая коллекция опрашивается по изменению не чаще раза в N сек
     collection_min_floor: int = 4500         # отслеживать только коллекции с флором на маркете от N Stars (0 = все)
     min_ton: float = 0.0
-    priority_floor: int = 2500           # коллекции с флором от N ⭐ опрашиваются чаще и первыми (0 = выкл)
-    priority_share: float = 0.7          # какая доля мощности аккаунтов уходит на дорогие коллекции. Maker: 0.5→0.7 (ускорить трекинг через приоритет дорогих)
+    priority_floor: int = 1500           # коллекции/лоты от N ⭐ опрашиваются чаще и первыми (0 = выкл). Maker: 2500→1500 (захватить 1000-3000)
+    priority_share: float = 0.8          # какая доля мощности аккаунтов уходит на дорогие. Maker: 0.5→0.7→0.8 (дорогие трекерятся чаще)
     priority_poll_interval: float = 1.5  # ускорено (было 2.5): как часто опрашивать каждую дорогую коллекцию
     auto_remove_dead: bool = True        # сессию, которую снёс Telegram, удалять из трекера автоматически
     max_lot_age: int = 180               # лот старше 3 мин уже не свежий — не слать (0 = выкл)
@@ -255,7 +255,7 @@ class Settings:
     # --- фильтр продавца ---
     russian_only: bool = True
     unknown_seller_policy: str = "block"      # allow | block
-    seller_name_signal: bool = False          # имя/фамилия кириллицей = русскоязычный продавец (по умолчанию выкл.)
+    seller_name_signal: bool = True           # имя/фамилия кириллицей = русскоязычный продавец. Maker: вкл — RU-владелец с NFT, но без явного русского био, больше не режется в UNKNOWN_BLOCKED
     phone_mismatch_blocks: bool = True        # чужой телефон отсеивает сразу; false — решают тексты профиля
     allow_hidden_owner: bool = False          # true: лоты, у которых Telegram скрыл владельца, идут в канал
     # Дорогие лоты фильтруются мягче: если цена >= этого значения, пропускаем «скрытого владельца»,
@@ -572,16 +572,16 @@ def _from_env() -> Settings:
         premium_over_floor_percent=max(0, _int(e("PREMIUM_OVER_FLOOR_PERCENT"), 333)),
         rescue_above_top=_bool(e("RESCUE_ABOVE_TOP"), False),
         rare_attribute_percent=max(0.1, min(100.0, _float(e("RARE_ATTRIBUTE_PERCENT"), 1.5))),
-        priority_floor=max(0, _int(e("PRIORITY_FLOOR"), 2500)),
+        priority_floor=max(0, _int(e("PRIORITY_FLOOR"), 1500)),
         priority_poll_interval=max(0.5, _float(e("PRIORITY_POLL_INTERVAL"), 1.5)),
-        priority_share=min(0.9, max(0.1, _float(e("PRIORITY_SHARE"), 0.65))),
+        priority_share=min(0.9, max(0.1, _float(e("PRIORITY_SHARE"), 0.8))),
         max_lot_age=max(0, _int(e("MAX_LOT_AGE"), 180)),
         auto_remove_dead=_bool(e("AUTO_REMOVE_DEAD"), True),
         route_by=("price" if (e("ROUTE_BY") or "").strip().lower() == "price" else "floor"),
         allow_ton_only=_bool(e("ALLOW_TON_ONLY"), False),
         russian_only=_bool(e("RUSSIAN_ONLY"), True),
         unknown_seller_policy=(e("UNKNOWN_SELLER_POLICY") or "block").strip().lower(),
-        seller_name_signal=_bool(e("SELLER_NAME_SIGNAL"), False),
+        seller_name_signal=_bool(e("SELLER_NAME_SIGNAL"), True),
         phone_mismatch_blocks=_bool(e("PHONE_MISMATCH_BLOCKS"), True),
         allow_hidden_owner=_bool(e("ALLOW_HIDDEN_OWNER"), False),
         soft_filter_stars=max(0, _int(e("SOFT_FILTER_STARS"), 1000)),

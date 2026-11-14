@@ -96,7 +96,9 @@ def is_russian_name(name: str | None) -> bool:
     внутри латиницы («Jоhn») не считается. Используется только при SELLER_NAME_SIGNAL=true."""
     if not name or _NON_SLAVIC.search(name):
         return False
-    return bool(re.search(r"[Ѐ-ӿ]{2,}", name) or (_CYR.search(name) and not re.search(r"[A-Za-z]", name)))
+    # dj: «хотя бы одна русская буква» — любая славянская кириллица в имени = русский продавец
+    # (даже вперемешку с латиницей: «Katya Аня», «Vanya_Катя»).
+    return bool(_CYR.search(name))
 
 
 def has_ru_marker(*texts: str | None) -> bool:

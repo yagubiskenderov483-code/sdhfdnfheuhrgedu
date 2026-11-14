@@ -1637,7 +1637,15 @@ class OwnerLookup:
                 if self._captcha_by_session.get(session) == token:
                     self._captcha_by_session.pop(session, None)
                 return True
-            # 3) fallback — админ
+            # 3) fallback — админ. НО: если включён рандом-клик (dj: «пусть рандомом тыкает»),
+            # НЕ блокируем сессию ожиданием админа до 90с (× до 5 раундов = «нажимает спустя 5 мин»).
+            # Рандом уже пробовал кнопки; не прошло — сразу уходим, лот пробует другую сессию.
+            if self._random_fallback:
+                log.info("Lookup: @%s на %s — рандом не прошёл, админа не ждём (быстрый выход)", bot, session)
+                self._captcha.pop(token, None)
+                if self._captcha_by_session.get(session) == token:
+                    self._captcha_by_session.pop(session, None)
+                return False
             if self.on_captcha is None:
                 log.warning("Lookup: @%s просит капчу на %s — пройдите её вручную в этом аккаунте", bot, session)
                 self._captcha.pop(token, None)
