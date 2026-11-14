@@ -610,6 +610,11 @@ class Subscriptions:
 
     async def _grant(self, uid: int, seconds: float, reason: str, inv: dict | None = None) -> str:
         """Выдать доступ: если человек уже в канале — продлить; иначе — одноразовая ссылка."""
+        # снимаем бан (если был кикнут за истечение) — иначе забаненный не зайдёт по новой ссылке
+        try:
+            await self.bot.unban_chat_member(sub_chat_id(), uid, only_if_banned=True)
+        except Exception as e:
+            log.info("Unban before grant for %s skipped: %s", uid, e)
         async with self._lock:
             u = self.user(uid)
             u.pop("unpaid_join", None)
@@ -891,10 +896,13 @@ class Subscriptions:
                         await self.save()
 
     async def kick(self, uid: int) -> bool:
-        """Удалить из канала без ЧС: ban → сразу unban. → True, если человека в канале больше нет."""
+        """Удалить из канала и НЕ дать перезайти: бан ДЕРЖИМ, пока человек не получит доступ снова
+        (его снимает grant() при выдаче/оплате). Раньше был ban → сразу unban «чтоб не было ЧС» —
+        но тогда любой с рабочей ссылкой (общая t.me/+…, сохранённая invite) мгновенно заходил
+        обратно, reconcile снова кикал → бесконечный цикл «кик ↔ вход». Теперь цикла нет."""
         chat = sub_chat_id()
         try:
-            await self.bot.ban_chat_member(chat, uid, until_date=int(time.time()) + 60)
+            await self.bot.ban_chat_member(chat, uid)      # без until_date = бан держится до grant()/оплаты
         except Exception as e:
             es = str(e).lower()
             if "participant" in es or "user not found" in es or "user_not_participant" in es:
@@ -905,11 +913,7 @@ class Subscriptions:
                 return True
             log.warning("Kick %s failed: %s", uid, e)
             return False
-        await asyncio.sleep(1)
-        try:
-            await self.bot.unban_chat_member(chat, uid, only_if_banned=True)
-        except Exception as e:
-            log.warning("Unban %s failed: %s", uid, e)
+        await self._revoke_links(uid)        # гасим его одноразовые ссылки, чтобы точно не перезашёл
         return True
 
     # ------------------------------------------------------------------ payments (TON)

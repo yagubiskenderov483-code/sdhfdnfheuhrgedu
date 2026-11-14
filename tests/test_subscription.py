@@ -48,7 +48,8 @@ async def main():
     # someone else uses link
     await subs.grant(6, 12*3600, "paid")
     await subs.on_join(ev(7, "left", "member", "https://t.me/+L2"))
-    assert 7 in app.bot.bans and 7 in app.bot.unbans
+    # новое поведение: кик держит бан (не разбаниваем сразу), иначе был бы цикл кик↔вход
+    assert 7 in app.bot.bans and 7 not in app.bot.unbans
     assert any(uid == 6 and "+L3" in t for uid, t in app.bot.sent), app.bot.sent
     await subs.on_join(ev(6, "left", "member", "https://t.me/+L3"))
     assert 12*3600-10 < subs.user(6)["until"] - time.time() <= 12*3600
