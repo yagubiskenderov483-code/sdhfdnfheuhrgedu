@@ -325,7 +325,8 @@ class Subscriptions:
                         cur[cf] = max(int(cur.get(cf) or 0), int(v.get(cf) or 0))
                 if v.get("ref_bonus"):
                     cur["ref_bonus"] = max(float(cur.get("ref_bonus") or 0), float(v.get("ref_bonus") or 0))
-                for ff in ("ref_by", "partner", "partner_name", "partner_pct", "promo", "promos_used"):
+                for ff in ("ref_by", "partner", "partner_name", "partner_pct", "promo", "promos_used",
+                           "offer_access"):
                     if not cur.get(ff) and v.get(ff):
                         cur[ff] = v[ff]
                 if v.get("taken") and not cur.get("taken"):
@@ -418,6 +419,7 @@ class Subscriptions:
         await self.load()
         async with self._lock:
             self._merge(data or {})
+            self._apply_tariffs()             # цены из /tarif переживают деплой и после восстановления копии
             for u in self.state["users"].values():
                 if isinstance(u, dict):
                     u.pop("tmp", None)        # копия прочитана — временных записей больше нет
