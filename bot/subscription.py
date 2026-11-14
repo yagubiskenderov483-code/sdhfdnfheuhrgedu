@@ -189,7 +189,8 @@ class Subscriptions:
         self.bot = app.bot
         self.stars_bot = app.bot            # перезаписывается на sub_bot в main.py если задан
         self.state: dict[str, Any] = {"users": {}, "invoices": {}, "links": {}, "seen_tx": [],
-                                      "seen_charges": []}   # charge_id Stars-платежей — идемпотентность при ретрае getUpdates
+                                      "seen_charges": [],   # charge_id Stars-платежей — идемпотентность при ретрае getUpdates
+                                      "trials_used": []}    # uid тех, кто УЖЕ брал пробный — durable, не теряется при деплое
         self._lock = asyncio.Lock()
         self._loaded = False
         # пока копия подписок не восстановлена после деплоя — никого не кикаем и не выдаём пробный час
@@ -291,6 +292,20 @@ class Subscriptions:
         if isinstance(data.get("seen_charges"), list):
             self.state["seen_charges"] = list(dict.fromkeys(
                 data["seen_charges"] + (self.state.get("seen_charges") or [])))[-2000:]
+        # реестр использованных пробных — только добавляем, никогда не теряем (иначе после деплоя
+        # человек берёт пробный повторно → новая ссылка → снова вход; это и есть «постоянно заходят»)
+        if isinstance(data.get("trials_used"), list):
+            self.state["trials_used"] = list(dict.fromkeys(
+                (self.state.get("trials_used") or []) + data["trials_used"]))
+        # подстрахуемся: все, у кого в записи стоит trial=True, тоже попадают в durable-реестр
+        for _k, _u in self.state.get("users", {}).items():
+            if isinstance(_u, dict) and _u.get("trial"):
+                try:
+                    _iu = int(_k)
+                except (TypeError, ValueError):
+                    continue
+                if _iu not in self.state["trials_used"]:
+                    self.state["trials_used"].append(_iu)
         # оплата пришла, а выдача оборвалась перезапуском → повторить выдачу
         for i in self.state["invoices"].values():
             if i.get("paid") and i.get("granted") == "inflight":
@@ -2076,10 +2091,13 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if subs.degraded:
             await q.answer("Пробный период временно недоступен, попробуйте позже", show_alert=True)
             return
-        if subs.user(uid).get("trial"):
+        if subs.user(uid).get("trial") or uid in (subs.state.get("trials_used") or []):
             await q.answer("Пробный период уже использован", show_alert=True)
             return
         subs.user(uid)["trial"] = True
+        subs.state.setdefault("trials_used", [])
+        if uid not in subs.state["trials_used"]:
+            subs.state["trials_used"].append(uid)   # durable — переживёт деплой
         subs._remember_who(subs.user(uid), q.from_user)
         try:
             text = await subs.grant(uid, TRIAL_SECONDS, "Пробные 30 мин активированы.")
