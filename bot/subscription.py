@@ -188,7 +188,8 @@ class Subscriptions:
         # используется отдельно через self.stars_bot (см. main.py).
         self.bot = app.bot
         self.stars_bot = app.bot            # перезаписывается на sub_bot в main.py если задан
-        self.state: dict[str, Any] = {"users": {}, "invoices": {}, "links": {}, "seen_tx": []}
+        self.state: dict[str, Any] = {"users": {}, "invoices": {}, "links": {}, "seen_tx": [],
+                                      "seen_charges": []}   # charge_id Stars-платежей — идемпотентность при ретрае getUpdates
         self._lock = asyncio.Lock()
         self._loaded = False
         # пока копия подписок не восстановлена после деплоя — никого не кикаем и не выдаём пробный час
@@ -276,6 +277,9 @@ class Subscriptions:
                 self.state[k] = max(int(self.state.get(k) or 0), int(data[k]))
         if isinstance(data.get("seen_tx"), list):
             self.state["seen_tx"] = list(dict.fromkeys(data["seen_tx"] + self.state["seen_tx"]))[-2000:]
+        if isinstance(data.get("seen_charges"), list):
+            self.state["seen_charges"] = list(dict.fromkeys(
+                data["seen_charges"] + (self.state.get("seen_charges") or [])))[-2000:]
         # оплата пришла, а выдача оборвалась перезапуском → повторить выдачу
         for i in self.state["invoices"].values():
             if i.get("paid") and i.get("granted") == "inflight":
@@ -828,6 +832,8 @@ class Subscriptions:
             # seen_tx — на всякий случай ограничим 2000 (может прилететь больше через merge)
             if isinstance(self.state.get("seen_tx"), list) and len(self.state["seen_tx"]) > 2000:
                 self.state["seen_tx"] = self.state["seen_tx"][-2000:]
+            if isinstance(self.state.get("seen_charges"), list) and len(self.state["seen_charges"]) > 2000:
+                self.state["seen_charges"] = self.state["seen_charges"][-2000:]
             if drop:
                 await self.save(backup=True)
                 log.info("Subscriptions cleanup: removed %d old invoices (%d → %d)",
@@ -1138,6 +1144,12 @@ class Subscriptions:
         """successful_payment.invoice_payload (= «code:plan») → отметить оплату и выдать доступ."""
         code, _, plan_hint = (payload or "").partition(":")      # payload = «code:plan»
         async with self._lock:
+            # Идемпотентность по charge_id: ретрай getUpdates (после краха до коммита offset)
+            # не должен выдать доступ дважды — особенно на синтетическом пути, где code мог
+            # потеряться и каждый повтор плодил бы новый случайный счёт.
+            seen_ch = self.state.setdefault("seen_charges", [])
+            if charge_id and charge_id in set(seen_ch):
+                return                 # этот платёж уже обработан
             inv = self.state["invoices"].get(code)
             if inv and inv.get("kind") == "stars" and inv.get("paid") and inv.get("charge_id") == charge_id:
                 return                 # повторный апдейт того же платежа
@@ -1151,6 +1163,9 @@ class Subscriptions:
                 inv["granted"] = "inflight"
                 inv["charge_id"] = charge_id
                 inv["paid_stars"] = int(total_amount)
+                if charge_id:
+                    seen_ch.append(charge_id)
+                    self.state["seen_charges"] = seen_ch[-2000:]
                 self.state["revenue_stars"] = int(self.state.get("revenue_stars") or 0) + int(total_amount)
                 self.state["paid_count_stars"] = int(self.state.get("paid_count_stars") or 0) + 1
                 await self.save(backup=True)
@@ -1165,6 +1180,10 @@ class Subscriptions:
                        "paid_stars": int(total_amount)}
                 async with self._lock:
                     self.state["invoices"][syn_code] = syn
+                    if charge_id:
+                        sc = self.state.setdefault("seen_charges", [])
+                        sc.append(charge_id)
+                        self.state["seen_charges"] = sc[-2000:]
                     self.state["revenue_stars"] = int(self.state.get("revenue_stars") or 0) + int(total_amount)
                     self.state["paid_count_stars"] = int(self.state.get("paid_count_stars") or 0) + 1
                     await self.save(backup=True)
