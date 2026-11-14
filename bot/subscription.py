@@ -2644,20 +2644,24 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             await m.answer(f"Выдано <code>{uid}</code>, но написать ему бот не может (он не нажимал /start).\n"
                            f"Перешлите ему это:\n\n{text}")
 
-    @r.message(Command("offer_grant", "offer_access"), _ADM)
+    @r.message(Command("offer_grant", "offer_access", "ff"), _ADM)
     async def cmd_offer_grant(m: Message, command: CommandObject) -> None:
         """Доступ к офферу (независимо от подписки): после «Занять» в личной копии лота
-        у такого пользователя кнопка «Написать с оффером», у остальных — обычная."""
+        у такого пользователя кнопка «Написать с оффером», у остальных — обычная.
+        Формат: /ff @username  или  /ff ID."""
         await subs.load()
         arg = (command.args or "").strip()
         if not arg:
-            await m.answer("Выдать доступ к офферу:\n<code>/offer_grant @username</code> или "
-                           "<code>/offer_grant ID</code>\n\nУ кого есть доступ — после «Занять» в личной "
-                           "копии лота кнопка «Написать с оффером». Снять: /offer_revoke · список: /offer_list")
+            await m.answer("Выдать доступ к офферу:\n<code>/ff @username</code> или <code>/ff ID</code>\n\n"
+                           "У кого есть доступ — после «Занять» в личной копии лота кнопка «Написать с оффером». "
+                           "Снять: /offer_revoke · список: /offer_list")
             return
-        uid = _resolve_user(arg.split()[0])
+        arg0 = arg.split()[0]
+        uid = _resolve_user(arg0)
+        if uid is None and re.fullmatch(r"[1-9]\d{0,15}", arg0, re.ASCII):
+            uid = int(arg0)          # по числовому ID — даже если он ещё не писал боту
         if uid is None:
-            await m.answer("Не нашёл пользователя. Укажите числовой ID или пусть он сначала напишет боту /start.")
+            await m.answer("Не нашёл пользователя. Укажите числовой ID или @username того, кто писал боту.")
             return
         log.warning("AUDIT [offer_grant] админ=%s → uid=%s", m.from_user.id if m.from_user else "?", uid)
         async with subs._lock:
