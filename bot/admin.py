@@ -729,6 +729,19 @@ def build_routers(app: "App") -> list[Router]:
                 name = "бота"
             await q.answer(f"Сначала откройте {name} и нажмите «Старт», затем «Занять»", show_alert=True)
             return
+        # записываем взятый лот в профиль («Логи») — первая содержательная строка поста
+        try:
+            import re as _re
+            _title = ""
+            for _ln in (original or "").splitlines():
+                _clean = _re.sub(r"<[^>]+>", "", _ln).strip()
+                if _clean:
+                    _title = _clean[:80]
+                    break
+            if _title:
+                await app.subs.add_taken(u.id, _title)
+        except Exception:
+            pass
         # 2) потом пост в канале: остаётся только отметка «занят»
         edited = False
         try:

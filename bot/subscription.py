@@ -243,6 +243,21 @@ class Subscriptions:
             log.info("DM to %s failed on all bots: %s", uid, last_err)
         return False
 
+    async def add_taken(self, uid: int, title: str) -> None:
+        """Записать взятый лот в профиль пользователя (показывается в «Логи»)."""
+        if not uid or not title:
+            return
+        try:
+            async with self._lock:
+                u = self.user(uid)
+                lst = u.setdefault("taken", [])
+                lst.append(title)
+                if len(lst) > 30:
+                    del lst[:-30]
+            await self.save()
+        except Exception as e:
+            log.info("add_taken %s failed: %s", uid, e)
+
     async def _delete_link_dm(self, uid: int) -> None:
         """Удалить ранее отправленный DM со ссылкой для входа (человек уже зашёл — ссылка не нужна)."""
         mid = (self.state.get("link_dm") or {}).pop(str(uid), None)
@@ -288,6 +303,8 @@ class Subscriptions:
                 for ff in ("ref_by", "partner", "partner_name", "promo", "promos_used"):
                     if not cur.get(ff) and v.get(ff):
                         cur[ff] = v[ff]
+                if v.get("taken") and not cur.get("taken"):
+                    cur["taken"] = v["taken"]            # логи взятых лотов переживают деплой
                 if not cur.pop("tmp", False):
                     continue                  # своя запись свежее копии — она и верна
                 # запись уже есть (например, создана, пока копия не читалась) — не теряем оплаченное время
@@ -397,7 +414,8 @@ class Subscriptions:
         # (Telegram даёт кнопкам только эти 4 варианта цвета)
         # «Испытать удачу» — не здесь, а на экране выбора способа оплаты тарифа
         buttons = [
-            btn("Оформить подписку", "success", E.PROFILE, callback_data="sub:menu"),
+            btn("Оформить подписку", "success", "6037175527846975726", callback_data="sub:menu"),
+            btn("Профиль", "primary", "6032693626394382504", callback_data="sub:profile"),
             btn("Реферальная система", "primary", E.SHOP, callback_data="sub:ref"),
             btn("Промокод", "danger", E.TAG, callback_data="sub:promo"),
         ]
@@ -2089,6 +2107,42 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                 await q.answer("Не удалось создать ссылку, попробуйте позже", show_alert=True)
             return
         await q.answer("У вас нет активной подписки.", show_alert=True)
+
+    @r.callback_query(F.data == "sub:profile")
+    async def cb_profile(q: CallbackQuery) -> None:
+        if not subs.ready.is_set():
+            await q.answer("Бот перезапускается, попробуйте через минуту", show_alert=True)
+            return
+        await subs.load()
+        uid = q.from_user.id
+        u = subs.state["users"].get(str(uid)) or {}
+        now = time.time()
+        left = u.get("until") or 0
+        active = subs._has_access(u)
+        taken = u.get("taken") or []
+        logs = "\n".join(f"• {html.escape(str(t))}" for t in taken[-10:]) if taken else "—"
+        e_prof = _tg_emoji("6032693626394382504", "👤")
+        e_id   = _tg_emoji("5927118708873892465", "🆔")
+        e_log  = _tg_emoji("6030400221232501136", "📋")
+        e_sub  = _tg_emoji("5769126056262898415", "⭐️")
+        if active:
+            if left == FOREVER:
+                sub_line = f"<b>{e_sub} Подписка: Активна</b>\n<i>навсегда</i>"
+            else:
+                secs = max(0, int(left - now))
+                h, mm = secs // 3600, (secs % 3600) // 60
+                sub_line = f"<b>{e_sub} Подписка: Активна</b>\n<i>{h}ч {mm}м</i>"
+        else:
+            sub_line = f"<b>{e_sub} Подписка: неактивна</b>"
+        text = (f"<b>{e_prof} Профиль</b>\n\n"
+                f"<b>{e_id} id:</b> <code>{uid}</code>\n\n"
+                f"<b>{e_log} Логи:</b>\n<b>{logs}</b>\n\n"
+                f"{sub_line}")
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [btn("Подписка", "success", "6037175527846975726", callback_data="sub:menu")],
+            [btn("Меню", "primary", "6032742198179532882", callback_data="sub:home")]])
+        await _safe_edit(q.message, text, reply_markup=kb)
+        await q.answer()
 
     @r.message(Command("my"), F.chat.type == "private")
     async def cmd_my(m: Message) -> None:
