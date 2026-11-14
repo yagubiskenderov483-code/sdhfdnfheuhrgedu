@@ -191,7 +191,8 @@ class Subscriptions:
         self.state: dict[str, Any] = {"users": {}, "invoices": {}, "links": {}, "seen_tx": [],
                                       "seen_charges": [],   # charge_id Stars-платежей — идемпотентность при ретрае getUpdates
                                       "trials_used": [],    # uid тех, кто УЖЕ брал пробный — durable, не теряется при деплое
-                                      "link_dm": {}}        # uid → message_id DM со ссылкой (удаляем при входе)
+                                      "link_dm": {},        # uid → message_id DM со ссылкой (удаляем при входе)
+                                      "tariffs": {}}        # code → [ton, stars] — цены, заданные через /tarif
         self._lock = asyncio.Lock()
         self._loaded = False
         # пока копия подписок не восстановлена после деплоя — никого не кикаем и не выдаём пробный час
@@ -289,7 +290,21 @@ class Subscriptions:
                 self._merge(json.loads(raw))
         except Exception as e:
             log.warning("Subscriptions load failed: %s", e)
+        self._apply_tariffs()        # переприменяем сохранённые цены тарифов (переживают деплой)
         self._loaded = True
+
+    def _apply_tariffs(self) -> None:
+        """Применяет сохранённые через /tarif цены поверх PLANS (title и длительность — из кода)."""
+        ovr = self.state.get("tariffs") or {}
+        for code, pr in ovr.items():
+            if code in PLANS and isinstance(pr, (list, tuple)) and len(pr) >= 2:
+                title, _ton, secs, _stars = PLANS[code]
+                try:
+                    ton = float(pr[0])
+                    stars = int(pr[1]) if pr[1] not in (None, "", "-") else None
+                    PLANS[code] = (title, ton, secs, stars)
+                except (TypeError, ValueError):
+                    continue
 
     def _merge(self, data: dict) -> None:
         for k in ("invoices", "links"):
@@ -337,6 +352,8 @@ class Subscriptions:
                 data["seen_charges"] + (self.state.get("seen_charges") or [])))[-2000:]
         # реестр использованных пробных — только добавляем, никогда не теряем (иначе после деплоя
         # человек берёт пробный повторно → новая ссылка → снова вход; это и есть «постоянно заходят»)
+        if isinstance(data.get("tariffs"), dict):
+            self.state["tariffs"] = {**(self.state.get("tariffs") or {}), **data["tariffs"]}
         if isinstance(data.get("trials_used"), list):
             self.state["trials_used"] = list(dict.fromkeys(
                 (self.state.get("trials_used") or []) + data["trials_used"]))
@@ -2636,6 +2653,59 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             subs.user(uid).pop("offer_access", None)
         await subs.save(backup=True)
         await m.answer(f"Доступ к офферу снят с <code>{uid}</code>.")
+
+    @r.message(Command("tarif", "tariff", "price"), _ADM)
+    async def cmd_tarif(m: Message, command: CommandObject) -> None:
+        """Менять цены тарифов: /tarif <код> <TON> [звёзды]. Сохраняется, переживает деплой."""
+        await subs.load()
+        args = (command.args or "").split()
+        if not args:
+            lines = ["<b>Цены тарифов</b>\n", "Изменить: <code>/tarif код TON [звёзды]</code>",
+                     "Коды: " + ", ".join(f"<code>{c}</code>" for c in PLANS) + "\n"]
+            for code, (title, ton, _secs, stars) in PLANS.items():
+                lines.append(f"<code>{code}</code> — {title}: <b>{ton:g} TON</b>"
+                             + (f" / <b>{stars} ⭐</b>" if stars else " (только TON)"))
+            lines.append("\nПример: <code>/tarif 12h 2.5 300</code>")
+            await m.answer("\n".join(lines))
+            return
+        code = args[0].strip()
+        if code not in PLANS:
+            await m.answer(f"Нет такого тарифа «{html.escape(code)}». Коды: "
+                           + ", ".join(PLANS) + ".\nЦены и помощь: /tarif")
+            return
+        if len(args) < 2:
+            await m.answer("Укажи цену: <code>/tarif " + code + " <TON> [звёзды]</code>")
+            return
+        try:
+            ton = float(args[1].replace(",", "."))
+            if ton <= 0:
+                raise ValueError
+        except ValueError:
+            await m.answer("Цена TON должна быть положительным числом, например <code>2.5</code>.")
+            return
+        stars = None
+        if len(args) >= 3 and args[2] not in ("-", "0"):
+            try:
+                stars = int(args[2])
+                if stars <= 0:
+                    stars = None
+            except ValueError:
+                await m.answer("Звёзды — целое число или <code>-</code> (только TON).")
+                return
+        elif len(args) >= 3 and args[2] in ("-", "0"):
+            stars = None
+        else:
+            stars = PLANS[code][3]            # звёзды не указаны — оставляем прежние
+        title, _ton, secs, _stars = PLANS[code]
+        PLANS[code] = (title, ton, secs, stars)
+        async with subs._lock:
+            subs.state.setdefault("tariffs", {})[code] = [ton, stars]
+        await subs.save(backup=True)
+        log.warning("AUDIT [tarif] админ=%s %s → %g TON / %s звёзд",
+                    m.from_user.id if m.from_user else "?", code, ton, stars)
+        await m.answer(f"Тариф <b>{title}</b> обновлён: <b>{ton:g} TON</b>"
+                       + (f" / <b>{stars} ⭐</b>" if stars else " (только TON)")
+                       + "\n\nВсе цены: /tarif")
 
     @r.message(Command("partner"), _ADM)
     async def cmd_partner(m: Message, command: CommandObject) -> None:

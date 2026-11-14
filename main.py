@@ -1119,6 +1119,7 @@ class App:
         cmds.append(BotCommand(command="grant", description="Выдать подписку: /grant ID|@юз 24|3д|навсегда"))
         cmds.append(BotCommand(command="revoke", description="Забрать подписку: /revoke ID|@юз"))
         cmds.append(BotCommand(command="broadcast", description="Рассылка всем пользователям бота"))
+        cmds.append(BotCommand(command="tarif", description="Цены тарифов: /tarif 12h 2.5 300"))
         try:
             # Обычным пользователям — только /start (без админ-команд в синей кнопке «Меню»).
             # Полный список команд — только админам, персональным scope по их chat_id.
