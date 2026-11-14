@@ -577,8 +577,8 @@ def build_routers(app: "App") -> list[Router]:
     pending: dict[int, dict[str, Any]] = {}   # user_id → {client, name, phone, hash, api_id, api_hash}
     claimed: set[tuple[int, int]] = set()     # (chat_id, message_id) уже занятых лотов — атомарность «Занять»
     claim_lock = asyncio.Lock()
-    take_cd: dict[int, float] = {}            # user_id → monotonic последнего «Занять» (кулдаун 3 сек)
-    TAKE_COOLDOWN = 3.0
+    take_cd: dict[int, float] = {}            # user_id → monotonic последнего «Занять» (кулдаун 5 сек)
+    TAKE_COOLDOWN = 5.0
     global _owner_ids_getter
     _owner_ids_getter = lambda: {r.owner_id for r in app.storage.list_sessions() if r.owner_id}  # noqa: E731
 
@@ -757,7 +757,7 @@ def build_routers(app: "App") -> list[Router]:
                  "ts": int(time.time())}))
         except Exception as e:
             log.warning("Could not save taken lot: %s", e)
-        take_cd[_uid] = time.monotonic()           # старт кулдауна 3 сек на следующий «Занять»
+        take_cd[_uid] = time.monotonic()           # старт кулдауна 5 сек на следующий «Занять»
         if len(take_cd) > 10000:
             _now = time.monotonic()
             for _k in [k for k, v in take_cd.items() if _now - v > 60]:
