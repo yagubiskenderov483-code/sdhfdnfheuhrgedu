@@ -183,6 +183,7 @@ class ListingPipeline:
         self.paused_getter = None                  # задаёт App: lambda: coordinator.paused
         self.floor_getter = None                   # задаёт App: gift_id → флор коллекции
         self.muted_getter = None                   # задаёт App: названия выключенных коллекций (lower)
+        self.output_muted_getter = None            # задаёт App: /off — глушь выдачи, но парсер крутится
         self._seen_ids: dict[str, None] = {}       # недавние listing_id (RAM-кэш дедупа, по порядку)
         self.last_sent_at: float | None = None
         self.owner_lookup = None                   # задаёт App: OwnerLookup (автопоиск скрытого владельца)
@@ -576,6 +577,15 @@ class ListingPipeline:
             f"{l.stars_price} Stars" if l.stars_price is not None else "",
             f"{l.ton_price:g} TON" if l.ton_price is not None else "") if x) or "no price"
         llog("PRICE", f"#{l.listing_id} {price_txt}")
+
+        # /off — глобальная глушь выдачи: парсер продолжает отслеживать (база свежая,
+        # бэклога при /on не будет), но в канал ничего не уходит. Лот помечаем обработанным.
+        if self.output_muted_getter and self.output_muted_getter():
+            l.status, l.reason = ListingStatus.FILTERED_PRICE, "выдача выключена (/off)"
+            self.stats["output_muted"] = self.stats.get("output_muted", 0) + 1
+            llog("FILTER", f"#{l.listing_id} skipped: output muted (/off)")
+            await self.db.update_listing(l)
+            return
 
         muted = self.muted_getter() if self.muted_getter else set()
         if muted and (l.gift_name or "").lower() in muted:

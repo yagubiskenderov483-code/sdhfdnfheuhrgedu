@@ -191,6 +191,8 @@ class App:
         self.pipeline.floor_getter = lambda gid: getattr(self.coordinator.states.get(gid), "floor_stars", None)
         # коллекции, выключенные админом через /mute (хранятся в резервной копии)
         self.pipeline.muted_getter = lambda: set(self.backup.flags.get("muted") or [])
+        # /off — глобальная глушь выдачи (парсер работает, лоты в канал не идут)
+        self.pipeline.output_muted_getter = lambda: bool(getattr(self, "output_muted", False))
         self.dp = Dispatcher(storage=MemoryStorage())
         # команды не теряются при повторе; долгая команда сразу отвечает «⏳ Выполняю…»
         from bot.resilience import ResponsiveReplies
@@ -242,6 +244,7 @@ class App:
         self.booting = True          # аккаунты ещё подключаются после запуска
         self.bench: dict | None = None
         self.users_closed = False    # /close: пользователям «Парсер закрыт», а лоты идут
+        self.output_muted = False    # /off: глушь выдачи — парсер крутится, лоты в канал не идут
 
     # ------------------------------------------------------------------ diagnostics
     async def run_check(self) -> tuple[str, str | None]:
@@ -381,11 +384,22 @@ class App:
             n = self.storage.wipe_proxies()          # прокси выключены — стираем пул и привязки
             if n:
                 log.info("Proxies disabled: removed proxy from %d account(s)", n)
+        # Миграция семантики: раньше /off ставил paused (и пользователям было «Парсер закрыт»).
+        # Теперь paused ставит ТОЛЬКО /close, а /off — лишь глушь выдачи. Старый /close ставил
+        # users_closed, а не paused, поэтому любой persisted paused пришёл от старого /off —
+        # и не должен держать бота «закрытым». При первом старте нового кода (нет ключа
+        # output_muted в бэкапе) чистим устаревший paused.
+        if "output_muted" not in self.backup.flags:
+            self.backup.restored_paused = False
+            await self.db.kv_set("paused", 0)
+            self.backup.flags["output_muted"] = 0
+            log.info("Migration: старый /off-paused сброшен — без /close парсер открыт")
         if self.backup.restored_paused:
             await step("restore pause", self.db.kv_set("paused", 1))
         self.users_closed = bool(self.backup.flags.get("users_closed"))
+        self.output_muted = bool(self.backup.flags.get("output_muted"))   # /off переживает деплой
         if self.backup.restored_paused or str(await self.db.kv_get("paused") or "0") == "1":
-            self.coordinator.paused = True     # /off действует сразу, ещё до подключения аккаунтов
+            self.coordinator.paused = True     # /close действует сразу, ещё до подключения аккаунтов
         if settings.startup_delay > 0 and self.storage.list_sessions():
             # при деплое старая копия бота может ещё работать: если обе подключат один аккаунт,
             # Telegram аннулирует его (AUTH_KEY_DUPLICATED). Даём старой копии завершиться.
@@ -653,6 +667,14 @@ class App:
                 log.info("Backup restored in background — connecting restored accounts and saving")
                 self.subs.degraded = False
                 # применить восстановленное состояние, как при обычном запуске
+                # (та же миграция: старый /off-paused не держит бота «закрытым»)
+                if "output_muted" not in self.backup.flags:
+                    self.backup.restored_paused = False
+                    self.backup.flags["output_muted"] = 0
+                    try:
+                        await self.db.kv_set("paused", 0)
+                    except Exception:
+                        pass
                 if self.backup.restored_paused:
                     self.coordinator.paused = True
                     try:
@@ -660,6 +682,7 @@ class App:
                     except Exception as e:
                         log.warning("Could not store paused flag: %s", e)
                 self.users_closed = bool(self.backup.flags.get("users_closed"))
+                self.output_muted = bool(self.backup.flags.get("output_muted"))
                 self.sessions.limiter.set_rate(settings.global_rps)
                 self.sessions._base_rps = float(settings.global_rps)
                 found = bool(self.backup.backup_names) or self.backup.restored_count
@@ -717,7 +740,9 @@ class App:
                      + (f" · ошибки: {c.get('ERROR', 0) + c.get('AUTH_ERROR', 0)}"
                         if c.get("ERROR") or c.get("AUTH_ERROR") else ""),
                      f"Коллекций в работе: {live}/{total}",
-                     "⏸ Парсер выключен (/on)" if self.coordinator.paused else "Парсер работает"]
+                     "⏹ Парсер остановлен (/open)" if self.coordinator.paused else "Парсер работает"]
+            if getattr(self, "output_muted", False):
+                lines.append("🔇 Выдача лотов выключена (/on)")
             if getattr(self, "users_closed", False):
                 lines.append("Для пользователей закрыто (/open)")
             strict = []
@@ -1073,10 +1098,10 @@ class App:
             BotCommand(command="stats", description="Статистика"),
             BotCommand(command="last", description="Последние лоты и почему не отправлены"),
             BotCommand(command="collections", description="Какие коллекции отслеживаются"),
-            BotCommand(command="off", description="Выключить парсер (пользователям: «Парсер закрыт»)"),
-            BotCommand(command="on", description="Включить парсер"),
-            BotCommand(command="close", description="Закрыть для пользователей (лоты идут)"),
-            BotCommand(command="open", description="Открыть для пользователей"),
+            BotCommand(command="off", description="Выключить выдачу лотов (парсер работает дальше)"),
+            BotCommand(command="on", description="Включить выдачу/парсер"),
+            BotCommand(command="close", description="Остановить парсер полностью"),
+            BotCommand(command="open", description="Запустить парсер"),
             BotCommand(command="top", description="Самые активные коллекции за сутки"),
             BotCommand(command="find", description="Всё о коллекции: /find название"),
             BotCommand(command="mute", description="Выключить лоты коллекции: /mute название"),

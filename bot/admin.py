@@ -854,11 +854,13 @@ def build_routers(app: "App") -> list[Router]:
         coord, pipe = app.coordinator, app.pipeline
         running = coord.mode == "LIVE" and not coord.paused
         if coord.paused:
-            head = "⏸ <b>Парсер выключен</b> · включить: /on"
+            head = "⏹ <b>Парсер остановлен</b> (/close) · запустить: /open"
         elif running:
             head = "<b>Трекер работает</b>"
         else:
             head = f"<b>Запуск: {coord.mode}</b>"
+        if getattr(app, "output_muted", False):
+            head += "\n🔇 Выдача лотов выключена (/off) — парсер отслеживает, но в канал не шлёт · включить: /on"
         if getattr(app, "users_closed", False):
             head += "\nДля пользователей закрыто (/open)"
         cycle = coord.avg_cycle_seconds()
@@ -1220,44 +1222,51 @@ def build_routers(app: "App") -> list[Router]:
                                f"или добавь каждый аккаунт через /add_session.")
 
     @admin.message(or_f(Command("pause", "off"), F.text == BTN_PAUSE))
-    async def cmd_pause(m: Message) -> None:
+    async def cmd_off(m: Message) -> None:
+        # /off — ГЛУШЬ ВЫДАЧИ: лоты в канал не идут, но парсер продолжает отслеживать
+        # (база свежая → при /on бэклога не будет). Сам парсер НЕ останавливается — для этого /close.
+        if not app.subs.ready.is_set():
+            await m.answer("⏳ Бот ещё восстанавливает данные после запуска — повторите через минуту.")
+            return
+        app.output_muted = True
+        app.backup.flags["output_muted"] = 1
+        await app.backup.save()          # чтобы выключение сохранилось и после деплоя
+        await m.answer("Выдача лотов выключена (/off). Парсер продолжает отслеживать — база остаётся "
+                       "свежей, при включении бэклога не будет.\n"
+                       "Включить выдачу: /on · полностью остановить парсер: /close")
+
+    @admin.message(Command("close"))
+    async def cmd_close(m: Message) -> None:
+        # /close — ОСТАНОВКА ПАРСЕРА: запросы к Telegram не идут вообще, пользователям «Парсер закрыт».
         if not app.subs.ready.is_set():
             await m.answer("⏳ Бот ещё восстанавливает данные после запуска — повторите через минуту.")
             return
         await app.coordinator.set_paused(True)
-        await app.backup.save()          # чтобы выключение сохранилось и после деплоя
-        await m.answer("Парсер выключен. Лоты не ищутся, пользователям бот пишет «Парсер закрыт».\n"
-                       "Включить: /on")
-
-    @admin.message(Command("close"))
-    async def cmd_close(m: Message) -> None:
-        if not app.subs.ready.is_set():
-            await m.answer("⏳ Бот ещё восстанавливает данные после запуска — повторите через минуту.")
-            return
-        app.users_closed = True
-        app.backup.flags["users_closed"] = 1
         await app.backup.save()
-        await m.answer("Для пользователей закрыто: бот пишет «Парсер закрыт», подписку не продаёт.\n"
-                       "Лоты в канал продолжают идти. Открыть: /open · выключить сам парсинг: /off")
+        await m.answer("Парсер остановлен (/close): запросы к Telegram не идут, пользователям «Парсер закрыт».\n"
+                       "Запустить снова: /open (или /on).")
 
     @admin.message(Command("open"))
     async def cmd_open(m: Message) -> None:
-        if not app.subs.ready.is_set():
-            await m.answer("⏳ Бот ещё восстанавливает данные после запуска — повторите через минуту.")
-            return
-        app.users_closed = False
-        app.backup.flags["users_closed"] = 0
-        await app.backup.save()
-        await m.answer("Для пользователей открыто.")
-
-    @admin.message(or_f(Command("resume", "on"), F.text == BTN_RESUME))
-    async def cmd_resume(m: Message) -> None:
+        # /open — ЗАПУСК ПАРСЕРА (пара к /close).
         if not app.subs.ready.is_set():
             await m.answer("⏳ Бот ещё восстанавливает данные после запуска — повторите через минуту.")
             return
         await app.coordinator.set_paused(False)
         await app.backup.save()
-        await m.answer("Парсер включён.")
+        await m.answer("Парсер запущен.")
+
+    @admin.message(or_f(Command("resume", "on"), F.text == BTN_RESUME))
+    async def cmd_on(m: Message) -> None:
+        # /on — ПОЛНОЕ ВКЛЮЧЕНИЕ: снимает и глушь выдачи (/off), и остановку парсера (/close).
+        if not app.subs.ready.is_set():
+            await m.answer("⏳ Бот ещё восстанавливает данные после запуска — повторите через минуту.")
+            return
+        await app.coordinator.set_paused(False)
+        app.output_muted = False
+        app.backup.flags["output_muted"] = 0
+        await app.backup.save()
+        await m.answer("Парсер работает, выдача лотов включена.")
 
     @admin.message(Command("proxies"), F.chat.type == "private")   # пароли прокси — только в личке
     async def cmd_proxies(m: Message, command: CommandObject) -> None:
