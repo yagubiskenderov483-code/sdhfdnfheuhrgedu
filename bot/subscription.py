@@ -41,8 +41,8 @@ if TYPE_CHECKING:
 
 log = get_logger("subs")
 
-WELCOME = ("<b>Добро Пожаловать в лучший Telegram Tracker NFT</b>\n\n"
-           "Tracker - отслеживает все лоты выставленные в настоящее время")
+WELCOME = ("<b>Добро пожаловать в лучший Telegram Tracker NFT</b>\n\n"
+           "Tracker отслеживает все лоты, выставленные в настоящее время")
 
 CLOSED_TEXT = "Парсер закрыт"
 GATE_TEXT = ('<tg-emoji emoji-id="6030563507299160824">❗️</tg-emoji> '
