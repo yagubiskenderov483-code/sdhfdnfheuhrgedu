@@ -192,7 +192,8 @@ class Subscriptions:
                                       "seen_charges": [],   # charge_id Stars-платежей — идемпотентность при ретрае getUpdates
                                       "trials_used": [],    # uid тех, кто УЖЕ брал пробный — durable, не теряется при деплое
                                       "link_dm": {},        # uid → message_id DM со ссылкой (удаляем при входе)
-                                      "tariffs": {}}        # code → [ton, stars] — цены, заданные через /tarif
+                                      "tariffs": {},        # code → [ton, stars] — цены, заданные через /tarif
+                                      "sale": {}}           # {pct, until} — распродажа на все тарифы (/sale)
         self._lock = asyncio.Lock()
         self._loaded = False
         # пока копия подписок не восстановлена после деплоя — никого не кикаем и не выдаём пробный час
@@ -324,7 +325,7 @@ class Subscriptions:
                         cur[cf] = max(int(cur.get(cf) or 0), int(v.get(cf) or 0))
                 if v.get("ref_bonus"):
                     cur["ref_bonus"] = max(float(cur.get("ref_bonus") or 0), float(v.get("ref_bonus") or 0))
-                for ff in ("ref_by", "partner", "partner_name", "promo", "promos_used"):
+                for ff in ("ref_by", "partner", "partner_name", "partner_pct", "promo", "promos_used"):
                     if not cur.get(ff) and v.get(ff):
                         cur[ff] = v[ff]
                 if v.get("taken") and not cur.get("taken"):
@@ -354,6 +355,8 @@ class Subscriptions:
         # человек берёт пробный повторно → новая ссылка → снова вход; это и есть «постоянно заходят»)
         if isinstance(data.get("tariffs"), dict):
             self.state["tariffs"] = {**(self.state.get("tariffs") or {}), **data["tariffs"]}
+        if isinstance(data.get("sale"), dict):
+            self.state["sale"] = data["sale"]        # распродажа переживает деплой
         if isinstance(data.get("trials_used"), list):
             self.state["trials_used"] = list(dict.fromkeys(
                 (self.state.get("trials_used") or []) + data["trials_used"]))
@@ -484,7 +487,7 @@ class Subscriptions:
         rows = []
         if not self.user(uid).get("trial"):
             rows.append([btn("30 мин бесплатно", "success", E.GIFT, callback_data="sub:trial")])
-        pct = self.promo_pct(uid)
+        pct = max(self.promo_pct(uid), self.sale_pct())      # распродажа или промокод — что больше
         styles = ("primary", "danger", "success")            # тарифы — разными цветами, без «пустых»
         for i, (code, (title, price, secs_, stars)) in enumerate(PLANS.items()):
             p_ton = _disc(price, pct)
@@ -499,14 +502,21 @@ class Subscriptions:
 
     def plans_text(self, uid: int) -> str:
         """«Подписка» + цены тарифов: 1.2 <TON> / 150 <Stars> (кастомные эмодзи Maker'а)."""
-        pct = self.promo_pct(uid)
+        sale = self.sale_pct()
+        promo = self.promo_pct(uid)
+        pct = max(promo, sale)
         t, st = _tg_emoji(EMOJI_TON, "💎"), _tg_emoji(EMOJI_STAR, "⭐️")
         lines = []
         for _code, (title, price, _, stars) in PLANS.items():
             p_ton = _disc(price, pct)
             p_st = max(1, round(_disc(stars, pct))) if stars else None
             lines.append(f"<b>{title}</b> — {p_ton:.4g} {t}" + (f" / {p_st} {st}" if p_st else ""))
-        disc = f"\n\nСкидка по промокоду: <b>−{pct}%</b>" if pct else ""
+        if sale and sale >= promo:
+            disc = f"\n\n🔥 <b>РАСПРОДАЖА −{sale}% на все тарифы!</b>"
+        elif promo:
+            disc = f"\n\nСкидка по промокоду: <b>−{promo}%</b>"
+        else:
+            disc = ""
         return (f'{_tg_emoji(EMOJI_SUB, "💎")} <b>Подписка</b>\n\n' + "\n".join(lines) + disc
                 + "\n\nВыберите тариф")
 
@@ -1003,10 +1013,24 @@ class Subscriptions:
         return (f"https://app.tonkeeper.com/transfer/{settings.sub_ton_address}"
                 f"?amount={int(inv['nano'])}&text={quote(code)}")
 
+    def sale_pct(self) -> int:
+        """Текущая распродажа (/sale) — скидка на ВСЕ тарифы для всех. 0 если нет/истекла."""
+        s = self.state.get("sale") or {}
+        pct = int(s.get("pct") or 0)
+        if pct <= 0:
+            return 0
+        until = float(s.get("until") or 0)
+        if until and time.time() > until:
+            return 0
+        return min(90, pct)
+
     def _promo_for(self, uid: int, plan: str) -> tuple[int, str | None]:
         if is_game(plan):
-            return 0, None                     # на билет игры промокод не действует
+            return 0, None                     # на билет игры промокод/распродажа не действуют
         pct = self.promo_pct(uid)
+        sale = self.sale_pct()
+        if sale > pct:                          # распродажа лучше промокода — применяем её (без стака)
+            return sale, "SALE"
         return (pct, (self.state["users"].get(str(uid)) or {}).get("promo")) if pct else (0, None)
 
     async def new_invoice(self, uid: int, plan: str, ball: str | None = None) -> str:
@@ -2707,17 +2731,91 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
                        + (f" / <b>{stars} ⭐</b>" if stars else " (только TON)")
                        + "\n\nВсе цены: /tarif")
 
+    @r.message(Command("sale", "skidka"), _ADM)
+    async def cmd_sale(m: Message, command: CommandObject) -> None:
+        """Распродажа на ВСЕ тарифы: /sale 20 [срок] — −20%. /sale off — отключить.
+        Срок: 2h / 30m / 1d (или без срока — бессрочно). Авто-пост в канал."""
+        await subs.load()
+        args = (command.args or "").split()
+        if not args:
+            cur = subs.sale_pct()
+            if cur:
+                s = subs.state.get("sale") or {}
+                until = float(s.get("until") or 0)
+                tail = (f", до окончания: {_fmt_secs(max(0, until - time.time()))}" if until else ", бессрочно")
+                await m.answer(f"Сейчас активна распродажа <b>−{cur}%</b> на все тарифы{tail}.\n\n"
+                               "Изменить: <code>/sale 20 2h</code> · отключить: <code>/sale off</code>")
+            else:
+                await m.answer("Распродажи нет.\n\nВключить: <code>/sale 20 2h</code> (−20% на 2 часа) "
+                               "или <code>/sale 20</code> (бессрочно). Отключить: <code>/sale off</code>")
+            return
+        if args[0].lower() in ("off", "стоп", "0", "-"):
+            async with subs._lock:
+                subs.state["sale"] = {}
+            await subs.save(backup=True)
+            await m.answer("Распродажа отключена. Цены вернулись к обычным.")
+            return
+        try:
+            pct = int(args[0].rstrip("%"))
+            if not (1 <= pct <= 90):
+                raise ValueError
+        except ValueError:
+            await m.answer("Процент 1–90, например <code>/sale 20</code>.")
+            return
+        until = 0.0
+        dur_txt = "бессрочно"
+        if len(args) >= 2:
+            md = re.fullmatch(r"(\d+)\s*([mhdмчд])", args[1].lower())
+            if not md:
+                await m.answer("Срок: <code>30m</code> / <code>2h</code> / <code>1d</code> (или без срока).")
+                return
+            n, unit = int(md.group(1)), md.group(2)
+            mult = {"m": 60, "м": 60, "h": 3600, "ч": 3600, "d": 86400, "д": 86400}[unit]
+            until = time.time() + n * mult
+            dur_txt = _fmt_secs(n * mult)
+        async with subs._lock:
+            subs.state["sale"] = {"pct": pct, "until": until}
+        await subs.save(backup=True)
+        log.warning("AUDIT [sale] админ=%s −%s%% срок=%s", m.from_user.id if m.from_user else "?", pct, dur_txt)
+        # авто-пост в канал
+        posted = ""
+        ch = settings.required_channel
+        if ch:
+            try:
+                bot_un = await _bot_username(m.bot)
+                tail = f" на {dur_txt}" if until else ""
+                txt = (f"{_tg_emoji('6037175527846975726', '🔥')} <b>РАСПРОДАЖА −{pct}% на все тарифы!</b>{tail}\n\n"
+                       f"Успей оформить подписку со скидкой 👇")
+                kb = InlineKeyboardMarkup(inline_keyboard=[[btn("Оформить со скидкой", "success",
+                        "6037175527846975726", url=f"https://t.me/{bot_un}?start=sale")]])
+                await m.bot.send_message(ch, txt, reply_markup=kb)
+                posted = "\nПост в канал отправлен."
+            except Exception as e:
+                posted = f"\nВ канал не отправилось: {e}"
+        await m.answer(f"Распродажа включена: <b>−{pct}%</b> на все тарифы ({dur_txt}). "
+                       f"Скидка видна в ценах, кнопках и счёте.{posted}")
+
     @r.message(Command("partner"), _ADM)
     async def cmd_partner(m: Message, command: CommandObject) -> None:
         """Партнёрская ссылка: даёшь человеку, он кидает её в свою группу, покупки пришедших
         по ней засчитываются ему (кол-во оплат + выручка). Работает поверх реф-системы."""
         await subs.load()
-        parts = (command.args or "").split(maxsplit=1)
-        if not parts:
+        raw = (command.args or "").strip()
+        if not raw:
             await m.answer("Партнёрская ссылка:\n<code>/partner @username</code> или "
-                           "<code>/partner ID [имя]</code>\n\nСоздаёт реф-ссылку для партнёра — он кидает её "
-                           "в свою группу, покупки пришедших засчитываются ему. Список и выручка: /partners")
+                           "<code>/partner ID [имя] [%]</code>\n\nСоздаёт реф-ссылку для партнёра — он кидает её "
+                           f"в свою группу, покупки пришедших засчитываются ему. Доля по умолчанию "
+                           f"{settings.partner_percent}%, можно задать свою: <code>/partner 123 Вася 40%</code>.\n"
+                           "Список и выручка: /partners")
             return
+        # вытащим необязательный процент (последний токен вида «40%» или «40проц»)
+        pct_override = None
+        toks = raw.split()
+        mpct = re.fullmatch(r"(\d{1,3})%?", toks[-1]) if toks else None
+        if len(toks) >= 2 and mpct and toks[-1].endswith("%"):
+            pct_override = max(0, min(100, int(mpct.group(1))))
+            toks = toks[:-1]
+        parts = (" ".join(toks)).split(maxsplit=1)
         arg0 = parts[0].strip()
         uid = _resolve_user(arg0)
         if uid is None and re.fullmatch(r"[1-9]\d{0,15}", arg0, re.ASCII):
@@ -2726,12 +2824,14 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             await m.answer("Не нашёл пользователя. Укажите числовой ID (партнёру не обязательно быть в боте) "
                            "или @username того, кто уже писал боту.")
             return
-        log.warning("AUDIT [partner] админ=%s → uid=%s", m.from_user.id if m.from_user else "?", uid)
+        log.warning("AUDIT [partner] админ=%s → uid=%s pct=%s", m.from_user.id if m.from_user else "?", uid, pct_override)
         async with subs._lock:
             u = subs.user(uid)
             u["partner"] = True
             if len(parts) > 1:
                 u["partner_name"] = parts[1].strip()
+            if pct_override is not None:
+                u["partner_pct"] = pct_override
         await subs.save(backup=True)
         try:
             link = f"https://t.me/{await _bot_username(m.bot)}?start=ref_{uid}"
@@ -2739,13 +2839,16 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             link = f"?start=ref_{uid}"
         info = subs.ref_info(uid)
         rev = int(subs.user(uid).get("ref_revenue_nano") or 0) / 1e9
+        pct = int(subs.user(uid).get("partner_pct") or settings.partner_percent)
+        payout = rev * pct / 100
         name = html.escape(parts[1].strip()) if len(parts) > 1 else str(uid)
-        await m.answer(f"<b>Партнёр: {name}</b>\n\n"
+        await m.answer(f"<b>Партнёр: {name}</b> · доля <b>{pct}%</b>\n\n"
                        f"Ссылка (дайте партнёру, он кидает её в свою группу):\n<code>{link}</code>\n\n"
                        f"Пришло по ссылке: <b>{info['count']}</b>\n"
                        f"Оплатили: <b>{info['paid']}</b>\n"
-                       f"Выручка от его людей: <b>{rev:.2f} TON</b>\n\n"
-                       f"Все партнёры и выручка: /partners")
+                       f"Выручка от его людей: <b>{rev:.2f} TON</b>\n"
+                       f"К выплате партнёру ({pct}%): <b>{payout:.2f} TON</b>\n\n"
+                       f"Все партнёры и выплаты: /partners")
 
     @r.message(Command("partners"), _ADM)
     async def cmd_partners(m: Message) -> None:
@@ -2756,13 +2859,21 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if not rows:
             await m.answer("Партнёров и рефереров пока нет. Создать: <code>/partner @username</code>")
             return
+        total_payout = 0.0
         lines = [f"<b>Партнёры / рефереры ({len(rows)}):</b>", ""]
         for k, u in rows[:50]:
             who = u.get("partner_name") or (("@" + u["username"]) if u.get("username") else k)
             rev = int(u.get("ref_revenue_nano") or 0) / 1e9
+            pct = int(u.get("partner_pct") or settings.partner_percent)
+            payout = rev * pct / 100
+            total_payout += payout
             mark = "⭐ " if u.get("partner") else ""
+            pay_part = f", выплата {payout:.2f} TON ({pct}%)" if u.get("partner") else ""
             lines.append(f"{mark}<code>{k}</code> {html.escape(str(who))} — пришло "
-                         f"{int(u.get('ref_count') or 0)}, оплат {int(u.get('ref_paid') or 0)}, {rev:.2f} TON")
+                         f"{int(u.get('ref_count') or 0)}, оплат {int(u.get('ref_paid') or 0)}, "
+                         f"{rev:.2f} TON{pay_part}")
+        lines.append("")
+        lines.append(f"<b>Итого к выплате партнёрам: {total_payout:.2f} TON</b>")
         await m.answer("\n".join(lines))
 
     @r.message(Command("offer_list"), _ADM)
