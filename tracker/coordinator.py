@@ -721,10 +721,21 @@ class MarketplaceCoordinator:
         pending = self._pending_sync()
         if ready:
             self.mode = TrackerMode.RECOVERY
-            log.info("[RECOVERY] checking %s collection(s) for listings that appeared while offline...",
-                     len(ready))
-            missed = await self._run_batch(ready, "recover")
-            llog("RECOVERY", f"done: {missed} new listing(s) found during downtime")
+            if settings.serve_only_live:
+                # «только новые лоты»: бэклог, набежавший пока бот был офлайн, в канал НЕ шлём —
+                # стартовый проход молча закрепляет базу (baseline_pending глушит cls.new),
+                # а в канал уходят только лоты, появившиеся ПОСЛЕ запуска.
+                for s in ready:
+                    s.baseline_pending = True
+                log.info("[RECOVERY] serve_only_live: закрепляю базу по %s коллекциям без рассылки бэклога",
+                         len(ready))
+                await self._run_batch(ready, "recover")
+                llog("RECOVERY", "serve_only_live: база закреплена, бэклог не отправлен")
+            else:
+                log.info("[RECOVERY] checking %s collection(s) for listings that appeared while offline...",
+                         len(ready))
+                missed = await self._run_batch(ready, "recover")
+                llog("RECOVERY", f"done: {missed} new listing(s) found during downtime")
 
         await self._persist()
         self.mode = TrackerMode.LIVE

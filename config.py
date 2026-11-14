@@ -333,6 +333,8 @@ class Settings:
     start_fresh: bool = True                 # после запуска/деплоя слать только НОВЫЕ лоты (без лотов «пока был выключен»)
     initial_sync: bool = True
     initial_sync_pages: int = 0              # 0 = все страницы (полная синхронизация, рекомендуется)
+    serve_only_live: bool = True             # True: на старте НЕ рассылать бэклог (лоты, набежавшие пока бот был офлайн) —
+                                             # стартовая RECOVERY молча закрепляет базу, в канал идут только лоты, появившиеся ПОСЛЕ запуска
     sync_mode: str = "fast"                  # fast: база = верхняя страница (FAST_SYNC_PAGES), коллекция сразу LIVE | full: читать всё
     fast_sync_pages: int = 1
     sync_passes: int = 3                     # доп. проходы полной синхронизации, если выдача «уехала»
@@ -505,6 +507,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOOKUP_MAX_CANDIDATES": ("lookup_max_candidates", lambda v: max(1, min(30, int(v)))),
     "TRADE_BOT_USERNAME": ("trade_bot_username", lambda v: v.strip().lstrip("@")),
     "OFFER_IN_BUTTON": ("offer_in_button", _bool_strict),
+    "SERVE_ONLY_LIVE": ("serve_only_live", _bool_strict),
     "SELLER_PHONE_PREFIXES": ("seller_phone_prefixes", _str_list),
     "TRACKER_INTERVAL": ("tracker_interval", _rng(0.2, 3600)),
     "PAGE_LIMIT": ("page_limit", lambda v: max(1, min(100, int(v)))),
@@ -609,6 +612,7 @@ def _from_env() -> Settings:
         lookup_trust_name_match=_bool(e("LOOKUP_TRUST_NAME_MATCH"), True),
         trade_bot_username=(e("TRADE_BOT_USERNAME") or "").strip().lstrip("@"),
         offer_in_button=_bool(e("OFFER_IN_BUTTON"), True),
+        serve_only_live=_bool(e("SERVE_ONLY_LIVE"), True),
         unique_gifts=_bool(e("UNIQUE_GIFTS"), True),
         require_free_messages=_bool(e("REQUIRE_FREE_MESSAGES"), True),
         max_seller_nfts=max(0, _int(e("MAX_SELLER_NFTS"), 12)),
