@@ -131,6 +131,9 @@ def _disc(value: float, pct: int) -> float:
 INVOICE_TTL = 30 * 60           # Maker: 'ссылка на оплату действует 30 мин'
 LINK_TTL = 24 * 3600            # ссылка на вход действует сутки
 KV_KEY = "subs_state"
+# ID полноэкранного эффекта 🎉 (шары/конфетти) для sendMessage в ЛС — Telegram message effects.
+# Фиксированный id праздничного эффекта, одинаковый для всех ботов.
+EFFECT_PARTY = "5046509860389126442"
 
 # Crypto Bot (CryptoPay) — https://help.crypt.bot/crypto-pay-api
 # Если задан CRYPTO_BOT_API_TOKEN — создаём личный invoice на пользователя (через
@@ -1560,7 +1563,16 @@ class Subscriptions:
         sent_bot, sent_msg = None, None
         for bot in self._user_bots():
             try:
-                sent_msg = await bot.send_message(uid, text)
+                # message_effect_id = полноэкранная анимация 🎉 (шары/конфетти) при открытии чата —
+                # то, что видно на скрине. Работает только в ЛС. Форк может не знать параметр →
+                # пробуем с эффектом, при ошибке шлём то же сообщение без него (не теряем доставку).
+                try:
+                    sent_msg = await bot.send_message(uid, text, message_effect_id=EFFECT_PARTY)
+                except TypeError:
+                    sent_msg = await bot.send_message(uid, text)          # форк без message_effect_id
+                except Exception as e_eff:
+                    log.info("message_effect 🎉 отклонён (%s) — шлю без анимации", e_eff)
+                    sent_msg = await bot.send_message(uid, text)
                 sent_bot = bot
                 if ("t.me/+" in text) and getattr(sent_msg, "message_id", None):
                     self.state.setdefault("link_dm", {})[str(uid)] = sent_msg.message_id
