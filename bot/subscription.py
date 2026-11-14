@@ -1725,7 +1725,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         if closed():
             # закрыто для новых, но у кого подписка есть — должен иметь возможность взять новую ссылку
             await m.answer(CLOSED_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                btn("Моя подписка", "primary", E.SUB, callback_data="sub:my")]]))
+                btn("Моя подписка", "primary", "5893168654551355607", callback_data="sub:my")]]))
             return
         # пришёл по ссылке «Активировать» из канала — сразу применяем промокод
         if mt_promo and subs.ready.is_set():
@@ -1982,7 +1982,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
     async def cb_home(q: CallbackQuery) -> None:
         if closed():
             await _safe_edit(q.message, CLOSED_TEXT, reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                btn("Моя подписка", "primary", E.SUB, callback_data="sub:my")]]))
+                btn("Моя подписка", "primary", "5893168654551355607", callback_data="sub:my")]]))
         else:
             await _safe_edit(q.message, WELCOME, reply_markup=subs.main_kb())
         await q.answer()
@@ -2047,7 +2047,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         """Кнопку «Моя подписка» убрали из меню — статус и новая ссылка доступны по /my."""
         await m.answer("<b>Моя подписка</b>\n\nНажмите кнопку — бот покажет остаток или пришлёт новую ссылку в канал.",
                        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
-                           btn("Моя подписка", "primary", E.SUB, callback_data="sub:my"),
+                           btn("Моя подписка", "primary", "5893168654551355607", callback_data="sub:my"),
                            btn("В меню", "danger", E.BACK, callback_data="sub:home")]]))
 
     @r.callback_query(F.data == "sub:trial")
