@@ -39,7 +39,7 @@ log = get_logger("lookup")
 
 _USERNAME_RE = re.compile(r"(?<![\w@])@([A-Za-z][A-Za-z0-9_]{3,31})\b")
 _TME_RE = re.compile(r"(?:https?://)?(?:t\.me|telegram\.me)/([A-Za-z][A-Za-z0-9_]{3,31})(?:[/?#]|$)", re.I)
-_ID_NEAR_RE = re.compile(r"\b(?:id|ид)\s*[:#№]?\s*(\d{5,12})\b", re.I)
+_ID_NEAR_RE = re.compile(r"\b(?:id|ид)\s*[:#№]?\s*(\d{5,15})\b", re.I)
 _SERVICE_NAMES = {"joinchat", "addstickers", "addemoji", "share", "proxy", "socks", "nft", "boost",
                   "c", "s", "iv", "m", "contact", "addlist", "invoice", "giftcode"}
 _WAIT_WORDS = ("ищу", "поиск", "подожд", "загруж", "search", "wait", "loading", "⏳", "🔎")
@@ -59,7 +59,7 @@ _NEG_CACHE_TTL = 900.0            # «не найдено» по имени — 
 # разблокировать бота вручную в этом аккаунте.
 _UNRESOLVABLE_COOLDOWN = 120.0
 _YOU_BLOCKED_COOLDOWN = 6 * 3600.0
-_LINE_RE = re.compile(r"\((?:@([A-Za-z][A-Za-z0-9_]{3,31})|id\s*(\d{3,12}))\)", re.I)
+_LINE_RE = re.compile(r"\((?:@([A-Za-z][A-Za-z0-9_]{3,31})|id\s*(\d{3,15}))\)", re.I)
 _LINE_PREFIX_RE = re.compile(r"^[\s\d.)\-#№]*(?:[^\w\s]+\s*)*")
 _CAPTCHA_WORDS = ("captcha", "kapch", "капч", "rasmga", "click the button", "looks like the picture")
 
@@ -152,7 +152,7 @@ def parse_candidates(messages: list[Any], bot_username: str) -> list[Candidate]:
                 add(Candidate(username=etext.lstrip("@")))
             elif isinstance(ent, (types.MessageEntityCode, types.MessageEntityPre)):
                 s = etext.strip()
-                if s.isdigit() and 5 <= len(s) <= 12:
+                if s.isdigit() and 5 <= len(s) <= 15:
                     add(Candidate(user_id=int(s)))
         for m in _USERNAME_RE.finditer(text):
             add(Candidate(username=m.group(1)))
