@@ -1121,6 +1121,8 @@ class App:
         cmds.append(BotCommand(command="broadcast", description="Рассылка всем пользователям бота"))
         cmds.append(BotCommand(command="tarif", description="Цены тарифов: /tarif 12h 2.5 300"))
         cmds.append(BotCommand(command="sale", description="Скидка на все тарифы: /sale 20 2h"))
+        cmds.append(BotCommand(command="partner", description="Реф-ссылка партнёру: /partner ID имя 35%"))
+        cmds.append(BotCommand(command="partners", description="Партнёры и выплаты"))
         try:
             # Обычным пользователям — только /start (без админ-команд в синей кнопке «Меню»).
             # Полный список команд — только админам, персональным scope по их chat_id.
