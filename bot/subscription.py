@@ -350,9 +350,9 @@ class Subscriptions:
         # (Telegram даёт кнопкам только эти 4 варианта цвета)
         # «Испытать удачу» — не здесь, а на экране выбора способа оплаты тарифа
         buttons = [
-            btn("Оформить подписку", "success", E.PROFILE, callback_data="sub:menu"),
-            btn("Реферальная система", "primary", E.SHOP, callback_data="sub:ref"),
-            btn("Промокод", "danger", E.TAG, callback_data="sub:promo"),
+            btn("Оформить подписку", "success", None, callback_data="sub:menu"),
+            btn("Реферальная система", "primary", None, callback_data="sub:ref"),
+            btn("Промокод", "danger", None, callback_data="sub:promo"),
         ]
         rows = [buttons[i:i + 2] for i in range(0, len(buttons), 2)]
         return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -360,8 +360,8 @@ class Subscriptions:
     @staticmethod
     def renew_kb() -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(inline_keyboard=[
-            [btn("Продлить подписку", "success", E.SUB, callback_data="sub:menu"),
-             btn("В меню", "primary", E.BACK, callback_data="sub:home")],
+            [btn("Продлить подписку", "success", "6028315147754278596", callback_data="sub:menu"),
+             btn("В меню", "primary", "6032742198179532882", callback_data="sub:home")],
         ])
 
     async def _notify_expired(self, uid: int, u: dict | None) -> None:
@@ -384,9 +384,8 @@ class Subscriptions:
                     "Вы удалены из канала с лотами. Чтобы снова получать лоты, "
                     "оформите подписку — кнопка ниже.")
         else:
-            text = ("<b>Срок вашей подписки окончен</b>\n\n"
-                    "Вы удалены из канала с лотами. Продлите подписку, чтобы снова "
-                    "получать лоты, — после оплаты бот сразу пришлёт новую ссылку.")
+            text = ("Срок вашей подписки окончен " + _tg_emoji("5778570255555105942", "❗️") + "\n\n"
+                    "<b>Вы удалены из чата, продлите подписку чтоб вернуться.</b>")
         if not await self._dm_user(uid, text, reply_markup=self.renew_kb()):
             log.info("Expired-notice to %s not delivered (бот не может написать первым)", uid)
 
@@ -443,7 +442,7 @@ class Subscriptions:
             # этот пользователь уже активировал код — не считаем повторно, но и не отказываем
             if uid in al:
                 u["promo"] = code
-                return f"Промокод <b>{html.escape(code)}</b> уже активирован: скидка <b>−{int(p.get('pct') or 0)}%</b>."
+                return "Вы уже активировали промокод, оплачивайте подписку."
             # лимит по АКТИВАЦИЯМ (вводам), а не по оплатам — после N вводов код недействителен
             mx = int(p.get("max") or 0)
             if mx and len(al) >= mx:
@@ -2738,7 +2737,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             try:
                 bot_un = await _bot_username(m.bot)
                 lim_part = f", {lim} активаций" if lim else ""
-                text = (f"🎁 Лови скидку по промокоду <b>{code}</b>: <b>−{pct}%</b>{lim_part}\n\n"
+                text = (f"{_tg_emoji('6037175527846975726', '🎁')} Лови скидку по промокоду <code>{code}</code>: <b>−{pct}%</b>{lim_part}\n\n"
                         "Успей — свежие лоты ждут вас!\n\n"
                         f"Активируйте в: @{bot_un}")
                 kb = InlineKeyboardMarkup(inline_keyboard=[[
