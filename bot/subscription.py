@@ -243,6 +243,15 @@ class Subscriptions:
             log.info("DM to %s failed on all bots: %s", uid, last_err)
         return False
 
+    def _uref(self, uid) -> str:
+        """«@username (id)» для уведомлений об оплате — @ник если известен, иначе только id."""
+        try:
+            u = self.state["users"].get(str(uid)) or {}
+        except Exception:
+            u = {}
+        un = u.get("username")
+        return (f"@{un} (<code>{uid}</code>)" if un else f"<code>{uid}</code>")
+
     async def add_taken(self, uid: int, title: str) -> None:
         """Записать взятый лот в профиль пользователя (показывается в «Логи»)."""
         if not uid or not title:
@@ -1195,7 +1204,7 @@ class Subscriptions:
                 try:
                     await self.bot.send_message(admin,
                         f"Crypto Bot: {inv.get('paid_nano', 0) / 1e9:g} TON, "
-                        f"тариф {title}, пользователь <code>{inv['uid']}</code>"
+                        f"тариф {title}, пользователь {self._uref(inv['uid'])}"
                         + ("" if ok else "\nСсылку выдать не удалось, повторим автоматически."))
                 except Exception:
                     pass
@@ -1273,7 +1282,7 @@ class Subscriptions:
             try:
                 await self.bot.send_message(
                     admin, f"Оплата <b>{total_amount} Stars</b>, тариф {title}, "
-                           f"пользователь <code>{uid}</code>")
+                           f"пользователь {self._uref(uid)}")
             except Exception:
                 pass
 
@@ -1444,7 +1453,7 @@ class Subscriptions:
             for admin in settings.admin_ids:
                 try:
                     await self.bot.send_message(admin, f"Оплата {price:g} TON, тариф {title}, "
-                                                       f"пользователь <code>{inv['uid']}</code>"
+                                                       f"пользователь {self._uref(inv['uid'])}"
                                                        + ("" if ok else "\nСсылку выдать не удалось, бот "
                                                           "повторит сам. Проверьте права бота в канале."))
                 except Exception:
