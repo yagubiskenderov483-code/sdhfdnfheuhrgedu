@@ -173,23 +173,33 @@ class SellerFilter:
         # Логика: имя (owner_name) — единственный доступный сигнал. На нём и фильтруем.
         if l.seller_type is None and l.seller_id is None:
             raw_name = (l.seller_name or "").strip()
-            # «шрифтовые» ники (𝗠𝗜𝗡𝗥𝗜, ᴀʟᴇx, zalgo) → обычные буквы; украшения (𖥔 ꧁ 彡) буквами не считаем
+            # «шрифтовые» ники (𝗠𝗜𝗡𝗥𝗜, ᴀʟᴇx, 𝕬𝖓𝖉𝖗𝖊𝖎, zalgo) → обычные буквы; украшения (𖥔 ꧁ 彡) не буквы
             name = plain_name(raw_name)
-            # 0a) слишком короткое имя — минимум 5 букв (ар, k, G., ры — мусор)
-            if letter_count(raw_name) < 5:
-                return SellerResult(False, "SHORT_NAME_HIDDEN", "name has fewer than 5 letters (profile hidden)")
-            # 0b) турецкие / азербайджанские / немецкие буквы (ö ü ğ ə ç ş ı) — не наш
-            if _HIDDEN_FOREIGN_LETTERS.search(name):
-                return SellerResult(False, "FOREIGN_LETTER_HIDDEN", "foreign-script letters in name (profile hidden)")
-            # 1) явно русское имя (кириллица 2+ букв подряд) или флаг RU/UA/BY — пропускаем
-            if settings.russian_only and (is_russian_name(name) or has_flag(name)):
-                return SellerResult(True, "NAME_RU_HIDDEN", "Cyrillic name / RU flag (profile hidden by Telegram)")
-            # 2) явно иностранный скрипт в имени (арабица, иероглифы, иврит, казахские буквы) — блок
-            if settings.russian_only and is_foreign_text(name):
-                return SellerResult(False, "FOREIGN_NAME_HIDDEN", "foreign script in name (profile hidden)")
-            # 3) всё остальное (латиница без явных признаков, пустое) — решает ALLOW_HIDDEN_OWNER
-            if settings.allow_hidden_owner:
-                return SellerResult(True, "OWNER_HIDDEN", "owner hidden by Telegram — no profile to filter on")
+            if settings.hidden_name_strict:
+                # === СТАРОЕ строгое поведение (HIDDEN_NAME_STRICT=true) ===
+                if letter_count(raw_name) < 5:
+                    return SellerResult(False, "SHORT_NAME_HIDDEN", "name has fewer than 5 letters (profile hidden)")
+                if _HIDDEN_FOREIGN_LETTERS.search(name):
+                    return SellerResult(False, "FOREIGN_LETTER_HIDDEN", "foreign-script letters in name (profile hidden)")
+                if settings.russian_only and (is_russian_name(name) or has_flag(name)):
+                    return SellerResult(True, "NAME_RU_HIDDEN", "Cyrillic name / RU flag (profile hidden by Telegram)")
+                if settings.russian_only and is_foreign_text(name):
+                    return SellerResult(False, "FOREIGN_NAME_HIDDEN", "foreign script in name (profile hidden)")
+                if settings.allow_hidden_owner:
+                    return SellerResult(True, "OWNER_HIDDEN", "owner hidden by Telegram — no profile to filter on")
+            else:
+                # === НОВОЕ мягкое (dj): скрытых режем ТОЛЬКО по заведомо чужому скрипту ===
+                # Арабица уже отсеяна выше. Пропускаем: кириллицу (даже 1 славянская буква),
+                # латиницу (VANYA/ANDREY, ö ü ğ), пустое и короткое имя. Режем только иероглифы/
+                # иврит/тай/грузинский/армянский/индийские и неславянскую кириллицу (казахский и т.п.).
+                if settings.russian_only:
+                    if (_CYR.search(name) and not _NON_SLAVIC.search(name)) or has_flag(name):
+                        return SellerResult(True, "NAME_RU_HIDDEN", "кириллица/флаг в имени (профиль скрыт)")
+                    if is_foreign_text(name):
+                        return SellerResult(False, "FOREIGN_NAME_HIDDEN", "заведомо чужой скрипт в имени (профиль скрыт)")
+                # латиница / пустое / короткое — пропускаем (dj: 'либо пусть будет пустой профиль')
+                if settings.allow_hidden_owner:
+                    return SellerResult(True, "OWNER_HIDDEN", "имя не на чужом скрипте — пропускаем (мягкий режим)")
             # ALLOW_HIDDEN_OWNER=false и имя без явных признаков → фильтр ниже вернёт UNKNOWN_BLOCKED
 
         # продавцу должно быть можно написать бесплатно.

@@ -100,7 +100,14 @@ def test_soft_zone():
     arab = lot(seller_type="user", seller_id=5, messages="бесплатно", seller_name="محمد")
     assert f.check(arab, soft=True).code == "ARABIC_SCRIPT"
     short = lot(seller_name="ab")
-    assert f.check(short).code == "SHORT_NAME_HIDDEN" and f.check(short, soft=True).passed
+    settings.allow_hidden_owner = True
+    settings.hidden_name_strict = False
+    # мягкий дефолт (dj): короткое латинское имя больше НЕ режем
+    assert f.check(short).code == "OWNER_HIDDEN" and f.check(short, soft=True).passed
+    # строгий режим — старое SHORT_NAME_HIDDEN
+    settings.hidden_name_strict = True
+    assert f.check(short).code == "SHORT_NAME_HIDDEN"
+    settings.hidden_name_strict = False
     print("OK мягкая зона: всё кроме 300-1000; платные ЛС, арабы и ЧС режутся всегда")
 
 

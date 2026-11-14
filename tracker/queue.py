@@ -580,7 +580,8 @@ class ListingPipeline:
 
         # /off — глобальная глушь выдачи: парсер продолжает отслеживать (база свежая,
         # бэклога при /on не будет), но в канал ничего не уходит. Лот помечаем обработанным.
-        if self.output_muted_getter and self.output_muted_getter():
+        _omg = getattr(self, "output_muted_getter", None)
+        if _omg and _omg():
             l.status, l.reason = ListingStatus.FILTERED_PRICE, "выдача выключена (/off)"
             self.stats["output_muted"] = self.stats.get("output_muted", 0) + 1
             llog("FILTER", f"#{l.listing_id} skipped: output muted (/off)")

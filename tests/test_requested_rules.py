@@ -29,6 +29,7 @@ def _setup():
     settings.max_above_floor = 450
     settings.max_seller_level, settings.require_free_messages = 4, True
     settings.russian_only, settings.allow_hidden_owner = True, True
+    settings.hidden_name_strict = False      # dj: мягкий режим скрытых владельцев по умолчанию
 
 
 def test_premium_over_floor_only_rare_or_mono():
@@ -62,11 +63,20 @@ def test_fancy_names_and_arabic():
 
     def code(name):
         return sf.check(_lot(seller_name=name)).code
-    assert code("𝗠𝗜𝗡𝗥𝗜") != "SHORT_NAME_HIDDEN"                  # шрифтовой ник — 5 настоящих букв
+    # === мягкий режим (dj, по умолчанию) ===
     assert code("Д̷̛м̶и̵т̸р̷и̶й̵") == "NAME_RU_HIDDEN"                # «размытый» — русское имя
-    assert code("꧁Ⓐⓛⓔⓧ꧂") == "SHORT_NAME_HIDDEN"                   # украшения не буквы → Alex = 4
-    assert code("Дмитрий محمد") == "ARABIC_SCRIPT"
+    assert code("𝕬𝖓𝖉𝖗𝖊𝖎") == "OWNER_HIDDEN"                       # вычурный шрифт → Andrei (латиница) — пропускаем
+    assert code("VANYA") == "OWNER_HIDDEN"                           # латиница, читается как рус — пропускаем
+    assert code("꧁Ⓐⓛⓔⓧ꧂") == "OWNER_HIDDEN"                        # Alex (4 буквы) — короткое больше НЕ режем
+    assert code("Яна ö") == "NAME_RU_HIDDEN"                          # кириллица есть → наш (ö больше не режет)
+    assert code("") == "OWNER_HIDDEN"                                # пустое имя — пропускаем
+    assert code("明美さん") == "FOREIGN_NAME_HIDDEN"                  # иероглифы — заведомо чужой скрипт, режем
+    assert code("Дмитрий محمد") == "ARABIC_SCRIPT"                    # арабица — режем всегда
     assert code("ﻣﺤﻤﺪ ✨") == "ARABIC_SCRIPT"                         # «красивые» арабские формы
+    # === строгий режим (HIDDEN_NAME_STRICT=true) — старое поведение сохраняется ===
+    settings.hidden_name_strict = True
+    assert code("꧁Ⓐⓛⓔⓧ꧂") == "SHORT_NAME_HIDDEN"                   # Alex = 4 буквы → режем
+    settings.hidden_name_strict = False
 
 
 def test_seller_level_and_paid_dm():
