@@ -194,6 +194,7 @@ class Subscriptions:
         self._loaded = False
         # пока копия подписок не восстановлена после деплоя — никого не кикаем и не выдаём пробный час
         self.ready = asyncio.Event()
+        self._kick_grace_until = 0.0     # до этого времени после старта никого не кикаем (выставляется в run())
         self._backup_wanted = False
         self._backup_task: asyncio.Task | None = None
         self.degraded = False          # копия не восстановилась → не кикаем незнакомых, пробный час не даём
@@ -847,6 +848,8 @@ class Subscriptions:
     async def _reconcile(self) -> None:
         """Страховка на случай, если Telegram не прислал событие входа/выхода: всех, у кого доступ
         закончился, проверяем по факту — если человек всё ещё в канале, выкидываем."""
+        if time.time() < getattr(self, "_kick_grace_until", 0):
+            return                      # grace после старта — не кикаем, пока копия не устоялась
         now = time.time()
         checks = 0          # не больше 60 проверок «ждёт входа» за проход — иначе проход тянется минутами
         for k, u in list(self.state["users"].items()):
@@ -1548,6 +1551,10 @@ class Subscriptions:
     async def run(self) -> None:
         await self.ready.wait()
         await self.load()
+        # grace после запуска/восстановления: 3 минуты НИКОГО не кикаем — даём копии полностью
+        # устояться (оплаты восстановятся, unpaid_join снимется). Иначе после рестарта reconcile/
+        # _expire выдавали всплеск киков легитимных людей (выигравших/с доступом), и они перезаходили.
+        self._kick_grace_until = time.time() + 180
         tick = 0
         while True:
             try:
@@ -1625,6 +1632,8 @@ class Subscriptions:
 
     async def _expire(self) -> None:
         now = time.time()
+        if now < getattr(self, "_kick_grace_until", 0):
+            return                      # grace после старта — не кикаем, пока копия не устоялась
         due = [int(k) for k, u in self.state["users"].items()
                if u.get("in_chat") and u.get("until") not in (FOREVER, None) and 0 < float(u["until"]) <= now
                and int(k) not in settings.admin_ids and not (self.degraded and u.get("tmp"))]
