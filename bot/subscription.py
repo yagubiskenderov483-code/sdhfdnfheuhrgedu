@@ -67,7 +67,7 @@ def _tg_emoji(eid: str, fallback: str) -> str:
     return f'<tg-emoji emoji-id="{eid}">{fallback}</tg-emoji>'
 
 
-PAID_WAIT_TEXT = f'{_tg_emoji(EMOJI_PAID, "⏳")} Оплата получена, ожидайте.'
+PAID_WAIT_TEXT = f'{_tg_emoji(EMOJI_PAID, "⏳")} Оплата пришла'
 FOREVER = -1.0
 # код тарифа → (название, цена TON, длительность в секундах или FOREVER, цена в Stars или None)
 # Stars=None → тариф не оплачивается звёздами (например, «навсегда» — только TON).
@@ -1961,7 +1961,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             t = _tg_emoji(EMOJI_TON, "💎")
             await _safe_edit(q.message,
                 f"<b>Билет {GAME_BALLS[ball][0]} — {ton:g} {t}</b>\n\n"
-                "Онлайн: нажмите «Оплатить» — откроется Tonkeeper с готовой суммой и комментарием.\n\n"
+                "Нажмите «Оплатить» — откроется Tonkeeper для оплаты\n\n"
                 f"Вручную: отправьте <b>{ton:g} {t}</b> на\n<code>{settings.sub_ton_address}</code>\n"
                 f"с комментарием <code>{code}</code>.\n\n"
                 "Счёт действует 30 минут. После оплаты бот сам бросит мяч.",
@@ -2185,7 +2185,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             ])
             await _safe_edit(q.message,
                 f"<b>Тариф {title} — {price:g}</b> {_tg_emoji(EMOJI_TON, '💎')}\n\n"
-                "Онлайн: нажмите «Оплатить» — откроется Tonkeeper с готовой суммой и комментарием.\n\n"
+                "Нажмите «Оплатить» — откроется Tonkeeper для оплаты\n\n"
                 f"Вручную: отправьте <b>{price:g}</b> {_tg_emoji(EMOJI_TON, '💎')} на\n"
                 f"<code>{settings.sub_ton_address}</code>\n"
                 f"с комментарием <code>{code}</code>.\n\n"
