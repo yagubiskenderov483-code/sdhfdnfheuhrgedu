@@ -296,7 +296,7 @@ class Settings:
                                               # (пусто = первый рабочий аккаунт трекера)
     require_username: bool = True             # слать только продавцов с @username
     button_emoji: bool = True                 # кастомные эмодзи в кнопках (icon_custom_emoji_id)
-    only_with_username: bool = True           # жёстко во ВСЕХ темах: без @username лот не постим
+    only_with_username: bool = False          # жёстко во ВСЕХ темах: без @username лот не постим
                                               # (мягкая зона и EARLY_POST тоже не обходят)
     gift_page_owner: bool = False             # искать скрытого владельца через страницу подарка (+1 запрос
                                               # на лот, раскрывает ~1%) — по умолчанию выкл., ищет бот поиска
@@ -612,7 +612,7 @@ def _from_env() -> Settings:
         lookup_reserve=max(0, _int(e("LOOKUP_RESERVE"), 12)),
         lookup_required=_bool(e("LOOKUP_REQUIRED"), True),
         require_username=_bool(e("REQUIRE_USERNAME"), True),
-        only_with_username=_bool(e("ONLY_WITH_USERNAME"), True),
+        only_with_username=_bool(e("ONLY_WITH_USERNAME"), False),
         button_emoji=_bool(e("BUTTON_EMOJI"), True),
         gift_page_owner=_bool(e("GIFT_PAGE_OWNER"), False),
         lookup_max_age=max(0, min(86400, _int(e("LOOKUP_MAX_AGE"), 180))),
