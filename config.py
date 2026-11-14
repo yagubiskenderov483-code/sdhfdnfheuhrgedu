@@ -312,7 +312,7 @@ class Settings:
     lookup_captcha_wait: float = 90.0         # ускорено: ждём капчу авто-солвером/админом (было 600)
     lookup_timeout: float = 15.0              # ускорено (было 25): сколько секунд ждать ответа бота поиска
     lookup_skip_over: int = 20                # в ответе бота поиска N+ человек — лот сразу пропустить (0 = выкл)
-    lookup_resolve_per_hour: int = 100        # ускорено (было 38 → 60): при 28 аккаунтах resolve-лимит бил ~2785/запуск
+    lookup_resolve_per_hour: int = 150       # ускорено (было 38 → 60): при 28 аккаунтах resolve-лимит бил ~2785/запуск
     lookup_name_check: bool = True            # найденный аккаунт должен называться так же, как владелец NFT
     lookup_nomatch_check: int = 1             # имя в ответе бота не совпало ни у кого — проверить первых N
     lookup_max_candidates: int = 3            # сколько кандидатов из ответа проверять
@@ -513,7 +513,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "LOOKUP_INTERVAL": ("lookup_interval", _rng(2, 600)),   # min 2с — иначе funstat выдаёт капчу на каждый запрос
     "LOOKUP_CAPTCHA_WAIT": ("lookup_captcha_wait", _rng(30, 7200)),
     "LOOKUP_SKIP_OVER": ("lookup_skip_over", lambda v: max(0, min(1000, int(v)))),
-    "LOOKUP_RESOLVE_PER_HOUR": ("lookup_resolve_per_hour", lambda v: max(1, min(300, int(v)))),
+    "LOOKUP_RESOLVE_PER_HOUR": ("lookup_resolve_per_hour", lambda v: max(1, min(400, int(v)))),
     "LOOKUP_NAME_CHECK": ("lookup_name_check", _bool_strict),
     "LOOKUP_TRUST_NAME_MATCH": ("lookup_trust_name_match", _bool_strict),
     "LOOKUP_NOMATCH_CHECK": ("lookup_nomatch_check", lambda v: max(0, min(10, int(v)))),
@@ -623,7 +623,7 @@ def _from_env() -> Settings:
         lookup_interval=min(600.0, max(0.0, _float(e("LOOKUP_INTERVAL"), 1.5))),
         lookup_captcha_wait=min(7200.0, max(30.0, _float(e("LOOKUP_CAPTCHA_WAIT"), 90.0))),
         lookup_skip_over=max(0, min(1000, _int(e("LOOKUP_SKIP_OVER"), 20))),
-        lookup_resolve_per_hour=max(1, min(300, _int(e("LOOKUP_RESOLVE_PER_HOUR"), 100))),
+        lookup_resolve_per_hour=max(1, min(400, _int(e("LOOKUP_RESOLVE_PER_HOUR"), 150))),
         lookup_name_check=_bool(e("LOOKUP_NAME_CHECK"), True),
         lookup_nomatch_check=max(0, min(10, _int(e("LOOKUP_NOMATCH_CHECK"), 1))),
         lookup_max_candidates=max(1, min(30, _int(e("LOOKUP_MAX_CANDIDATES"), 3))),
