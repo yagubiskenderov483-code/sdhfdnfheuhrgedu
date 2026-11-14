@@ -107,8 +107,9 @@ def is_manager(uid: int | None) -> bool:
 
 
 class IsAdmin(Filter):
-    async def __call__(self, message: Message) -> bool:
-        return is_manager(message.from_user.id if message.from_user else None)
+    async def __call__(self, event: "Message | CallbackQuery") -> bool:
+        # event — Message или CallbackQuery; у обоих есть from_user
+        return is_manager(event.from_user.id if event.from_user else None)
 
 
 # Кнопки под полем ввода.
@@ -567,6 +568,7 @@ def build_routers(app: "App") -> list[Router]:
     public = Router(name="public")
     admin = Router(name="admin")        # только админы: /remove_session /reload /set
     admin.message.filter(IsAdmin())
+    admin.callback_query.filter(IsAdmin())   # админские кнопки (purge_all и пр.) — тоже только админам
     users = Router(name="users")        # все пользователи, если ALLOW_ALL_USERS=true
     users.message.filter(IsAllowed())
     users.callback_query.filter(F.from_user.func(lambda u: is_allowed(u.id)))   # кнопки — тоже только своим
