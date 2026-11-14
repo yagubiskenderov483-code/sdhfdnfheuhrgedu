@@ -743,11 +743,11 @@ class App:
                      + (f" · ошибки: {c.get('ERROR', 0) + c.get('AUTH_ERROR', 0)}"
                         if c.get("ERROR") or c.get("AUTH_ERROR") else ""),
                      f"Коллекций в работе: {live}/{total}",
-                     "⏹ Парсер остановлен (/open)" if self.coordinator.paused else "Парсер работает"]
+                     "Парсер работает"]
             if getattr(self, "output_muted", False):
                 lines.append("🔇 Выдача лотов выключена (/on)")
             if getattr(self, "users_closed", False):
-                lines.append("Для пользователей закрыто (/open)")
+                lines.append("🔒 Для пользователей закрыто (/open) — лоты идут")
             strict = []
             if settings.russian_only and settings.unknown_seller_policy == "block":
                 strict.append("только русские продавцы")
@@ -1102,10 +1102,10 @@ class App:
             BotCommand(command="stats", description="Статистика"),
             BotCommand(command="last", description="Последние лоты и почему не отправлены"),
             BotCommand(command="collections", description="Какие коллекции отслеживаются"),
-            BotCommand(command="off", description="Выключить выдачу лотов (парсер работает дальше)"),
-            BotCommand(command="on", description="Включить выдачу/парсер"),
-            BotCommand(command="close", description="Остановить парсер полностью"),
-            BotCommand(command="open", description="Запустить парсер"),
+            BotCommand(command="off", description="Выключить выдачу лотов (юзерам открыто)"),
+            BotCommand(command="on", description="Включить выдачу лотов"),
+            BotCommand(command="close", description="Закрыть для пользователей (лоты идут)"),
+            BotCommand(command="open", description="Открыть для пользователей"),
             BotCommand(command="top", description="Самые активные коллекции за сутки"),
             BotCommand(command="find", description="Всё о коллекции: /find название"),
             BotCommand(command="mute", description="Выключить лоты коллекции: /mute название"),
