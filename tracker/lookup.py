@@ -878,6 +878,14 @@ class OwnerLookup:
         выкидывал → _find получал пустой order → silent-skip через no_session, а
         боты живы ('не ищет иногда')."""
         want = [n for n in settings.lookup_sessions if n]
+        # Ручной пул не задан → берём АВТО-резерв (sessions.reserved()): лукап ротируется по 6
+        # здоровым аккаунтам, а не долбит с ОДНОГО anchor'а (из-за чего «половина сессий не ищет»
+        # и всё встаёт, когда единственный anchor во FloodWait).
+        if not want:
+            try:
+                want = sorted(self.sessions.reserved())
+            except Exception:
+                want = []
         now = time.monotonic()
         # Актуальный список ботов (без тех, что в глобальном dead-mark) — именно его
         # будет перебирать _find. Если пул пуст — без фильтра по бот-специфичным меткам,
