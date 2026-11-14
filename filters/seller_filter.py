@@ -222,9 +222,14 @@ class SellerFilter:
                                 f"{l.seller_nfts} NFT > MAX_SELLER_NFTS={settings.max_seller_nfts}")
 
         # Level продавца (UserFull.stars_rating.level); нет рейтинга = Level 0
-        if settings.max_seller_level > 0 and (l.level or 0) > settings.max_seller_level:
+        # В строгой зоне (300-1000) — отдельный, более жёсткий лимит Level (dj: там max 4, в общем 7)
+        from filters.zone import is_soft
+        _lvl_cap = settings.max_seller_level
+        if not is_soft(l) and int(getattr(settings, "max_seller_level_strict", 0) or 0) > 0:
+            _lvl_cap = settings.max_seller_level_strict
+        if _lvl_cap > 0 and (l.level or 0) > _lvl_cap:
             return SellerResult(False, "LEVEL_TOO_HIGH",
-                                f"level {l.level} > MAX_SELLER_LEVEL={settings.max_seller_level}")
+                                f"level {l.level} > лимит {_lvl_cap} (зона {'строгая' if not is_soft(l) else 'мягкая'})")
 
         if not settings.russian_only:
             return SellerResult(True, "DISABLED", "RUSSIAN_ONLY=false")

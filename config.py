@@ -324,6 +324,9 @@ class Settings:
     require_free_messages: bool = True        # продавцу можно написать бесплатно (без платных сообщений / Premium-only)
     max_seller_nfts: int = 20                 # не больше N NFT в профиле продавца (0 = не проверять). Maker: 12→20 (фильтры чуть слабее)
     max_seller_level: int = 7                 # максимальный Level продавца (0 = не проверять). Maker: 4→6→7
+    max_seller_level_strict: int = 4          # в строгой зоне (300-1000) — отдельный, более жёсткий лимит Level. Maker: 4
+    send_hidden_unresolved: bool = True       # funstat не нашёл скрытого владельца, но имя прошло мягкий чек →
+                                              # слать с пометкой «профиль скрыт», а не скипать (dj: половина норм лотов терялась на ненадёжном funstat)
     hidden_name_strict: bool = False          # False (dj): скрытых владельцев режем ТОЛЬКО по заведомо чужому
                                               # скрипту (арабица/иероглифы/иврит/казахский); кириллица (даже 1 буква),
                                               # латиница (VANYA/ö ü), пустое/короткое имя — пропускаем.
@@ -526,6 +529,8 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "REQUIRE_FREE_MESSAGES": ("require_free_messages", _bool_strict),
     "MAX_SELLER_NFTS": ("max_seller_nfts", lambda v: max(0, int(v))),
     "MAX_SELLER_LEVEL": ("max_seller_level", lambda v: max(0, int(v))),
+    "MAX_SELLER_LEVEL_STRICT": ("max_seller_level_strict", lambda v: max(0, int(v))),
+    "SEND_HIDDEN_UNRESOLVED": ("send_hidden_unresolved", _bool_strict),
     "HIDDEN_NAME_STRICT": ("hidden_name_strict", _bool_strict),
     "COLD_POLL_INTERVAL": ("cold_poll_interval", _rng(1, 3600)),
     "CATALOG_INTERVAL": ("catalog_interval", _rng(0.3, 3600)),
@@ -626,6 +631,8 @@ def _from_env() -> Settings:
         require_free_messages=_bool(e("REQUIRE_FREE_MESSAGES"), True),
         max_seller_nfts=max(0, _int(e("MAX_SELLER_NFTS"), 12)),
         max_seller_level=max(0, _int(e("MAX_SELLER_LEVEL"), 7)),
+        max_seller_level_strict=max(0, _int(e("MAX_SELLER_LEVEL_STRICT"), 4)),
+        send_hidden_unresolved=_bool(e("SEND_HIDDEN_UNRESOLVED"), True),
         hidden_name_strict=_bool(e("HIDDEN_NAME_STRICT"), False),
         cold_poll_interval=max(1.0, _float(e("COLD_POLL_INTERVAL"), 15.0)),
         market_backup_minutes=max(5.0, _float(e("MARKET_BACKUP_MINUTES"), 30.0)),

@@ -813,6 +813,11 @@ class ListingPipeline:
             if self._soft(l):
                 return SellerResult(True, "OWNER_NOT_FOUND_SENT",
                                     "скрытый владелец — пост с пометкой (soft filter)")
+            # dj: funstat ненадёжен (капчи/лимиты) и терял ~половину норм лотов. Имя уже прошло
+            # мягкий чек (раз дошли до lookup) — шлём с пометкой «профиль скрыт», а не скипаем.
+            if getattr(settings, "send_hidden_unresolved", True):
+                return SellerResult(True, "OWNER_NOT_FOUND_SENT",
+                                    "скрытый владелец не найден — пост с пометкой (SEND_HIDDEN_UNRESOLVED)")
             return SellerResult(False, "OWNER_NOT_FOUND", "владелец не найден — без @username не шлём")
         # Владелец от funstat по доверию имени: пробуем прочитать профиль через failover
         # (resale-страница коллекции отдаёт access_hash → профиль станет доступен). Если
