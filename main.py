@@ -14,6 +14,7 @@ import os
 import html
 import json
 import logging
+import random
 import re
 import signal
 import time
@@ -245,6 +246,12 @@ class App:
         self.bench: dict | None = None
         self.users_closed = False    # /close: пользователям «Парсер закрыт», а лоты идут
         self.output_muted = False    # /off: глушь выдачи — парсер крутится, лоты в канал не идут
+        # Single-instance guard: при двойном инстансе оба конфликтуют на getUpdates. Порог «само-выхода»
+        # со СЛУЧАЙНЫМ джиттером (240–420с непрерывного конфликта) ломает симметрию: у кого порог меньше —
+        # выходит первым, у второго конфликты прекращаются, счётчик сбрасывается → он остаётся.
+        # Единственный инстанс конфликтов не видит → не выходит НИКОГДА (fail-safe).
+        self._stepdown_after = 240.0 + random.uniform(0.0, 180.0)
+        self._stepping_down = False
 
     # ------------------------------------------------------------------ diagnostics
     async def run_check(self) -> tuple[str, str | None]:
@@ -987,11 +994,32 @@ class App:
         w = CONFLICT_WATCH
         # при своём же деплое старая и новая копии пересекаются на минуту — это не тревога;
         # тревога — если конфликт идёт дольше 3 минут подряд
-        if w.count >= 3 and time.time() - w.last < 300 and w.last - w.first > 180:
+        now = time.time()
+        if w.count >= 3 and now - w.last < 300 and w.last - w.first > 180:
             await self._alert("token_conflict",
                               "<b>Этим токеном бота пользуется кто-то ещё</b> (Telegram: Conflict).\n"
                               "Либо запущена вторая копия бота, либо токен утёк. Если второй копии нет — "
                               "@BotFather → /revoke, новый токен в BOT_TOKEN, репозиторий — приватный.", 3600)
+        # Single-instance guard: конфликт идёт НЕПРЕРЫВНО дольше джиттер-порога и прямо сейчас активен
+        # (последний конфликт < 60с назад) → этот инстанс — лишний, тихо выходим, оставляя одного.
+        # Дефолт порога огромный: если _stepdown_after не задан (тест/стаб в обход __init__) — не выходим.
+        stepdown_after = getattr(self, "_stepdown_after", float("inf"))
+        if (not getattr(self, "_stepping_down", False) and w.count >= 10
+                and now - w.last < 60 and w.last - w.first > stepdown_after):
+            self._stepping_down = True
+            log.critical("Single-instance guard: конфликт getUpdates идёт %.0fс (порог %.0fс) — "
+                         "этот инстанс лишний, выхожу, чтобы остался один.",
+                         w.last - w.first, stepdown_after)
+            try:
+                await self._alert("instance_stepdown",
+                                  "<b>Лишний инстанс выходит</b>: обнаружена вторая копия (Conflict на getUpdates) "
+                                  "дольше порога — этот процесс завершается, чтобы остался один. "
+                                  "Если это повторяется — на хостинге реально запущены две копии (numInstances=1 / "
+                                  "убери старый деплой).", 3600)
+            except Exception:
+                pass
+            # лишний инстанс getUpdates всё равно не обслуживает — быстрый выход, Render поднимет одного
+            os._exit(0)
 
     async def _watchdog_sent(self) -> None:
         """Лоты находятся, но в группу ничего не уходит 10+ минут — сразу говорим админам почему.
