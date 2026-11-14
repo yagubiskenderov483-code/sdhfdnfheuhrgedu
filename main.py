@@ -919,7 +919,11 @@ class App:
         return out
 
     async def _alert(self, kind: str, text: str, every: float = 3600) -> None:
-        """Сообщение админам, но одно и то же не чаще раза в `every` секунд."""
+        """Оперативные уведомления админам (трекер сломался, мало аккаунтов, нет лотов и т.п.).
+        По умолчанию ВЫКЛЮЧЕНЫ (dj: не флудить) — уведомления об оплатах идут отдельно и остаются.
+        Включить обратно: ADMIN_ALERTS=true."""
+        if not getattr(settings, "admin_alerts", False):
+            return
         now = time.monotonic()
         last = self._alerts.get(kind, -1e9)
         if now - last < every:

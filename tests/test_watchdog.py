@@ -2,6 +2,7 @@ import asyncio, types, time, sys
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
 import main
 from config import settings
+settings.admin_alerts = True   # оперативные алерты по умолчанию off — для теста логики включаем
 async def run():
     app = main.App.__new__(main.App)
     app._alerts, app._bad_since, app._started_at = {}, {}, time.time() - 4000

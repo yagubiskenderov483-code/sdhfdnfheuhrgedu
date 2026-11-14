@@ -788,15 +788,9 @@ class Subscriptions:
                 u["until"], u["in_chat"] = float(u.get("until") or 0) or time.time(), True
                 await self.save()
             return
-        if True:                                      # выкинут — сообщаем админам
-            who = f"@{user.username}" if getattr(user, "username", None) else getattr(user, "first_name", "") or uid
-            log.warning("User %s (%s) joined without subscription — kicked", uid, who)
-            for admin in settings.admin_ids:
-                try:
-                    await self.bot.send_message(admin, f"Зашёл без подписки и выкинут: "
-                                                       f"{html.escape(str(who))} (<code>{uid}</code>)")
-                except Exception:
-                    pass
+        # выкинут — только в лог, админам НЕ шлём (dj: не флудить; остаются только оплаты)
+        who = f"@{user.username}" if getattr(user, "username", None) else getattr(user, "first_name", "") or uid
+        log.warning("User %s (%s) joined without subscription — kicked", uid, who)
 
     async def _cleanup_old_invoices(self) -> int:
         """Удалить старые invoices из state: неоплаченные старше 7 дней, оплаченные старше 60 дней.
@@ -1645,12 +1639,8 @@ class Subscriptions:
                 continue
             if u.pop("unpaid_join", None):
                 # зашёл без подписки, пока копия не читалась — это не «подписка закончилась»
+                # (админам НЕ шлём — dj: не флудить; остаются только уведомления об оплатах)
                 log.warning("User %s joined without subscription (while backup was unread) — kicked", uid)
-                for admin in settings.admin_ids:
-                    try:
-                        await self.bot.send_message(admin, f"Зашёл без подписки и выкинут: <code>{uid}</code>")
-                    except Exception:
-                        pass
                 continue
             log.info("Subscription ended — user %s removed from channel", uid)
             await self._notify_expired(uid, u)
