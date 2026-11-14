@@ -323,7 +323,7 @@ class Settings:
                                               # Оффер — точечно по /фа; у всех сразу = true (Maker: выключено).
     require_free_messages: bool = True        # продавцу можно написать бесплатно (без платных сообщений / Premium-only)
     max_seller_nfts: int = 20                 # не больше N NFT в профиле продавца (0 = не проверять). Maker: 12→20 (фильтры чуть слабее)
-    max_seller_level: int = 6                 # максимальный Level продавца (0 = не проверять). Maker: 4→6 (фильтры чуть слабее)
+    max_seller_level: int = 7                 # максимальный Level продавца (0 = не проверять). Maker: 4→6→7
     unique_gifts: bool = True                 # один и тот же NFT не отправлять повторно
     unique_sellers: bool = True               # одного и того же продавца не отправлять повторно
     seller_repeat_hours: float = 0.0          # 0 = никогда не повторять продавца
@@ -616,7 +616,7 @@ def _from_env() -> Settings:
         unique_gifts=_bool(e("UNIQUE_GIFTS"), True),
         require_free_messages=_bool(e("REQUIRE_FREE_MESSAGES"), True),
         max_seller_nfts=max(0, _int(e("MAX_SELLER_NFTS"), 12)),
-        max_seller_level=max(0, _int(e("MAX_SELLER_LEVEL"), 5)),
+        max_seller_level=max(0, _int(e("MAX_SELLER_LEVEL"), 7)),
         cold_poll_interval=max(1.0, _float(e("COLD_POLL_INTERVAL"), 15.0)),
         market_backup_minutes=max(5.0, _float(e("MARKET_BACKUP_MINUTES"), 30.0)),
         market_snapshot_max_age_hours=max(0.5, _float(e("MARKET_SNAPSHOT_MAX_AGE_HOURS"), 6.0)),

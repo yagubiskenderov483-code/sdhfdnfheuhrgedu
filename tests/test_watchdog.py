@@ -81,8 +81,9 @@ async def startup():
         await app._startup_report()
     finally:
         asyncio.sleep = orig
-    assert sent and "Бот запущен" in sent[0] and "120/120" in sent[0], sent
-    print("STARTUP REPORT OK")
+    # startup-отчёт отключён по просьбе dj — админам ничего не шлётся
+    assert sent == [], sent
+    print("STARTUP REPORT OFF OK")
 asyncio.run(startup())
 
 
@@ -136,8 +137,8 @@ async def conflict():
     w.first, w.last, w.count = now - 60, now, 20          # минута пересечения при деплое — тихо
     await app._watchdog_conflict()
     assert not sent
-    w.first = now - 400                                  # 6+ минут подряд — тревога
+    w.first = now - 400                                  # 6+ минут подряд — теперь тоже молчим (по просьбе dj)
     await app._watchdog_conflict()
-    assert sent and "кто-то ещё" in sent[0], sent
-    print("CONFLICT ALERT OK")
+    assert sent == [], sent                               # конфликт больше НЕ шлёт админам и не трогает процесс
+    print("CONFLICT SILENT OK")
 asyncio.run(conflict())
