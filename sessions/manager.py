@@ -168,8 +168,13 @@ class SessionManager:
         n = int(getattr(settings, "lookup_reserve", 0) or 0)
         if n > 0 and settings.auto_lookup and settings.lookup_bot_username:
             usable = [w for w in self.workers.values() if w.is_usable()]
-            if len(usable) >= 12:                       # только если аккаунтов с запасом — трекинг не встанет
-                n = min(n, max(1, len(usable) // 3))     # под funstat не больше трети живых — трекинг не голодает
+            # Раньше порог был >=12: при FloodWait живых падало ниже 12, резерв ОТКЛЮЧАЛСЯ
+            # целиком, и весь funstat валился на один anchor-аккаунт — очередь на резолв росла
+            # до ~100 с. Теперь резерв работает и в деградации: не больше трети живых уходит под
+            # funstat (трекинг всегда держит >=2/3), но минимум 2 сессии — чтобы резолв шёл
+            # параллельно, а не по одной. Полностью выключаем только если живых совсем мало (<6).
+            if len(usable) >= 6:
+                n = min(n, max(2, len(usable) // 3))     # под funstat не больше трети живых, но >=2
                 picked = sorted(usable, key=lambda w: w.name)[:n]   # стабильный набор (по имени)
                 return {w.name for w in picked}
         return set()

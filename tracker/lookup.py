@@ -790,7 +790,12 @@ class OwnerLookup:
                 # Пробуем ещё раз обычными буквами (один доп. запрос, только если имя реально другое).
                 from utils.names import search_name
                 alt = search_name(seller_name)
-                if (alt and len(alt) >= 3 and _norm_name(alt) != _norm_name(seller_name)
+                # Когда очередь забита (мало живых аккаунтов / FloodWait), второй запрос
+                # «обычными буквами» только отнимает дефицитную квоту у лотов, которые реально
+                # можно найти. Делаем доп. попытку только пока очередь короткая.
+                busy = self._pending > max(8, (_MAX_PENDING // 100))
+                if (not busy and alt and len(alt) >= 3
+                        and _norm_name(alt) != _norm_name(seller_name)
                         and (deadline is None or time.time() < deadline)):
                     self.stats["fancy_retry"] = self.stats.get("fancy_retry", 0) + 1
                     llog("LOOKUP", f"{seller_name!r}: не нашли — ищу обычными буквами {alt!r}")
