@@ -2170,8 +2170,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
         now = time.time()
         left = u.get("until") or 0
         active = subs._has_access(u)
-        taken = u.get("taken") or []
-        logs = "\n".join(f"• {html.escape(str(t))}" for t in taken[-10:]) if taken else "—"
+        taken_n = len(u.get("taken") or [])     # логи = КОЛИЧЕСТВО взятых лотов, не названия
         e_prof = _tg_emoji("6032693626394382504", "👤")
         e_id   = _tg_emoji("5927118708873892465", "🆔")
         e_log  = _tg_emoji("6030400221232501136", "📋")
@@ -2187,7 +2186,7 @@ def build_sub_router(app: "App", subs: Subscriptions, is_manager: Callable[[int 
             sub_line = f"<b>{e_sub} Подписка: неактивна</b>"
         text = (f"<b>{e_prof} Профиль</b>\n\n"
                 f"<b>{e_id} id:</b> <code>{uid}</code>\n\n"
-                f"<b>{e_log} Логи:</b>\n<b>{logs}</b>\n\n"
+                f"<b>{e_log} Логи:</b> <b>{taken_n}</b>\n\n"
                 f"{sub_line}")
         kb = InlineKeyboardMarkup(inline_keyboard=[
             [btn("Подписка", "success", "6037175527846975726", callback_data="sub:menu")],

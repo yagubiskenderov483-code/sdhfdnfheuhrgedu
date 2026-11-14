@@ -128,17 +128,21 @@ def offer_message(l: Listing, amount: tuple[int, str] | None = None) -> str | No
     • не задан → обычное сообщение продавцу «Здравствуйте! Готов забрать <ссылка> за N ⭐».
     Раньше без торгового бота оффер не собирался вообще, и '/<id> оффер' ничего не менял.
     amount — своя цена от админа (/фа @юз оффер 1500), иначе — скидка по шкале _trade_offer."""
-    if not l.gift_link:
+    # ссылка-референс лота: прямая ссылка → из slug → по имени. Раньше без gift_link
+    # оффер не собирался вовсе, из-за чего у части лотов кнопка была «Написать»,
+    # а у части «Написать с оффером» — отсюда рассинхрон. Теперь референс есть всегда.
+    ref = l.gift_link or (f"t.me/nft/{l.gift_slug}" if l.gift_slug else None) or l.gift_name
+    if not ref:
         return None
     offer = amount or _trade_offer(l)
     trade_bot = (getattr(settings, "trade_bot_username", "") or "").lstrip("@")
     if trade_bot:
         tail = f" {offer[0]} {offer[1]}".rstrip() if offer else ""
-        return f"@{trade_bot} {l.gift_link}{tail}"
+        return f"@{trade_bot} {ref}{tail}"
     if not offer:
-        return f"Здравствуйте! Интересует {l.gift_link} — готов купить. Какая финальная цена?"
+        return f"Здравствуйте! Интересует {ref} — готов купить. Какая финальная цена?"
     unit = f"{settings.ton_label}" if offer[1] == "g" else "⭐"
-    return f"Здравствуйте! Готов забрать {l.gift_link} за {_n(offer[0])} {unit}"
+    return f"Здравствуйте! Готов забрать {ref} за {_n(offer[0])} {unit}"
 
 
 def listing_keyboard(l: Listing, with_seller: bool = True, with_offer: bool = False,
