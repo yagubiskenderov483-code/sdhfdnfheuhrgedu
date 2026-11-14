@@ -1062,6 +1062,12 @@ def build_routers(app: "App") -> list[Router]:
         ]
         owners = {r.name: r.owner_id for r in app.storage.list_sessions()}
         shards = app.coordinator.shard_counts()
+        try:
+            reserved = app.sessions.reserved()        # аккаунты под funstat (резерв/LOOKUP_SESSIONS)
+        except Exception:
+            reserved = set()
+        lines.append(f"🟢 — под funstat ({len(reserved)}) · ⚪ — трекинг маркета")
+        lines.append("")
         rows = []
         icons = {"ACTIVE": "", "FLOOD_WAIT": "⏳", "CONNECTING": ""}
         for name, w in sorted(app.sessions.workers.items())[:95]:
@@ -1071,14 +1077,16 @@ def build_routers(app: "App") -> list[Router]:
             health = ("" if risk == "ok" else
                       (" риск, замедлен" if risk == "warn" else " высокий риск, сильно замедлен")
                       + f" x{speed:.2f}")
-            line = (f"{icons.get(w.status.value, '')} <b>{html.escape(name)}</b> — {w.status.value}"
+            _m = "🟢" if name in reserved else "⚪"
+            line = (f"{_m}{icons.get(w.status.value, '')} <b>{html.escape(name)}</b> — {w.status.value}"
                     + (f" {ping:.0f}ms" if ping is not None else "")
                     + f", коллекций: {shards.get(name, 0)}{health}")
             if w.status.value not in ("ACTIVE", "CONNECTING"):
                 line += f"\n    Reason: {html.escape((w.reason or '—')[:120])}"
             lines.append(line)
             if can_manage(uid, owners.get(name)) and len(f"rmsess_ok:{name}".encode()) <= 64:
-                btn = InlineKeyboardButton(text=f"{name}", callback_data=f"rmsess:{name}")
+                mark = "🟢" if name in reserved else "⚪"   # зелёный = funstat, белый = трекинг маркета
+                btn = InlineKeyboardButton(text=f"{mark} {name}", callback_data=f"rmsess:{name}")
                 if rows and len(rows[-1]) < 3:
                     rows[-1].append(btn)
                 else:

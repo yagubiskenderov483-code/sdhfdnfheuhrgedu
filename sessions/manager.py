@@ -168,7 +168,8 @@ class SessionManager:
         n = int(getattr(settings, "lookup_reserve", 0) or 0)
         if n > 0 and settings.auto_lookup and settings.lookup_bot_username:
             usable = [w for w in self.workers.values() if w.is_usable()]
-            if len(usable) >= 20:                        # только если аккаунтов с запасом — трекинг не встанет
+            if len(usable) >= 12:                       # только если аккаунтов с запасом — трекинг не встанет
+                n = min(n, max(1, len(usable) // 3))     # под funstat не больше трети живых — трекинг не голодает
                 picked = sorted(usable, key=lambda w: w.name)[:n]   # стабильный набор (по имени)
                 return {w.name for w in picked}
         return set()
