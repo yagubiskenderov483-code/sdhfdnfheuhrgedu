@@ -157,13 +157,21 @@ class SessionManager:
     def reserved(self) -> set[str]:
         """Аккаунты, выделенные только под бота поиска (LOOKUP_SESSIONS + LOOKUP_DEDICATED).
         Если выделены вообще все рабочие аккаунты — резерв не действует, иначе трекер встанет."""
-        if not (settings.lookup_dedicated and settings.auto_lookup and settings.lookup_bot_username
+        if (settings.lookup_dedicated and settings.auto_lookup and settings.lookup_bot_username
                 and settings.lookup_sessions):
-            return set()
-        names = set(settings.lookup_sessions)
-        if all(w.name in names for w in self.workers.values() if w.is_usable()):
-            return set()
-        return names
+            names = set(settings.lookup_sessions)
+            if all(w.name in names for w in self.workers.values() if w.is_usable()):
+                return set()
+            return names
+        # АВТО-резерв: LOOKUP_SESSIONS не заданы вручную — держим N здоровых аккаунтов только под funstat,
+        # чтобы FloodWait от трекинга не отбирал у lookup все сессии («половина ботов не кидает запросы»).
+        n = int(getattr(settings, "lookup_reserve", 0) or 0)
+        if n > 0 and settings.auto_lookup and settings.lookup_bot_username:
+            usable = [w for w in self.workers.values() if w.is_usable()]
+            if len(usable) >= 20:                        # только если аккаунтов с запасом — трекинг не встанет
+                picked = sorted(usable, key=lambda w: w.name)[:n]   # стабильный набор (по имени)
+                return {w.name for w in picked}
+        return set()
 
     def usable(self, include_reserved: bool = False) -> list[SessionWorker]:
         res = set() if include_reserved else self.reserved()

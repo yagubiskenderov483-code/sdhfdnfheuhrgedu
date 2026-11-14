@@ -305,6 +305,9 @@ class Settings:
     lookup_lang_filter: bool = False          # найденного ботом поиска владельца проверять и по языку профиля
     lookup_required: bool = True              # скрытый владелец не найден ботом поиска → лот не слать
     lookup_dedicated: bool = True             # аккаунты поиска НЕ опрашивают маркет — только пишут боту
+    lookup_reserve: int = 6                    # АВТО-резерв: держать N здоровых аккаунтов ТОЛЬКО под funstat
+                                              # (если LOOKUP_SESSIONS не заданы вручную) — чтобы трекинг-FloodWait
+                                              # не отбирал все сессии у lookup. 0 = выкл. Включается при ≥20 здоровых
     lookup_interval: float = 1.5              # ускорено (было 3.0): пауза между запросами к боту поиска с одного аккаунта
     lookup_captcha_wait: float = 90.0         # ускорено: ждём капчу авто-солвером/админом (было 600)
     lookup_timeout: float = 15.0              # ускорено (было 25): сколько секунд ждать ответа бота поиска
@@ -496,6 +499,7 @@ RUNTIME_KEYS: dict[str, tuple[str, Callable[[str], Any]]] = {
     "AUTO_LOOKUP": ("auto_lookup", _bool_strict),
     "LOOKUP_SESSIONS": ("lookup_sessions", lambda v: [] if v.strip() in ("", "-") else _str_list(v)),
     "LOOKUP_DEDICATED": ("lookup_dedicated", _bool_strict),
+    "LOOKUP_RESERVE": ("lookup_reserve", lambda v: max(0, int(v))),
     "LOOKUP_REQUIRED": ("lookup_required", _bool_strict),
     "REQUIRE_USERNAME": ("require_username", _bool_strict),
     "ONLY_WITH_USERNAME": ("only_with_username", _bool_strict),
@@ -605,6 +609,7 @@ def _from_env() -> Settings:
         auto_lookup=_bool(e("AUTO_LOOKUP"), True),
         lookup_sessions=_str_list(e("LOOKUP_SESSIONS") or e("LOOKUP_SESSION") or ""),
         lookup_dedicated=_bool(e("LOOKUP_DEDICATED"), True),
+        lookup_reserve=max(0, _int(e("LOOKUP_RESERVE"), 6)),
         lookup_required=_bool(e("LOOKUP_REQUIRED"), True),
         require_username=_bool(e("REQUIRE_USERNAME"), True),
         only_with_username=_bool(e("ONLY_WITH_USERNAME"), True),
