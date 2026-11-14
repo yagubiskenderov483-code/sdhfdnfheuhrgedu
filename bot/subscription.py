@@ -259,6 +259,16 @@ class Subscriptions:
                 if cur is None or not isinstance(v, dict):
                     self.state["users"].setdefault(key, v)
                     continue
+                # Реф-программа переживает деплой: реф/партнёр-поля НЕ теряем при мердже —
+                # счётчики берём по максимуму, флаги/привязку — если своего нет (у бэкапа есть).
+                for cf in ("ref_count", "ref_paid", "ref_revenue_nano"):
+                    if v.get(cf):
+                        cur[cf] = max(int(cur.get(cf) or 0), int(v.get(cf) or 0))
+                if v.get("ref_bonus"):
+                    cur["ref_bonus"] = max(float(cur.get("ref_bonus") or 0), float(v.get("ref_bonus") or 0))
+                for ff in ("ref_by", "partner", "partner_name", "promo", "promos_used"):
+                    if not cur.get(ff) and v.get(ff):
+                        cur[ff] = v[ff]
                 if not cur.pop("tmp", False):
                     continue                  # своя запись свежее копии — она и верна
                 # запись уже есть (например, создана, пока копия не читалась) — не теряем оплаченное время
